@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    container_name: amsl-broker
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: "4000"
+      DB_PATH: /app/data/amsl.db
+    volumes:
+      - amsl-data:/app/data   # persists the SQLite database across restarts
+    restart: unless-stopped
+
+volumes:
+  amsl-data:

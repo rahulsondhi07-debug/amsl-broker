@@ -1,0 +1,28 @@
+# Render Blueprint — deploys the AMSL Broker app as a single web service.
+# The backend builds + serves the React UI and the API together on Render's $PORT.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: amsl-broker
+    runtime: node
+    plan: free                       # upgrade to "starter" if you want a persistent disk (see below)
+    buildCommand: npm install && npm run build
+    startCommand: npm --workspace amsl-backend start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.12.0"
+      # SQLite location. On the FREE plan the filesystem is ephemeral, so the DB
+      # re-seeds automatically on every deploy/restart — fine for a demo.
+      #
+      # For PERSISTENT data, upgrade this service to a paid instance (e.g. "starter"),
+      # then uncomment the disk block below AND this DB_PATH so the database lives on the disk:
+      # - key: DB_PATH
+      #   value: /var/data/amsl.db
+
+    # Persistent storage (paid instance types only — not available on the free plan):
+    # disk:
+    #   name: amsl-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

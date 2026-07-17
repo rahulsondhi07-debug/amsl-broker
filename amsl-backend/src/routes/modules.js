@@ -1,0 +1,217 @@
+import { Router } from "express";
+import { db } from "../db.js";
+import { crudRouter } from "../crud.js";
+
+/* ---- Agencies (with agent counts, like the UI) ---- */
+export const agencies = crudRouter({
+  table: "agencies",
+  columns: ["name", "logo", "status"],
+  searchColumns: ["name"],
+  listSql: `SELECT a.*, (SELECT COUNT(*) FROM agents ag WHERE ag.agency_id = a.id) AS total_agents
+            FROM agencies a`,
+});
+
+/* ---- Agents (never expose password_hash) ---- */
+export const agents = crudRouter({
+  table: "agents",
+  columns: ["name", "agency_id", "email", "role", "status", "aircall_enabled"],
+  searchColumns: ["name", "email"],
+  listSql: `SELECT ag.id, ag.name, ag.agency_id, a.name AS agency_name, ag.email, ag.role,
+                   ag.status, ag.aircall_enabled, ag.created_at
+            FROM agents ag LEFT JOIN agencies a ON a.id = ag.agency_id`,
+});
+
+/* ---- Suppliers ---- */
+export const suppliers = crudRouter({
+  table: "suppliers",
+  columns: ["name", "logo", "max_broker_comm_electric", "broker_comm_inc_electric",
+            "max_broker_comm_gas", "broker_comm_inc_gas", "status"],
+  searchColumns: ["name"],
+});
+
+/* ---- Products (+ supplier name, + price matrix child) ---- */
+export const products = (() => {
+  const r = crudRouter({
+    table: "products",
+    columns: ["name", "supplier_id", "utility", "segment", "acq_renewal", "valid_from", "valid_till", "status"],
+    searchColumns: ["name"],
+    listSql: `SELECT p.*, s.name AS supplier_name
+              FROM products p LEFT JOIN suppliers s ON s.id = p.supplier_id`,
+  });
+  // nested price matrix
+  r.get("/:id/price-matrix", (req, res) => {
+    res.json({ data: db.prepare("SELECT * FROM price_matrix WHERE product_id = ?").all(req.params.id) });
+  });
+  r.post("/:id/price-matrix", (req, res) => {
+    const b = req.body;
+    const info = db.prepare(
+      `INSERT INTO price_matrix (product_id,min_consumption,max_consumption,term_months,unit_rate,standing_charge,commission)
+       VALUES (?,?,?,?,?,?,?)`
+    ).run(req.params.id, b.min_consumption, b.max_consumption, b.term_months, b.unit_rate, b.standing_charge, b.commission);
+    res.status(201).json({ data: db.prepare("SELECT * FROM price_matrix WHERE id = ?").get(info.lastInsertRowid) });
+  });
+  return r;
+})();
+
+/* ---- Businesses helper (leads / customers share a table via ?stage) ---- */
+function businessRouter(stage) {
+  const r = Router();
+  const base = `
+    SELECT b.*, ag.name AS agency_name, a.name AS agent_name,
+      (SELECT COUNT(*) FROM sites s WHERE s.business_id = b.id) AS sites,
+      (SELECT COUNT(*) FROM meters m WHERE m.business_id=b.id AND m.utility='GAS'  AND m.status='C') AS gas_c,
+      (SELECT COUNT(*) FROM meters m WHERE m.business_id=b.id AND m.utility='GAS'  AND m.status='S') AS gas_s,
+      (SELECT COUNT(*) FROM meters m WHERE m.business_id=b.id AND m.utility='GAS'  AND m.status='D') AS gas_d,
+      (SELECT COUNT(*) FROM meters m WHERE m.business_id=b.id AND m.utility='ELEC' AND m.status='C') AS elec_c,
+      (SELECT COUNT(*) FROM meters m WHERE m.business_id=b.id AND m.utility='ELEC' AND m.status='S') AS elec_s,
+      (SELECT COUNT(*) FROM meters m WHERE m.business_id=b.id AND m.utility='ELEC' AND m.status='D') AS elec_d
+    FROM businesses b
+    LEFT JOIN agencies ag ON ag.id = b.agency_id
+    LEFT JOIN agents a ON a.id = b.agent_id
+    WHERE b.stage = '${stage}'`;
+
+  r.get("/", (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(200, parseInt(req.query.limit) || 10);
+    const total = db.prepare(`SELECT COUNT(*) c FROM businesses WHERE stage=?`).get(stage).c;
+    const rows = db.prepare(`${base} ORDER BY b.created_at DESC, b.id DESC LIMIT ? OFFSET ?`)
+      .all(limit, (page - 1) * limit);
+    res.json({ data: rows, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
+  });
+
+  r.get("/:id", (req, res) => {
+    const row = db.prepare(`${base} AND b.id = ?`).get(req.params.id);
+    if (!row) return res.status(404).json({ error: "not found" });
+    row.meters = db.prepare("SELECT * FROM meters WHERE business_id = ?").all(req.params.id);
+    row.sites_list = db.prepare("SELECT * FROM sites WHERE business_id = ?").all(req.params.id);
+    res.json({ data: row });
+  });
+
+  r.post("/", (req, res) => {
+    const b = req.body;
+    const ref = b.ref || Math.random().toString(16).slice(2, 10);
+    const info = db.prepare(
+      `INSERT INTO businesses (ref,business_name,contact_name,contact_email,contact_mobile,agency_id,agent_id,stage)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).run(ref, b.business_name, b.contact_name, b.contact_email, b.contact_mobile, b.agency_id, b.agent_id, stage);
+    res.status(201).json({ data: db.prepare("SELECT * FROM businesses WHERE id = ?").get(info.lastInsertRowid) });
+  });
+
+  const upd = (req, res) => {
+    const cols = ["business_name","contact_name","contact_email","contact_mobile","agency_id","agent_id","stage"]
+      .filter((c) => req.body[c] !== undefined);
+    if (!cols.length) return res.status(400).json({ error: "No valid fields" });
+    const info = db.prepare(`UPDATE businesses SET ${cols.map(c=>`${c}=?`).join(",")} WHERE id=?`)
+      .run(...cols.map(c=>req.body[c]), req.params.id);
+    if (!info.changes) return res.status(404).json({ error: "not found" });
+    res.json({ data: db.prepare("SELECT * FROM businesses WHERE id=?").get(req.params.id) });
+  };
+  r.put("/:id", upd); r.patch("/:id", upd);
+
+  // convert lead -> customer
+  r.post("/:id/convert", (req, res) => {
+    const info = db.prepare("UPDATE businesses SET stage='CUSTOMER' WHERE id=? AND stage!='CUSTOMER'").run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: "not found or already a customer" });
+    res.json({ data: db.prepare("SELECT * FROM businesses WHERE id=?").get(req.params.id) });
+  });
+
+  r.delete("/:id", (req, res) => {
+    const info = db.prepare("DELETE FROM businesses WHERE id=? AND stage=?").run(req.params.id, stage);
+    if (!info.changes) return res.status(404).json({ error: "not found" });
+    res.json({ data: { id: Number(req.params.id), deleted: true } });
+  });
+  return r;
+}
+export const leads = businessRouter("LEAD");
+export const customers = businessRouter("CUSTOMER");
+
+/* ---- Quotes ---- */
+export const quotes = crudRouter({
+  table: "quotes",
+  columns: ["quote_no","business_id","business_name","agent_id","utility","meter_number","eac","start_date",
+            "supplier_id","term_months","unit_rate","standing_charge","annual_cost","commission","status"],
+  searchColumns: ["quote_no","business_name","meter_number"],
+  listSql: `SELECT q.*, a.name AS broker, s.name AS supplier_name
+            FROM quotes q LEFT JOIN agents a ON a.id = q.agent_id
+            LEFT JOIN suppliers s ON s.id = q.supplier_id`,
+});
+
+/* ---- Contracts (with supplier/agency/agent names + filters) ---- */
+export const contracts = (() => {
+  const base = `SELECT c.*, s.name AS supplier_name, ag.name AS agency_name, a.name AS agent_name
+                FROM contracts c
+                LEFT JOIN suppliers s ON s.id = c.supplier_id
+                LEFT JOIN agencies ag ON ag.id = c.agency_id
+                LEFT JOIN agents a ON a.id = c.agent_id`;
+  const r = crudRouter({
+    table: "contracts",
+    columns: ["contract_no","business_id","business_name","supplier_id","agency_id","agent_id",
+              "term_months","meter_mpan_mpr","utility","segment","consumption","commission_value","status"],
+    searchColumns: ["contract_no","business_name","meter_mpan_mpr"],
+    listSql: base,
+  });
+  return r;
+})();
+
+/* ---- Supplier payments ---- */
+export const supplierPayments = crudRouter({
+  table: "supplier_payments",
+  columns: ["supplier_id","file_name","uploaded_by"],
+  listSql: `SELECT sp.*, s.name AS supplier_name
+            FROM supplier_payments sp LEFT JOIN suppliers s ON s.id = sp.supplier_id`,
+});
+
+/* ---- Tickets ---- */
+export const tickets = crudRouter({
+  table: "tickets",
+  columns: ["business_name","business_id","agency_id","agent_id","utility","query_type","query_name","status","attachment"],
+  searchColumns: ["business_name","query_name"],
+  listSql: `SELECT t.*, ag.name AS agency_name, a.name AS agent_name
+            FROM tickets t LEFT JOIN agencies ag ON ag.id=t.agency_id LEFT JOIN agents a ON a.id=t.agent_id`,
+});
+
+/* ---- Tariffs (power the comparison; editable in-app) ---- */
+export const tariffs = (() => {
+  const r = Router();
+  const cols = ["supplier_id","utility","term_months","unit_rate","standing_charge","status"];
+
+  r.get("/", (req, res) => {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(500, parseInt(req.query.limit) || 20);
+    const where = [];
+    const params = [];
+    if (req.query.utility) { where.push("UPPER(t.utility) = ?"); params.push(String(req.query.utility).toUpperCase()); }
+    if (req.query.supplier_id) { where.push("t.supplier_id = ?"); params.push(Number(req.query.supplier_id)); }
+    if (req.query.term_months) { where.push("t.term_months = ?"); params.push(Number(req.query.term_months)); }
+    if (req.query.q) { where.push("s.name LIKE ?"); params.push(`%${req.query.q}%`); }
+    const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const from = `FROM tariffs t JOIN suppliers s ON s.id = t.supplier_id ${w}`;
+    const total = db.prepare(`SELECT COUNT(*) c ${from}`).get(...params).c;
+    const rows = db.prepare(
+      `SELECT t.*, s.name AS supplier_name ${from} ORDER BY s.name, t.utility, t.term_months LIMIT ? OFFSET ?`
+    ).all(...params, limit, (page - 1) * limit);
+    res.json({ data: rows, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
+  });
+
+  r.post("/", (req, res) => {
+    const c = cols.filter((k) => req.body[k] !== undefined);
+    if (!c.length) return res.status(400).json({ error: "No valid fields" });
+    const info = db.prepare(`INSERT INTO tariffs (${c.join(",")}) VALUES (${c.map(() => "?").join(",")})`).run(...c.map((k) => req.body[k]));
+    res.status(201).json({ data: db.prepare("SELECT * FROM tariffs WHERE id=?").get(info.lastInsertRowid) });
+  });
+
+  const upd = (req, res) => {
+    const c = cols.filter((k) => req.body[k] !== undefined);
+    if (!c.length) return res.status(400).json({ error: "No valid fields" });
+    const info = db.prepare(`UPDATE tariffs SET ${c.map((k) => `${k}=?`).join(",")} WHERE id=?`).run(...c.map((k) => req.body[k]), req.params.id);
+    if (!info.changes) return res.status(404).json({ error: "not found" });
+    res.json({ data: db.prepare("SELECT * FROM tariffs WHERE id=?").get(req.params.id) });
+  };
+  r.put("/:id", upd); r.patch("/:id", upd);
+  r.delete("/:id", (req, res) => {
+    const info = db.prepare("DELETE FROM tariffs WHERE id=?").run(req.params.id);
+    if (!info.changes) return res.status(404).json({ error: "not found" });
+    res.json({ data: { id: Number(req.params.id), deleted: true } });
+  });
+  return r;
+})();

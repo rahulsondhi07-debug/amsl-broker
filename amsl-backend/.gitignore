@@ -1,0 +1,5 @@
+node_modules/
+amsl.db
+amsl.db-wal
+amsl.db-shm
+*.log
