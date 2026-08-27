@@ -110,3 +110,46 @@ export function clawback(recordId, reason) {
     .run(recordId, "clawback", -round(outstanding), reason || "Contract cancelled / failed switch");
   return { recordId, clawedBack: round(outstanding) };
 }
+
+/* V1.3 Supplier statement import + auto-matching.
+   lines: [{ contract_no, amount, period }]. Matches each against the commission
+   record for that contract; within £1 tolerance = Matched (schedule marked Paid),
+   otherwise an Exception is recorded for manual review. */
+export function importStatement(supplierId, filename, lines) {
+  const st = db.prepare("INSERT INTO commission_statements (supplier_id,filename,lines) VALUES (?,?,?)")
+    .run(supplierId || null, filename || "statement", lines.length);
+  const stId = st.lastInsertRowid;
+  const insLine = db.prepare(
+    `INSERT INTO statement_lines (statement_id,contract_no,amount,period,record_id,expected,variance,status)
+     VALUES (?,?,?,?,?,?,?,?)`
+  );
+  let matched = 0, exceptions = 0;
+  const tx = db.transaction(() => {
+    for (const ln of lines) {
+      const cn = String(ln.contract_no || "").trim();
+      const amount = Number(ln.amount) || 0;
+      const rec = db.prepare(
+        `SELECT cr.id, cr.gross FROM commission_records cr
+         JOIN contracts ct ON ct.id = cr.contract_id WHERE ct.contract_no = ?`
+      ).get(cn);
+      const expected = rec ? rec.gross : null;
+      const variance = expected == null ? null : Math.round((amount - expected) * 100) / 100;
+      const ok = rec && Math.abs(variance) <= 1;
+      const status = !rec ? "Exception" : ok ? "Matched" : "Exception";
+      insLine.run(stId, cn, amount, ln.period || null, rec ? rec.id : null, expected, variance, status);
+      if (ok) {
+        matched++;
+        // mark the earliest unpaid schedule row as Paid + ledger
+        const sch = db.prepare("SELECT id FROM commission_schedule WHERE record_id=? AND status!='Paid' ORDER BY seq LIMIT 1").get(rec.id);
+        if (sch) db.prepare("UPDATE commission_schedule SET status='Paid' WHERE id=?").run(sch.id);
+        db.prepare("INSERT INTO commission_ledger (record_id,type,amount,note) VALUES (?,?,?,?)")
+          .run(rec.id, "payment", amount, `Statement payment matched (${cn})`);
+      } else {
+        exceptions++;
+      }
+    }
+    db.prepare("UPDATE commission_statements SET matched=?, exceptions=? WHERE id=?").run(matched, exceptions, stId);
+  });
+  tx();
+  return { statement_id: stId, lines: lines.length, matched, exceptions };
+}

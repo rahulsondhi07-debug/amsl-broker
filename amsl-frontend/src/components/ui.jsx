@@ -46,10 +46,10 @@ export function ErrorBanner({ error, onRetry }) {
   );
 }
 
-export function Modal({ title, onClose, children, footer }) {
+export function Modal({ title, onClose, children, footer, wide }) {
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={wide ? { maxWidth: 720, width: "92vw" } : undefined}>
         <div className="m-head">
           <h3 style={{ fontSize: 16 }}>{title}</h3>
           <button className="btn ghost" onClick={onClose}><X size={18} /></button>

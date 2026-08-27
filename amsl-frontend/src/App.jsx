@@ -11,6 +11,12 @@ import Permissions from "./pages/Permissions.jsx";
 import Master from "./pages/Master.jsx";
 import CustomerDetail from "./pages/CustomerDetail.jsx";
 import Branding from "./pages/Branding.jsx";
+import AgencyDetail from "./pages/AgencyDetail.jsx";
+import AgentDetail from "./pages/AgentDetail.jsx";
+import SupplierDetail from "./pages/SupplierDetail.jsx";
+import GenerateContract from "./pages/GenerateContract.jsx";
+import QuoteDetail from "./pages/QuoteDetail.jsx";
+import ContractDetail from "./pages/ContractDetail.jsx";
 import Tutorials from "./pages/Tutorials.jsx";
 import Settings from "./pages/Settings.jsx";
 import Commission from "./pages/Commission.jsx";
@@ -42,13 +48,17 @@ export default function App() {
             <Route element={<Layout />}>
               <Route index element={<Dashboard />} />
               <Route path="agencies" element={<Agencies />} />
+              <Route path="agencies/:id" element={<AgencyDetail />} />
               <Route path="agents" element={<Agents />} />
+              <Route path="agents/:id" element={<AgentDetail />} />
               <Route path="suppliers" element={<Suppliers />} />
+              <Route path="suppliers/:id" element={<SupplierDetail />} />
               <Route path="tariffs" element={<Tariffs />} />
               <Route path="supplier-payments" element={<SupplierPayments />} />
               <Route path="products" element={<Products />} />
               <Route path="leads" element={<Leads />} />
               <Route path="quotes" element={<Quotes />} />
+              <Route path="quotes/:id" element={<QuoteDetail />} />
               <Route path="quotes/new" element={<NewQuote />} />
               <Route path="customers" element={<Customers />} />
               <Route path="customers/:id" element={<CustomerDetail />} />
@@ -61,6 +71,9 @@ export default function App() {
               <Route path="settings" element={<Settings />} />
               <Route path="commission" element={<Commission />} />
               <Route path="contracts" element={<Contracts />} />
+              <Route path="contracts/:id" element={<ContractDetail />} />
+              <Route path="contracts/generate" element={<GenerateContract />} />
+              <Route path="contracts/generate/:quoteId" element={<GenerateContract />} />
               <Route path="tickets" element={<Tickets />} />
               <Route path="*" element={<Dashboard />} />
             </Route>

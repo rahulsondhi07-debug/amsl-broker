@@ -5,8 +5,8 @@ import { crudRouter } from "../crud.js";
 /* ---- Agencies (with agent counts, like the UI) ---- */
 export const agencies = crudRouter({
   table: "agencies",
-  columns: ["name", "logo", "status"],
-  searchColumns: ["name"],
+  columns: ["name", "logo", "status", "email", "phone", "website", "max_users", "company_reg_no", "business_structure", "vat_no", "address", "white_label"],
+  searchColumns: ["name", "email", "company_reg_no"],
   listSql: `SELECT a.*, (SELECT COUNT(*) FROM agents ag WHERE ag.agency_id = a.id) AS total_agents
             FROM agencies a`,
 });
@@ -14,10 +14,18 @@ export const agencies = crudRouter({
 /* ---- Agents (never expose password_hash) ---- */
 export const agents = crudRouter({
   table: "agents",
-  columns: ["name", "agency_id", "email", "role", "status", "aircall_enabled"],
+  columns: ["name", "agency_id", "email", "role", "status", "aircall_enabled",
+            "first_name", "last_name", "trading_name", "principal_name", "business_structure",
+            "trading_account_no", "vat_number", "agency_split", "agent_split", "telephone", "mobile",
+            "office_website", "address_line1", "address_line2", "city", "county", "postcode",
+            "bank_name", "account_name", "sort_code", "account_no", "training_status", "notes"],
   searchColumns: ["name", "email"],
-  listSql: `SELECT ag.id, ag.name, ag.agency_id, a.name AS agency_name, ag.email, ag.role,
-                   ag.status, ag.aircall_enabled, ag.created_at
+  listSql: `SELECT ag.id, ag.name, ag.agency_id, a.name AS agency_name, ag.email, ag.role, ag.status,
+                   ag.aircall_enabled, ag.first_name, ag.last_name, ag.trading_name, ag.principal_name,
+                   ag.business_structure, ag.trading_account_no, ag.vat_number, ag.agency_split, ag.agent_split,
+                   ag.telephone, ag.mobile, ag.office_website, ag.address_line1, ag.address_line2, ag.city,
+                   ag.county, ag.postcode, ag.bank_name, ag.account_name, ag.sort_code, ag.account_no,
+                   ag.training_status, ag.notes, ag.created_at
             FROM agents ag LEFT JOIN agencies a ON a.id = ag.agency_id`,
 });
 
@@ -25,15 +33,38 @@ export const agents = crudRouter({
 export const suppliers = crudRouter({
   table: "suppliers",
   columns: ["name", "logo", "max_broker_comm_electric", "broker_comm_inc_electric",
-            "max_broker_comm_gas", "broker_comm_inc_gas", "status"],
-  searchColumns: ["name"],
+            "max_broker_comm_gas", "broker_comm_inc_gas", "status",
+            "supplier_role", "tpi_role", "fuel_mix", "contract_condition", "credit_check",
+            "commission_payment", "customer_billing", "supplier_contact", "supplier_address",
+            "restricted_business_types", "about",
+            "sme_email", "sme_mobile", "sme_landline", "sme_password", "sme_threshold", "corporate_login_email",
+            "mm_name", "mm_email", "mm_password", "mm_mobile", "mm_landline", "mm_threshold",
+            "ind_name", "ind_email", "ind_password", "ind_mobile", "ind_landline", "ind_threshold"],
+  searchColumns: ["name", "supplier_role"],
+  listSql: `SELECT id, name, logo, status, supplier_role, tpi_role, fuel_mix,
+                   max_broker_comm_electric, max_broker_comm_gas, sme_threshold, mm_threshold, ind_threshold,
+                   contract_condition, credit_check, commission_payment, customer_billing, created_at
+            FROM suppliers`,
+  detailSql: `SELECT * FROM suppliers`,
+  // detail masks stored TPI portal passwords (returns has_* booleans instead of the value)
+  detailTransform: (row) => {
+    if (!row) return row;
+    for (const k of ["sme_password", "mm_password", "ind_password"]) {
+      row[`${k.replace("_password", "")}_has_password`] = !!row[k];
+      delete row[k];
+    }
+    return row;
+  },
 });
 
 /* ---- Products (+ supplier name, + price matrix child) ---- */
 export const products = (() => {
   const r = crudRouter({
     table: "products",
-    columns: ["name", "supplier_id", "utility", "segment", "acq_renewal", "valid_from", "valid_till", "status"],
+    columns: ["name", "supplier_id", "utility", "segment", "acq_renewal", "valid_from", "valid_till", "status",
+              "standing_charge_type", "fuel_mix", "max_commission", "commission_increment", "commission_banded",
+              "standing_charge", "payment_method", "payment_mode", "initial", "final", "dd_discount",
+              "price_book_status", "min_start_days", "min_start_date", "max_start_date", "product_type"],
     searchColumns: ["name"],
     listSql: `SELECT p.*, s.name AS supplier_name
               FROM products p LEFT JOIN suppliers s ON s.id = p.supplier_id`,
@@ -193,7 +224,15 @@ export const contracts = (() => {
   const r = crudRouter({
     table: "contracts",
     columns: ["contract_no","business_id","business_name","supplier_id","agency_id","agent_id",
-              "term_months","meter_mpan_mpr","utility","segment","consumption","commission_value","status"],
+              "term_months","meter_mpan_mpr","utility","segment","consumption","commission_value","status",
+              "quote_id","company_reg","business_structure","business_type","trading_from",
+              "title","first_name","last_name","address_line1","address_line2","town","postcode","telephone","mobile","email",
+              "billing_same","billing_title","billing_first_name","billing_last_name","billing_address1","billing_address2",
+              "billing_town","billing_postcode","billing_telephone","billing_mobile","billing_email",
+              "meter_serial","current_read","requested_start",
+              "product_name","tariff_name","acq_renewal","tariff_type","supplier_start","tariff_end","supplier_end","fixed_price_term",
+              "standing_charge","day_rate","night_rate","ewe_rate","kva_charge","broker_commission",
+              "payment_method","payment_amount","billing_period"],
     searchColumns: ["contract_no","business_name","meter_mpan_mpr"],
     listSql: base,
   });
@@ -211,7 +250,7 @@ export const supplierPayments = crudRouter({
 /* ---- Tickets ---- */
 export const tickets = crudRouter({
   table: "tickets",
-  columns: ["business_name","business_id","agency_id","agent_id","utility","query_type","query_name","status","attachment"],
+  columns: ["business_name","business_id","agency_id","agent_id","utility","query_type","query_name","status","attachment","corporate_sme","description"],
   searchColumns: ["business_name","query_name"],
   listSql: `SELECT t.*, ag.name AS agency_name, a.name AS agent_name
             FROM tickets t LEFT JOIN agencies ag ON ag.id=t.agency_id LEFT JOIN agents a ON a.id=t.agent_id`,

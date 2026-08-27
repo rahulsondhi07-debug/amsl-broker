@@ -109,3 +109,96 @@ COMMISSION ENGINE (V1.3 core) — added:
   Commission page rebuilt: Records (splits+schedule, reconcile/clawback), By Agent, Ledger.
   New: amsl-backend/src/commissionEngine.js, routes/commission.js; db.js (5 commission tables); server.js.
   Note: statement import + supplier-statement matching remain a future add (need real statement files).
+
+COMMISSION — Supplier statement import & matching (V1.3 final piece) — added:
+  commission_statements + statement_lines tables; POST /api/commission/statements/import ({supplier_id,filename,lines:[{contract_no,amount,period}]}),
+  GET /api/commission/statements. Auto-matches each line to the contract's commission record:
+  within £1 = Matched (marks a schedule row Paid + ledger 'payment'), else Exception (variance flagged).
+  Commission page: new "Statements" tab — paste contract_no,amount,period -> Import & match -> matched/exceptions + history.
+  Changed/new: amsl-backend/src/db.js, commissionEngine.js, routes/commission.js; amsl-frontend/src/pages/Commission.jsx, api.js
+
+ADD AGENCY — full form (matches production crm.amslgroup.co.uk/agency/add):
+  agencies table extended: email, phone, website, max_users, company_reg_no, business_structure, vat_no, address, white_label.
+  Agencies page rebuilt with an "Add Agency" button + modal form (Name*, Email, Phone, Website, Max Users,
+  Company Reg No, Business Structure dropdown, VAT No, Address, White Label toggle, Status). List shows contact/structure/white-label.
+  Changed: amsl-backend/src/db.js, routes/modules.js; amsl-frontend/src/pages/Agencies.jsx
+
+VIEW AGENCY + ADD AGENT (match production):
+  agents table extended with first/last name, trading/principal name, business_structure, trading_account_no,
+    vat_number, agency_split, agent_split, telephone, mobile, office_website, address (line1/2/city/county/postcode),
+    banking (bank_name/account_name/sort_code/account_no), training_status, notes. agencies get a uid (AG-xx).
+  Agents page rebuilt: "Add Agent" grouped form (Agent Details, Login, Identity & Splits [100% validation],
+    Contact, Address, Banking, Training & Compliance). password_hash never returned by the list.
+  New View Agency page (/agencies/:id): header + Unique ID/Structure/Max Users/Current Users metrics,
+    Contact & Registration info, Authorized Agents list. "View" (eye) action added to the Agencies list.
+  Changed/new: amsl-backend/src/db.js, routes/modules.js; amsl-frontend/src/pages/Agents.jsx (rebuilt),
+    pages/AgencyDetail.jsx (new), pages/Agencies.jsx, components/ui.jsx (Modal wide), App.jsx
+
+VIEW AGENT (tabbed detail):
+  New /agents/:id page — tabs: Profile & Role, Contact & Address, Banking, Compliance & Notes.
+  "View" (eye) action added to Agents list; "Add Agent" button added to the agency view's Authorized Agents card.
+  Agent detail reads from the safe agents list (password_hash never exposed).
+  Changed/new: amsl-frontend/src/pages/AgentDetail.jsx (new), pages/Agents.jsx, pages/AgencyDetail.jsx, App.jsx
+
+ADD SUPPLIER — full form (matches production crm.amslgroup.co.uk/suppliers/add):
+  suppliers table extended: supplier_role, tpi_role, fuel_mix, contract_condition, credit_check,
+    commission_payment, customer_billing, supplier_contact, supplier_address, restricted_business_types, about,
+    + SME/Midmarket/Industrial TPI blocks (email, mobile, landline, password, name, threshold each), corporate_login_email.
+  Suppliers page rebuilt: "Add Supplier" grouped form (Supplier Details incl. Role dropdown + Fuel Mix + comm caps,
+    SME TPI, Midmarket TPI, Industrial TPI, Commercial Terms, Contact & About). TPI passwords stored but excluded from list SQL.
+  Changed: amsl-backend/src/db.js, routes/modules.js; amsl-frontend/src/pages/Suppliers.jsx
+
+VIEW SUPPLIER (tabbed detail, matches production suppliers/view):
+  New /suppliers/:id page with Edit button + 4 tabs: Supplier Details (Overview + SME/Midmarket/Industrial TPI
+    + Commercial Terms & About), Supplier Documents (LOAs/Renewals/Terminations + upload), Meter Type Mapping,
+    Supplier Settings (status, role, commission caps, thresholds, restricted types).
+  crudRouter now supports detailSql + detailTransform; supplier detail returns full row with TPI passwords masked
+    (sme/mm/ind_has_password booleans instead of the value). "View" (eye) action added to the Suppliers list.
+  Changed/new: amsl-backend/src/crud.js, routes/modules.js; amsl-frontend/src/pages/SupplierDetail.jsx (new),
+    pages/Suppliers.jsx, App.jsx
+
+GENERATE CONTRACT FROM QUOTE (matches production contract/generate):
+  contracts table extended with ~45 generation fields: company_reg, business_structure, business_type, trading_from,
+    signatory (title/first/last), address, contact, billing_* block, meter_serial, current_read, requested_start,
+    product/tariff details, rates (standing/day/night/ewe/kva/broker_commission), fixed_price_term,
+    payment_method/amount, billing_period, quote_id link.
+  New /contracts/generate/:quoteId page — grouped form (Supply Details, Billing Details [same-as-above],
+    Meter Details, Product & Contract Details), PRE-FILLED from the quote. On submit creates the contract and
+    marks the quote Accepted, then redirects to Contracts.
+  "Generate" action added to each row in Quote History.
+  Changed: amsl-backend/src/db.js, routes/modules.js; amsl-frontend/src/pages/GenerateContract.jsx (new), pages/Quotes.jsx, App.jsx
+
+VIEW QUOTE RESULTS (matches production quote/results):
+  New /quotes/:id page — "Market Supplier Details" breakdown for the saved quote: supplier, product, term,
+    unit/standing rates (+ distribution/transmission for bespoke), annual cost, commission; meter & consumption;
+    business (acq/renewal, type). Actions: Download Report, Send Email (stub), Generate Contract.
+  "View" (eye) action added to each row in Quote History.
+  Changed/new: amsl-frontend/src/pages/QuoteDetail.jsx (new), pages/Quotes.jsx, App.jsx
+
+VIEW CONTRACT + COMMISSION SCHEDULE (matches production contract/view + payment-history):
+  New /contracts/:id page with 2 tabs: Contract Details (Overview, Meter Details, Business & Contact,
+    Plan & Pricing, Billing) + Commission Schedule (contract summary + payment schedule table with statuses
+    + multi-level splits + VAT). Header actions: Download Contract, Send for Sign (stub).
+  New endpoint GET /api/commission/by-contract/:contractId — returns the record + schedule + splits + ledger,
+    generating the commission record on demand if the contract doesn't have one yet.
+  "View" (eye) action added to the Contracts list (alongside existing Download Contract).
+  Changed/new: amsl-backend/src/routes/commission.js; amsl-frontend/src/pages/ContractDetail.jsx (new),
+    pages/Contracts.jsx, api.js, App.jsx
+
+ADD TICKET — full form (matches production ticket/add):
+  tickets table extended: corporate_sme, description.
+  Tickets page rebuilt with "Add Ticket" form: Query Name*, Business* (dropdown), Agency*, Agent* (filtered by agency),
+    Corporate/SME*, Utility*, Ticket Query* (Billing/Registration/Objection/General/Complaint), Ticket Status*, Description.
+    Attachment noted as post-creation. Changed: amsl-backend/src/db.js, routes/modules.js; amsl-frontend/src/pages/Tickets.jsx
+
+EDIT TICKET (matches production ticket/edit):
+  Ticket form now handles both Add and Edit — "Edit" (pencil) action on each ticket row opens the same form
+  pre-filled and saves via PUT /tickets/:id. Expanded Ticket Query types (+ Partner Payments, Meter Reading,
+  Change of Tenancy) and Statuses (+ Awaiting Agency Feedback, Awaiting Customer).
+  Changed: amsl-frontend/src/pages/Tickets.jsx
+
+VIEW TICKET (matches production ticket/view):
+  "View" (eye) action on each ticket row opens a read-only modal showing all fields (Query Name, Business,
+  Agency, Agent, Corporate/SME, Utility, Ticket Query, Status, Raised, Last Updated, Description, Attachment)
+  with an Edit button that switches straight to the edit form.
+  Changed: amsl-frontend/src/pages/Tickets.jsx

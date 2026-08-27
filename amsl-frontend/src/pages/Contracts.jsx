@@ -1,6 +1,7 @@
 import ListPage from "../components/ListPage.jsx";
 import { Badge } from "../components/ui.jsx";
-import { Download } from "lucide-react";
+import { Download, Eye } from "lucide-react";
+import { Link } from "react-router-dom";
 const money = (n) => "£" + Number(n||0).toLocaleString("en-GB",{minimumFractionDigits:2});
 
 // V1.6-15: download a contract summary (client-side, no backend file needed)
@@ -37,6 +38,11 @@ export default function Contracts() {
       { key: "consumption", label: "Consumption", render: (r) => <span className="mono">{Number(r.consumption).toLocaleString()}</span> },
       { key: "commission_value", label: "Commission", render: (r) => <span className="name">{money(r.commission_value)}</span> },
       { key: "status", label: "Status", render: (r) => <Badge tone={r.status.includes("Accepted")?"green":"amber"}>{r.status}</Badge> },
+      { key: "view", label: "", render: (r) => (
+        <Link className="btn ghost sm" to={`/contracts/${r.id}`} title="View contract" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <Eye size={14} /> View
+        </Link>
+      ) },
       { key: "download", label: "Download Contract", render: (r) => (
         <button className="btn ghost sm" title="Download contract" onClick={() => downloadContract(r)}
           style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>

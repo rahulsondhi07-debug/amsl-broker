@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db } from "../db.js";
-import { generateAllCommissions, reconcile, clawback } from "../commissionEngine.js";
+import { generateAllCommissions, reconcile, clawback, importStatement, computeCommissionForContract } from "../commissionEngine.js";
 
 const r = Router();
 const all = (sql, ...p) => db.prepare(sql).all(...p);
@@ -45,6 +45,33 @@ r.post("/:id/clawback", (req, res) => {
   const out = clawback(req.params.id, req.body.reason);
   if (!out) return res.status(404).json({ error: "record not found" });
   res.json({ data: out });
+});
+
+/* Supplier statement import + matching (V1.3) */
+r.post("/statements/import", (req, res) => {
+  const lines = Array.isArray(req.body.lines) ? req.body.lines : [];
+  if (!lines.length) return res.status(400).json({ error: "No statement lines. Provide a 'lines' array of { contract_no, amount, period }." });
+  res.json({ data: importStatement(req.body.supplier_id, req.body.filename, lines) });
+});
+r.get("/statements", (_req, res) => {
+  const stmts = all(`SELECT cs.*, s.name AS supplier_name FROM commission_statements cs LEFT JOIN suppliers s ON s.id=cs.supplier_id ORDER BY cs.imported_at DESC`);
+  for (const st of stmts) st.rows = all("SELECT * FROM statement_lines WHERE statement_id=? ORDER BY id", st.id);
+  res.json({ data: stmts });
+});
+
+r.get("/by-contract/:contractId", (req, res) => {
+  const cid = req.params.contractId;
+  const fetch = () => one(`SELECT cr.*, s.name AS supplier_name FROM commission_records cr LEFT JOIN suppliers s ON s.id=cr.supplier_id WHERE cr.contract_id=?`, cid);
+  let rec = fetch();
+  if (!rec) {
+    const c = one("SELECT id,supplier_id,agent_id,consumption,term_months,created_at FROM contracts WHERE id=?", cid);
+    if (c && c.consumption) { computeCommissionForContract(c); rec = fetch(); }
+  }
+  if (!rec) return res.json({ data: null });
+  rec.splits = all("SELECT level,pct,amount FROM commission_splits WHERE record_id=?", rec.id);
+  rec.schedule = all("SELECT seq,due_date,amount,status FROM commission_schedule WHERE record_id=? ORDER BY seq", rec.id);
+  rec.ledger = all("SELECT type,amount,note,created_at FROM commission_ledger WHERE record_id=? ORDER BY id DESC", rec.id);
+  res.json({ data: rec });
 });
 
 export default r;

@@ -15,9 +15,10 @@ export function paginate(baseSql, params, req) {
  * Build a REST router for a table.
  * opts: { table, columns:[...writable], listSql?, searchColumns?:[] }
  */
-export function crudRouter({ table, columns, listSql, searchColumns = [] }) {
+export function crudRouter({ table, columns, listSql, searchColumns = [], detailSql, detailTransform }) {
   const r = Router();
   const selectAll = listSql || `SELECT * FROM ${table}`;
+  const selectOne = detailSql || selectAll;
 
   // LIST (paginated, optional ?q= search)
   r.get("/", (req, res) => {
@@ -35,9 +36,9 @@ export function crudRouter({ table, columns, listSql, searchColumns = [] }) {
 
   // GET one
   r.get("/:id", (req, res) => {
-    const row = db.prepare(`SELECT * FROM (${selectAll}) WHERE id = ?`).get(req.params.id);
+    const row = db.prepare(`SELECT * FROM (${selectOne}) WHERE id = ?`).get(req.params.id);
     if (!row) return res.status(404).json({ error: `${table} not found` });
-    res.json({ data: row });
+    res.json({ data: detailTransform ? detailTransform(row) : row });
   });
 
   // CREATE

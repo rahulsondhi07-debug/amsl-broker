@@ -75,6 +75,11 @@ export const api = {
   commissionReconcile: (id, aac) => request(`/commission/${id}/reconcile`, { method: "POST", body: { aac } }),
   commissionClawback: (id, reason) => request(`/commission/${id}/clawback`, { method: "POST", body: { reason } }),
   commissionLedger: () => request(`/commission/ledger`),
+  commissionStatements: () => request(`/commission/statements`),
+  commissionImportStatement: (lines, filename, supplier_id) => request(`/commission/statements/import`, { method: "POST", body: { lines, filename, supplier_id } }),
+  commissionByContract: (cid) => request(`/commission/by-contract/${cid}`),
+  productPriceMatrix: (id) => request(`/products/${id}/price-matrix`),
+  productPriceMatrixAdd: (id, row) => request(`/products/${id}/price-matrix`, { method: "POST", body: row }),
   upliftCaps: () => request(`/uplift-caps`),
   upliftValidate: (utility, consumption, uplift) => request(`/uplift-caps/validate`, { method: "POST", body: { utility, consumption, uplift } }),
 };

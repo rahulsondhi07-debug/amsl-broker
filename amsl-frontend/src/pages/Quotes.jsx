@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
-import { Plus, Download } from "lucide-react";
+import { Plus, Download, FileSignature, Eye } from "lucide-react";
+import { Link } from "react-router-dom";
 import ListPage from "../components/ListPage.jsx";
 import { Badge } from "../components/ui.jsx";
 const tone = (s) => s.includes("Accepted") ? "green" : s.includes("Reject") ? "rose" : s.includes("Quoted") ? "indigo" : "slate";
@@ -53,6 +54,16 @@ export default function Quotes() {
         <button className="btn ghost sm" title="Download quote breakdown" onClick={() => downloadBreakdown(r)} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
           <Download size={14} /> PDF
         </button>
+      ) },
+      { key: "view", label: "", render: (r) => (
+        <Link className="btn ghost sm" to={`/quotes/${r.id}`} title="View quote results" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <Eye size={14} /> View
+        </Link>
+      ) },
+      { key: "generate", label: "Contract", render: (r) => (
+        <Link className="btn ghost sm" to={`/contracts/generate/${r.id}`} title="Generate contract from this quote" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+          <FileSignature size={14} /> Generate
+        </Link>
       ) },
     ]} />;
 }

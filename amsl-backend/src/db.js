@@ -208,6 +208,77 @@ export function migrate() {
   addCol("ALTER TABLE businesses ADD COLUMN disposition      TEXT");
   addCol("ALTER TABLE businesses ADD COLUMN stage_updated_at TEXT");
   addCol("ALTER TABLE businesses ADD COLUMN frozen           INTEGER DEFAULT 0");
+  // Agency detail fields (match production Add Agency form)
+  addCol("ALTER TABLE agencies ADD COLUMN email              TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN phone              TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN website            TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN max_users          INTEGER");
+  addCol("ALTER TABLE agencies ADD COLUMN company_reg_no     TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN business_structure TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN vat_no             TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN address            TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN white_label        INTEGER DEFAULT 0");
+  // Agent detail fields (match production Add User/Agent form)
+  addCol("ALTER TABLE agents ADD COLUMN first_name         TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN last_name          TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN trading_name       TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN principal_name     TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN business_structure TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN trading_account_no TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN vat_number         TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN agency_split       REAL");
+  addCol("ALTER TABLE agents ADD COLUMN agent_split        REAL");
+  addCol("ALTER TABLE agents ADD COLUMN telephone          TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN mobile             TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN office_website     TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN address_line1      TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN address_line2      TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN city               TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN county             TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN postcode           TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN bank_name          TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN account_name       TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN sort_code          TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN account_no         TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN training_status    TEXT");
+  addCol("ALTER TABLE agents ADD COLUMN notes              TEXT");
+  // Agency unique reference (AG-xx) for the view page
+  addCol("ALTER TABLE agencies ADD COLUMN uid              TEXT");
+  db.exec("UPDATE agencies SET uid='AG-'||printf('%02d',id) WHERE uid IS NULL");
+  // Supplier detail fields (match production Add Supplier form)
+  const sc = (c) => addCol(`ALTER TABLE suppliers ADD COLUMN ${c}`);
+  ["supplier_role TEXT", "tpi_role TEXT", "fuel_mix TEXT", "contract_condition TEXT",
+   "credit_check TEXT", "commission_payment TEXT", "customer_billing TEXT",
+   "supplier_contact TEXT", "supplier_address TEXT", "restricted_business_types TEXT", "about TEXT",
+   "sme_email TEXT", "sme_mobile TEXT", "sme_landline TEXT", "sme_password TEXT", "sme_threshold INTEGER",
+   "corporate_login_email TEXT",
+   "mm_name TEXT", "mm_email TEXT", "mm_password TEXT", "mm_mobile TEXT", "mm_landline TEXT", "mm_threshold INTEGER",
+   "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER"
+  ].forEach(sc);
+  // Contract generation fields (match production contract/generate form)
+  const cc = (c) => addCol(`ALTER TABLE contracts ADD COLUMN ${c}`);
+  ["quote_id INTEGER", "company_reg TEXT", "business_structure TEXT", "business_type TEXT", "trading_from TEXT",
+   "title TEXT", "first_name TEXT", "last_name TEXT", "address_line1 TEXT", "address_line2 TEXT",
+   "town TEXT", "postcode TEXT", "telephone TEXT", "mobile TEXT", "email TEXT",
+   "billing_same INTEGER DEFAULT 1", "billing_title TEXT", "billing_first_name TEXT", "billing_last_name TEXT",
+   "billing_address1 TEXT", "billing_address2 TEXT", "billing_town TEXT", "billing_postcode TEXT",
+   "billing_telephone TEXT", "billing_mobile TEXT", "billing_email TEXT",
+   "meter_serial TEXT", "current_read TEXT", "requested_start TEXT",
+   "product_name TEXT", "tariff_name TEXT", "acq_renewal TEXT", "tariff_type TEXT",
+   "supplier_start TEXT", "tariff_end TEXT", "supplier_end TEXT", "fixed_price_term INTEGER",
+   "standing_charge REAL", "day_rate REAL", "night_rate REAL", "ewe_rate REAL", "kva_charge REAL", "broker_commission REAL",
+   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT"
+  ].forEach(cc);
+  // Ticket fields (match production Add Ticket form)
+  addCol("ALTER TABLE tickets ADD COLUMN corporate_sme TEXT");
+  addCol("ALTER TABLE tickets ADD COLUMN description   TEXT");
+  // Product price-book fields (match production Add Product form)
+  const pc = (c) => addCol(`ALTER TABLE products ADD COLUMN ${c}`);
+  ["standing_charge_type TEXT", "fuel_mix TEXT", "max_commission REAL", "commission_increment REAL",
+   "commission_banded TEXT", "standing_charge TEXT", "payment_method TEXT", "payment_mode TEXT",
+   "initial TEXT", "final TEXT", "dd_discount REAL", "price_book_status TEXT DEFAULT 'Pending'",
+   "min_start_days INTEGER", "min_start_date INTEGER", "max_start_date INTEGER", "product_type TEXT"
+  ].forEach(pc);
   // V1.6-03 Utility-on-Site meter fields
   addCol("ALTER TABLE meters ADD COLUMN meter_type          TEXT");   // SME | NHH | HH
   addCol("ALTER TABLE meters ADD COLUMN standing_charge     REAL");
@@ -357,8 +428,27 @@ export function migrate() {
       note       TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS commission_statements (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      supplier_id INTEGER,
+      filename    TEXT,
+      lines       INTEGER DEFAULT 0,
+      matched     INTEGER DEFAULT 0,
+      exceptions  INTEGER DEFAULT 0,
+      imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS statement_lines (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      statement_id INTEGER NOT NULL REFERENCES commission_statements(id) ON DELETE CASCADE,
+      contract_no  TEXT,
+      amount       REAL,
+      period       TEXT,
+      record_id    INTEGER,
+      expected     REAL,
+      variance     REAL,
+      status       TEXT NOT NULL DEFAULT 'Exception'
+    );
   `);
-  // V1.7-11 White-labelling: default branding
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
   setDef.run("brand_name", "AMSL Broker");
   setDef.run("primary_color", "#0E7C7B");
