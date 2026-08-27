@@ -1,13 +1,22 @@
 import express from "express";
 import cors from "cors";
-import { db, initSchema } from "./db.js";
+import { db, initSchema, migrate, runAutomations, seedUpliftCaps, seedPermissions, seedPlatform } from "./db.js";
 import dashboard from "./routes/dashboard.js";
 import auth from "./routes/auth.js";
 import comparison from "./routes/comparison.js";
 import * as m from "./routes/modules.js";
 import { seed } from "./seed.js";
+import pipeline from "./routes/pipeline.js";
+import uplift from "./routes/uplift.js";
+import permissions from "./routes/permissions.js";
+import branding from "./routes/branding.js";
+import platform from "./routes/platform.js";
+import commission from "./routes/commission.js";
+import { seedCommissionConfig, generateAllCommissions } from "./commissionEngine.js";
+import { seedPipeline } from "./seedPipeline.js";
 
 initSchema();
+migrate();
 
 // auto-seed on first run if empty
 if (db.prepare("SELECT COUNT(*) c FROM agencies").get().c === 0) {
@@ -15,6 +24,13 @@ if (db.prepare("SELECT COUNT(*) c FROM agencies").get().c === 0) {
   const r = seed();
   if (!r.skipped) console.log("Seeded:", r.counts);
 }
+seedPipeline();
+runAutomations();
+seedUpliftCaps();
+seedPermissions();
+seedPlatform();
+seedCommissionConfig();
+generateAllCommissions();
 
 const app = express();
 app.use(cors());
@@ -46,6 +62,12 @@ api.get("/", (_req, res) =>
 );
 
 api.use("/dashboard", dashboard);
+api.use("/pipeline", pipeline);
+api.use("/uplift-caps", uplift);
+api.use("/permissions", permissions);
+api.use("/branding", branding);
+api.use("/platform", platform);
+api.use("/commission", commission);
 api.use("/comparison", comparison);
 api.use("/auth", auth);
 api.use("/agencies", m.agencies);

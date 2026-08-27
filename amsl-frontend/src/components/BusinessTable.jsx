@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Plus, ArrowRightLeft, Trash2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Plus, ArrowRightLeft, Trash2, Upload, Eye } from "lucide-react";
 import { api } from "../api.js";
 import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "./ui.jsx";
 
@@ -8,6 +9,7 @@ const csd = (c, s, d) => `${c} | ${s} | ${d}`;
 export default function BusinessTable({ resource, title, desc, isLead }) {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList(resource, { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [refs, setRefs] = useState({ agencies: [], agents: [] });
   const [busy, setBusy] = useState(null);
 
@@ -31,6 +33,7 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
           <div className="search" style={{ maxWidth: 220 }}>
             <input placeholder="Search…" value={q} onChange={(e) => { setPage(1); setQ(e.target.value); }} style={{ paddingLeft: 12 }} />
           </div>
+          {isLead && <button className="btn" onClick={() => setShowImport(true)}><Upload size={15} /> Import CSV</button>}
           <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={15} /> {isLead ? "Add Lead" : "Add Customer"}</button>
         </div>
       </div>
@@ -59,12 +62,20 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
                       <td className="mono">{b.created_at?.slice(0, 10)}</td>
                       <td>
                         <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                          {!isLead && (
+                            <Link className="btn ghost sm" to={`/customers/${b.id}`} title="View customer inner page">
+                              <Eye size={14} /> View
+                            </Link>
+                          )}
                           {isLead && (
                             <button className="btn ghost sm" disabled={busy === b.id} onClick={() => convert(b.id)} title="Convert to customer">
                               <ArrowRightLeft size={14} /> Convert
                             </button>
                           )}
-                          <button className="btn ghost sm danger" disabled={busy === b.id} onClick={() => remove(b.id)} title="Delete"><Trash2 size={14} /></button>
+                          {/* V1.6-14: no delete once beyond Prospect */}
+                          {!(["WON","UNDER_REGISTRATION","LIVE","UP_FOR_RENEWAL","RENEWED"].includes(b.journey_stage)) && (
+                            <button className="btn ghost sm danger" disabled={busy === b.id} onClick={() => remove(b.id)} title="Delete"><Trash2 size={14} /></button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -78,6 +89,9 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
         )}
       </Card>
 
+      {showImport && (
+        <ImportLeads onClose={() => setShowImport(false)} onDone={() => reload()} />
+      )}
       {showAdd && (
         <AddBusiness resource={resource} refs={refs} isLead={isLead}
           onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); reload(); }} />
@@ -132,6 +146,78 @@ function AddBusiness({ resource, refs, isLead, onClose, onSaved }) {
           </select>
         </Field>
       </div>
+    </Modal>
+  );
+}
+
+// V1.6-16: bulk lead import with friendly, row-level errors
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(",").map((h) => h.trim());
+  return lines.slice(1).map((line) => {
+    const cells = line.split(",");
+    const row = {};
+    headers.forEach((h, i) => { row[h] = (cells[i] || "").trim(); });
+    return row;
+  });
+}
+
+function ImportLeads({ onClose, onDone }) {
+  const [text, setText] = useState("");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const sample = "Business Name,Contact Name,Email,Mobile,Fuel\nAcme Ltd,Jane Doe,jane@acme.co.uk,07700900000,Elec\nBeta Foods,Sam Roe,sam@beta.co.uk,07700900111,Dual";
+
+  const onFile = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const rd = new FileReader(); rd.onload = () => setText(String(rd.result || "")); rd.readAsText(f);
+  };
+  const run = async () => {
+    const rows = parseCSV(text);
+    if (!rows.length) { setResult({ error: "No rows found. Include a header row plus at least one lead." }); return; }
+    setBusy(true);
+    try { const { data } = await api.importLeads(rows); setResult(data); if (data.imported) onDone?.(); }
+    catch (e) { setResult({ error: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <Modal title="Import Leads from CSV" onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Close</button>
+        <button className="btn primary" disabled={busy || !text.trim()} onClick={run}>{busy ? "Importing…" : "Import"}</button>
+      </>}>
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 8 }}>
+        Columns: <strong>Business Name</strong> (required), Contact Name, Email, Mobile, Fuel (Elec/Gas/Dual).
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <input type="file" accept=".csv,text/csv" onChange={onFile} style={{ fontSize: 12 }} />
+        <button className="btn ghost sm" onClick={() => setText(sample)}>Use sample</button>
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste CSV here…"
+        style={{ width: "100%", minHeight: 120, padding: 10, borderRadius: 8, border: "1px solid #E7EBF0", fontFamily: "monospace", fontSize: 12 }} />
+      {result && (
+        <div style={{ marginTop: 12 }}>
+          {result.error ? (
+            <div style={{ color: "#E11D48", fontWeight: 600, fontSize: 13 }}>⚠ {result.error}</div>
+          ) : (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>
+                <span style={{ color: "#0F766E" }}>{result.imported} imported</span>
+                {result.failed > 0 && <span style={{ color: "#E11D48" }}> · {result.failed} failed</span>}
+              </div>
+              {result.errors?.length > 0 && (
+                <div style={{ marginTop: 6, maxHeight: 160, overflow: "auto", background: "#FEF2F4", border: "1px solid #FCE0E6", borderRadius: 8, padding: "8px 10px" }}>
+                  {result.errors.map((e, i) => (
+                    <div key={i} style={{ fontSize: 12, color: "#B4253C", padding: "2px 0" }}>{e.message}</div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }

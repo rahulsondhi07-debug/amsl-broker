@@ -90,10 +90,16 @@ function businessRouter(stage) {
   r.post("/", (req, res) => {
     const b = req.body;
     const ref = b.ref || Math.random().toString(16).slice(2, 10);
+    // V1.6-12: auto-select the agent from the agency when none is given
+    let agentId = b.agent_id;
+    if (b.agency_id && !agentId) {
+      const a = db.prepare("SELECT id FROM agents WHERE agency_id=? AND status='Active' ORDER BY id LIMIT 1").get(b.agency_id);
+      if (a) agentId = a.id;
+    }
     const info = db.prepare(
       `INSERT INTO businesses (ref,business_name,contact_name,contact_email,contact_mobile,agency_id,agent_id,stage)
        VALUES (?,?,?,?,?,?,?,?)`
-    ).run(ref, b.business_name, b.contact_name, b.contact_email, b.contact_mobile, b.agency_id, b.agent_id, stage);
+    ).run(ref, b.business_name, b.contact_name, b.contact_email, b.contact_mobile, b.agency_id, agentId, stage);
     res.status(201).json({ data: db.prepare("SELECT * FROM businesses WHERE id = ?").get(info.lastInsertRowid) });
   });
 
@@ -108,6 +114,41 @@ function businessRouter(stage) {
   };
   r.put("/:id", upd); r.patch("/:id", upd);
 
+  // V1.6-16: bulk import with friendly, row-level errors
+  r.post("/import", (req, res) => {
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    if (!rows.length) return res.status(400).json({ error: "No rows to import. Provide a 'rows' array." });
+    if (rows.length > 5000) return res.status(400).json({ error: "Too many rows in one import (max 5,000). Please split the file." });
+    const emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    const ins = db.prepare(
+      `INSERT INTO businesses (ref,business_name,contact_name,contact_email,contact_mobile,agency_id,agent_id,stage,journey_stage,fuel)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    );
+    const results = { imported: 0, failed: 0, errors: [] };
+    rows.forEach((row, i) => {
+      const line = i + 1;
+      const name = (row.business_name || row["Business Name"] || "").trim();
+      const email = (row.contact_email || row.Email || "").trim();
+      const fuel = (row.fuel || row.Fuel || "DUAL").toUpperCase();
+      if (!name) { results.failed++; results.errors.push({ row: line, message: `Row ${line}: Business Name is required.` }); return; }
+      if (email && !emailRe.test(email)) { results.failed++; results.errors.push({ row: line, message: `Row ${line}: "${email}" is not a valid email address.` }); return; }
+      if (!["ELEC", "GAS", "DUAL"].includes(fuel)) { results.failed++; results.errors.push({ row: line, message: `Row ${line}: Fuel must be Elec, Gas or Dual (got "${row.fuel || row.Fuel}").` }); return; }
+      try {
+        ins.run(
+          Math.random().toString(16).slice(2, 10), name,
+          (row.contact_name || row["Contact Name"] || "").trim() || null,
+          email || null, (row.contact_mobile || row.Mobile || "").trim() || null,
+          row.agency_id || null, row.agent_id || null, "LEAD", "RAW_LEAD", fuel
+        );
+        results.imported++;
+      } catch (e) {
+        results.failed++;
+        results.errors.push({ row: line, message: `Row ${line}: could not be saved (${e.message.replace(/SQLITE_\w+:?/i, "").trim()}).` });
+      }
+    });
+    res.json({ data: results });
+  });
+
   // convert lead -> customer
   r.post("/:id/convert", (req, res) => {
     const info = db.prepare("UPDATE businesses SET stage='CUSTOMER' WHERE id=? AND stage!='CUSTOMER'").run(req.params.id);
@@ -116,6 +157,11 @@ function businessRouter(stage) {
   });
 
   r.delete("/:id", (req, res) => {
+    // V1.6-14: cannot delete once a customer is beyond Prospect
+    const biz = db.prepare("SELECT journey_stage FROM businesses WHERE id=? AND stage=?").get(req.params.id, stage);
+    if (biz && ["WON", "UNDER_REGISTRATION", "LIVE", "UP_FOR_RENEWAL", "RENEWED"].includes(biz.journey_stage)) {
+      return res.status(403).json({ error: "This customer is beyond the Prospect stage and cannot be deleted." });
+    }
     const info = db.prepare("DELETE FROM businesses WHERE id=? AND stage=?").run(req.params.id, stage);
     if (!info.changes) return res.status(404).json({ error: "not found" });
     res.json({ data: { id: Number(req.params.id), deleted: true } });
@@ -129,7 +175,8 @@ export const customers = businessRouter("CUSTOMER");
 export const quotes = crudRouter({
   table: "quotes",
   columns: ["quote_no","business_id","business_name","agent_id","utility","meter_number","eac","start_date",
-            "supplier_id","term_months","unit_rate","standing_charge","annual_cost","commission","status"],
+            "supplier_id","term_months","unit_rate","standing_charge","annual_cost","commission","status",
+            "bespoke","meter_point","meter_details","distribution_charge","transmission_charge","product_name","acq_renewal","business_type"],
   searchColumns: ["quote_no","business_name","meter_number"],
   listSql: `SELECT q.*, a.name AS broker, s.name AS supplier_name
             FROM quotes q LEFT JOIN agents a ON a.id = q.agent_id

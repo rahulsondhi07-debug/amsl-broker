@@ -7,7 +7,8 @@ import {
   UserPlus, ClipboardList, FileSignature, UserCheck, Building2, Truck, Users,
   ArrowUpRight, TrendingUp, ChevronRight,
 } from "lucide-react";
-import { api } from "../api.js";
+import { Link } from "react-router-dom";
+import { api, JOURNEY_STAGES } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, initials } from "../components/ui.jsx";
 
 const INDIGO = "#4f46e5", VIOLET = "#8b5cf6";
@@ -68,6 +69,10 @@ export default function Dashboard() {
             </div>
           );
         })}
+      </div>
+
+      <div className="grid cols-3" style={{ marginBottom: 0 }}>
+        <PipelineStrip />
       </div>
 
       {/* earning + demographics */}
@@ -228,5 +233,27 @@ export default function Dashboard() {
 
       <div className="footer-note">Live data from {api.base}</div>
     </>
+  );
+}
+
+
+/* ---- V1.6: clickable Sales Pipeline stage cards ---- */
+const GROUP_COLORS = { Lead: "#64748b", Prospect: "#4f46e5", Contract: "#0f766e", Other: "#b45309" };
+function PipelineStrip() {
+  const [stages, setStages] = useState(null);
+  useEffect(() => { api.pipelineStages().then((r) => setStages(r.data)).catch(() => setStages({ stages: [], total: 0 })); }, []);
+  if (!stages) return null;
+  return (
+    <Card title="Sales Pipeline" right={<Link to="/pipeline" className="btn ghost sm">Open pipeline →</Link>} className="span-2" >
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 }}>
+        {stages.stages.map((s) => (
+          <Link key={s.key} to={`/pipeline?stage=${s.key}`}
+            style={{ textDecoration: "none", border: "1px solid #e7ebf0", borderRadius: 12, padding: "12px 14px", background: "#fff", display: "block", borderLeft: `3px solid ${GROUP_COLORS[s.group]}` }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: "#0f172a", lineHeight: 1 }}>{s.count}</div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "#64748b", marginTop: 4 }}>{s.label}</div>
+          </Link>
+        ))}
+      </div>
+    </Card>
   );
 }

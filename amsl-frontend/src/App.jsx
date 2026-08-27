@@ -5,6 +5,15 @@ import Login from "./pages/Login.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Leads from "./pages/Leads.jsx";
 import Customers from "./pages/Customers.jsx";
+import Pipeline from "./pages/Pipeline.jsx";
+import Renewals from "./pages/Renewals.jsx";
+import Permissions from "./pages/Permissions.jsx";
+import Master from "./pages/Master.jsx";
+import CustomerDetail from "./pages/CustomerDetail.jsx";
+import Branding from "./pages/Branding.jsx";
+import Tutorials from "./pages/Tutorials.jsx";
+import Settings from "./pages/Settings.jsx";
+import Commission from "./pages/Commission.jsx";
 import Quotes from "./pages/Quotes.jsx";
 import NewQuote from "./pages/NewQuote.jsx";
 import Contracts from "./pages/Contracts.jsx";
@@ -42,6 +51,15 @@ export default function App() {
               <Route path="quotes" element={<Quotes />} />
               <Route path="quotes/new" element={<NewQuote />} />
               <Route path="customers" element={<Customers />} />
+              <Route path="customers/:id" element={<CustomerDetail />} />
+              <Route path="pipeline" element={<Pipeline />} />
+              <Route path="renewals" element={<Renewals />} />
+              <Route path="permissions" element={<Permissions />} />
+              <Route path="master" element={<Master />} />
+              <Route path="branding" element={<Branding />} />
+              <Route path="tutorials" element={<Tutorials />} />
+              <Route path="settings" element={<Settings />} />
+              <Route path="commission" element={<Commission />} />
               <Route path="contracts" element={<Contracts />} />
               <Route path="tickets" element={<Tickets />} />
               <Route path="*" element={<Dashboard />} />
