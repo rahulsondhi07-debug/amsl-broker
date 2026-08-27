@@ -202,3 +202,7 @@ VIEW TICKET (matches production ticket/view):
   Agency, Agent, Corporate/SME, Utility, Ticket Query, Status, Raised, Last Updated, Description, Attachment)
   with an Edit button that switches straight to the edit form.
   Changed: amsl-frontend/src/pages/Tickets.jsx
+
+FIX — Add Supplier: commission-cap fields (max_broker_comm_electric/gas are NOT NULL) now default blanks to 0
+  instead of sending null (which SQLite rejected); nullable thresholds are omitted when blank. Found via live test.
+  Changed: amsl-frontend/src/pages/Suppliers.jsx

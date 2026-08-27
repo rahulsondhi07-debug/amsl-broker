@@ -69,14 +69,17 @@ function AddSupplier({ onClose, onSaved }) {
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const numFields = ["max_broker_comm_electric", "max_broker_comm_gas", "sme_threshold", "mm_threshold", "ind_threshold"];
 
   const save = async () => {
     if (!f.name.trim()) return setErr("Supplier Name is required");
     setSaving(true); setErr(null);
     try {
       const payload = { ...f };
-      numFields.forEach((k) => { payload[k] = f[k] === "" ? null : Number(f[k]); });
+      // commission caps are NOT NULL columns — default blanks to 0
+      payload.max_broker_comm_electric = f.max_broker_comm_electric === "" ? 0 : Number(f.max_broker_comm_electric);
+      payload.max_broker_comm_gas = f.max_broker_comm_gas === "" ? 0 : Number(f.max_broker_comm_gas);
+      // thresholds are nullable — omit when blank so they aren't sent as invalid values
+      ["sme_threshold", "mm_threshold", "ind_threshold"].forEach((k) => { if (f[k] === "") delete payload[k]; else payload[k] = Number(f[k]); });
       await api.post("/suppliers", payload);
       onSaved();
     } catch (e) { setErr(e.message); setSaving(false); }
