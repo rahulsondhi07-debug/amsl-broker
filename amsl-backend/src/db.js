@@ -272,6 +272,40 @@ export function migrate() {
   // Ticket fields (match production Add Ticket form)
   addCol("ALTER TABLE tickets ADD COLUMN corporate_sme TEXT");
   addCol("ALTER TABLE tickets ADD COLUMN description   TEXT");
+
+  // Bill Validation & Energy Claim module
+  db.exec(`CREATE TABLE IF NOT EXISTS bill_validations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref TEXT,
+    contract_id INTEGER,
+    business_id INTEGER,
+    business_name TEXT,
+    supplier_id INTEGER,
+    supplier_name TEXT,
+    utility TEXT,
+    meter_mpan_mpr TEXT,
+    period TEXT,
+    days INTEGER DEFAULT 30,
+    billed_consumption REAL,
+    billed_standing_charge REAL,
+    billed_unit_rate REAL,
+    billed_amount REAL,
+    vat_rate REAL DEFAULT 20,
+    contracted_standing_charge REAL,
+    contracted_unit_rate REAL,
+    expected_amount REAL,
+    variance REAL,
+    status TEXT DEFAULT 'Pending',
+    claim_amount REAL DEFAULT 0,
+    findings TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`);
+  // CCL / EII / volume-tolerance claim fields
+  ["ccl_charged REAL", "ccl_rate REAL", "ccl_relief_pct REAL", "ccl_exempt INTEGER DEFAULT 0", "ccl_rebate REAL DEFAULT 0",
+   "eii_eligible INTEGER DEFAULT 0", "eii_policy_cost REAL", "eii_relief_pct REAL", "eii_relief REAL DEFAULT 0",
+   "eac REAL", "tolerance_pct REAL", "volume_status TEXT", "total_claim REAL DEFAULT 0"
+  ].forEach((c) => addCol(`ALTER TABLE bill_validations ADD COLUMN ${c}`));
   // Product price-book fields (match production Add Product form)
   const pc = (c) => addCol(`ALTER TABLE products ADD COLUMN ${c}`);
   ["standing_charge_type TEXT", "fuel_mix TEXT", "max_commission REAL", "commission_increment REAL",

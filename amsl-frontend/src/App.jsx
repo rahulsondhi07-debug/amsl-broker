@@ -17,6 +17,7 @@ import SupplierDetail from "./pages/SupplierDetail.jsx";
 import GenerateContract from "./pages/GenerateContract.jsx";
 import QuoteDetail from "./pages/QuoteDetail.jsx";
 import ContractDetail from "./pages/ContractDetail.jsx";
+import BillValidation from "./pages/BillValidation.jsx";
 import Tutorials from "./pages/Tutorials.jsx";
 import Settings from "./pages/Settings.jsx";
 import Commission from "./pages/Commission.jsx";
@@ -70,6 +71,7 @@ export default function App() {
               <Route path="tutorials" element={<Tutorials />} />
               <Route path="settings" element={<Settings />} />
               <Route path="commission" element={<Commission />} />
+              <Route path="bill-validation" element={<BillValidation />} />
               <Route path="contracts" element={<Contracts />} />
               <Route path="contracts/:id" element={<ContractDetail />} />
               <Route path="contracts/generate" element={<GenerateContract />} />
