@@ -167,9 +167,10 @@ table.tbl td .name { font-weight: 600; color: var(--slate-700); }
 
 /* ---------- modal ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: grid; place-items: center; z-index: 60; padding: 16px; }
-.modal { background: #fff; border-radius: 16px; width: 100%; max-width: 460px; box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25); }
-.modal .m-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--slate-100); }
-.modal .m-body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.modal { background: #fff; border-radius: 16px; width: 100%; max-width: 460px; max-height: 90vh; box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25); display: flex; flex-direction: column; }
+.modal .m-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--slate-100); }
+.modal .m-body { flex: 1 1 auto; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.modal .m-foot { flex: 0 0 auto; }
 .modal .m-foot { padding: 16px 20px; border-top: 1px solid var(--slate-100); display: flex; justify-content: flex-end; gap: 8px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: 12px; font-weight: 600; color: var(--slate-600); }

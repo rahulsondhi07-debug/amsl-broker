@@ -601,14 +601,21 @@ export const FULL_ACCESS_ROLES = ["Admin", "Super User"];
 
 /* Seed default role -> menu permissions. Idempotent. */
 export function seedPermissions() {
-  if (db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c > 0) return { skipped: true };
+  // Previously this skipped entirely once any row existed, which meant menu
+  // items added after the first deploy (e.g. Bill Validation, EII
+  // Certificates) never got granted to any role on an already-seeded
+  // database. INSERT OR IGNORE is safe to re-run: it only adds missing
+  // (role, menu_key) pairs and never touches permissions someone has
+  // customised via the Permissions screen.
   const all = MENU_CATALOG.map((m) => m.key);
   const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets"];
   const grants = { "Admin": all, "Super User": all, "Manager": all.filter((k) => k !== "/permissions"), "Agent": agentMenus };
+  const before = db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c;
   const ins = db.prepare("INSERT OR IGNORE INTO role_permissions (role,menu_key) VALUES (?,?)");
   const tx = db.transaction(() => { for (const [role, menus] of Object.entries(grants)) menus.forEach((m) => ins.run(role, m)); });
   tx();
-  return { skipped: false };
+  const after = db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c;
+  return { skipped: false, added: after - before };
 }
 export function seedUpliftCaps() {
   if (db.prepare("SELECT COUNT(*) c FROM uplift_caps").get().c > 0) return { skipped: true };

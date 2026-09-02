@@ -275,6 +275,20 @@ export default function BillValidation() {
             <button className="btn" onClick={runPreview} disabled={previewing}>{previewing ? "Validating…" : "Validate"}</button>
             <button className="btn primary" onClick={save} disabled={saving || !preview || preview.error}>{saving ? "Saving…" : "Save"}</button>
           </>}>
+          <div style={{
+            position: "sticky", top: -20, zIndex: 5, background: "#fff", margin: "-20px -20px 14px", padding: "10px 20px",
+            borderBottom: "1px solid #EEF1F4", display: "flex", flexWrap: "wrap", gap: 6,
+          }}>
+            {[
+              ["sec-meter", "Meter Reading"], ["sec-vat", "VAT"], ["sec-passthrough", "TNUoS/DUoS"],
+              ["sec-activity", "Activity"], ["sec-upload", "Upload"], ["sec-ccl", "CCL"],
+              ["sec-eii", "EII"], ["sec-volume", "Volume"], ["sec-client", "Client / LOA"],
+            ].map(([id, label]) => (
+              <button key={id} className="btn ghost sm" onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                {label}
+              </button>
+            ))}
+          </div>
           <div className="grid cols-3">
             <Field label="Contract (optional — auto-fills contracted rates)">
               <select value={form.contract_id} onChange={(e) => onContractChange(e.target.value)}>
@@ -300,22 +314,22 @@ export default function BillValidation() {
             <Field label="Billed unit rate (p/kWh)"><input type="number" step="0.01" value={form.billed_unit_rate} onChange={set("billed_unit_rate")} /></Field>
             <Field label="Billed standing charge (p/day)"><input type="number" step="0.01" value={form.billed_standing_charge} onChange={set("billed_standing_charge")} /></Field>
 
-            <div className="form-section-title">Meter Reading Cross-Check</div>
+            <div id="sec-meter" className="form-section-title">Meter Reading Cross-Check</div>
             <Field label="Meter reading — start (kWh)"><input type="number" value={form.meter_reading_start} onChange={set("meter_reading_start")} /></Field>
             <Field label="Meter reading — end (kWh)"><input type="number" value={form.meter_reading_end} onChange={set("meter_reading_end")} /></Field>
 
-            <div className="form-section-title">VAT Rate Verification</div>
+            <div id="sec-vat" className="form-section-title">VAT Rate Verification</div>
             <Field label="VAT rate billed (%)"><input type="number" value={form.vat_rate} onChange={set("vat_rate")} /></Field>
             <Field label="VAT rate expected (%)"><input type="number" value={form.vat_rate_expected} onChange={set("vat_rate_expected")} /></Field>
 
-            <div className="form-section-title">Pass-Through Verification — Transmission (TNUoS) &amp; Distribution (DUoS)</div>
+            <div id="sec-passthrough" className="form-section-title">Pass-Through Verification — Transmission (TNUoS) &amp; Distribution (DUoS)</div>
             <Field label="TNUoS charged on bill (£)"><input type="number" step="0.01" value={form.tnuos_charged} onChange={set("tnuos_charged")} /></Field>
             <Field label="Published TNUoS rate (p/day)"><input type="number" step="0.0001" value={form.tnuos_rate} onChange={set("tnuos_rate")} /></Field>
             <Field label="DUoS charged on bill (£)"><input type="number" step="0.01" value={form.duos_charged} onChange={set("duos_charged")} /></Field>
             <Field label="Published DUoS rate (p/day)"><input type="number" step="0.0001" value={form.duos_rate} onChange={set("duos_rate")} /></Field>
             <Field label="BSUoS charged on bill (£, optional — for Network Charging Compensation)"><input type="number" step="0.01" value={form.bsuos_charged} onChange={set("bsuos_charged")} /></Field>
 
-            <div className="form-section-title">Qualifying Activity (OOOM Energy Reference Guide)</div>
+            <div id="sec-activity" className="form-section-title">Qualifying Activity (OOOM Energy Reference Guide)</div>
             <Field label="Business activity">
               <select value={form.business_activity} onChange={(e) => onActivityChange(e.target.value)}>
                 <option value="">— Select if known —</option>
@@ -371,7 +385,7 @@ export default function BillValidation() {
               </div>
             )}
 
-            <div className="form-section-title">Upload Bill</div>
+            <div id="sec-upload" className="form-section-title">Upload Bill</div>
             <Field label="Bill file (PDF/image)">
               <input type="file" accept=".pdf,image/*" onChange={(e) => setBillFile(e.target.files[0] || null)} />
             </Field>
@@ -379,7 +393,7 @@ export default function BillValidation() {
               The file is attached to this validation for reference. Fields above still need entering manually — automatic reading of consumption/rates/VAT off the bill would need a document-AI/OCR service, which isn't wired up in this build yet.
             </div>
 
-            <div className="form-section-title">CCL Exemption &amp; Rebate</div>
+            <div id="sec-ccl" className="form-section-title">CCL Exemption &amp; Rebate</div>
             <Field label="CCL charged on bill (£)"><input type="number" step="0.01" value={form.ccl_charged} onChange={set("ccl_charged")} /></Field>
             <Field label="Fully exempt (charity / de-minimis / 100% renewable)">
               <label className="checkbox-row"><input type="checkbox" checked={form.ccl_exempt} onChange={set("ccl_exempt")} /> Exempt</label>
@@ -390,7 +404,7 @@ export default function BillValidation() {
               <button className="btn ghost sm" onClick={() => setCcaRatesModal(true)}>CCA relief rates by year</button>
             </div>
 
-            <div className="form-section-title">Energy-Intensive Industry (EII) Relief</div>
+            <div id="sec-eii" className="form-section-title">Energy-Intensive Industry (EII) Relief</div>
             {certMatch !== undefined && (
               <div style={{ gridColumn: "1 / -1" }}>
                 {certMatch ? (
@@ -412,12 +426,12 @@ export default function BillValidation() {
             <Field label="Policy-cost portion of bill (£)"><input type="number" step="0.01" value={form.eii_policy_cost} onChange={set("eii_policy_cost")} /></Field>
             <Field label="Relief % (default 85%)"><input type="number" value={form.eii_relief_pct} onChange={set("eii_relief_pct")} /></Field>
 
-            <div className="form-section-title">Volume Tolerance</div>
+            <div id="sec-volume" className="form-section-title">Volume Tolerance</div>
             <Field label="Contract EAC (kWh/yr)"><input type="number" value={form.eac} onChange={set("eac")} /></Field>
             <Field label="Tolerance band (%)"><input type="number" value={form.tolerance_pct} onChange={set("tolerance_pct")} /></Field>
             <Field label="Notes"><input value={form.notes} onChange={set("notes")} /></Field>
 
-            <div className="form-section-title">Client Agreement / Letter of Authority</div>
+            <div id="sec-client" className="form-section-title">Client Agreement / Letter of Authority</div>
             <Field label="Client name (for LOA)"><input placeholder="Defaults to business name" value={form.client_name} onChange={set("client_name")} /></Field>
             <Field label="Client address"><input value={form.client_address} onChange={set("client_address")} /></Field>
             <Field label="Company registration number"><input value={form.client_company_reg} onChange={set("client_company_reg")} /></Field>
