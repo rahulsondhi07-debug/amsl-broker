@@ -125,6 +125,13 @@ h1, h2, h3 { color: var(--ink); margin: 0; }
 .badge.green { background: #ecfdf5; color: #059669; }
 .badge.amber { background: #fffbeb; color: #d97706; }
 .badge.slate { background: var(--slate-100); color: var(--slate-500); }
+.badge.rose { background: #fff1f2; color: #E11D48; }
+
+/* ---------- bill validation form sections ---------- */
+.form-section-title { grid-column: 1 / -1; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--slate-500); margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--slate-100); }
+.checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--slate-600); padding-top: 8px; }
+.checkbox-row input { width: auto; }
+.tbl.sm th, .tbl.sm td { padding: 6px 8px; font-size: 12px; }
 .badge.rose { background: #fff1f2; color: #e11d48; }
 
 /* ---------- tables ---------- */

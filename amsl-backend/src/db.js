@@ -267,45 +267,11 @@ export function migrate() {
    "product_name TEXT", "tariff_name TEXT", "acq_renewal TEXT", "tariff_type TEXT",
    "supplier_start TEXT", "tariff_end TEXT", "supplier_end TEXT", "fixed_price_term INTEGER",
    "standing_charge REAL", "day_rate REAL", "night_rate REAL", "ewe_rate REAL", "kva_charge REAL", "broker_commission REAL",
-   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT"
+   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT", "tolerance_pct REAL"
   ].forEach(cc);
   // Ticket fields (match production Add Ticket form)
   addCol("ALTER TABLE tickets ADD COLUMN corporate_sme TEXT");
   addCol("ALTER TABLE tickets ADD COLUMN description   TEXT");
-
-  // Bill Validation & Energy Claim module
-  db.exec(`CREATE TABLE IF NOT EXISTS bill_validations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ref TEXT,
-    contract_id INTEGER,
-    business_id INTEGER,
-    business_name TEXT,
-    supplier_id INTEGER,
-    supplier_name TEXT,
-    utility TEXT,
-    meter_mpan_mpr TEXT,
-    period TEXT,
-    days INTEGER DEFAULT 30,
-    billed_consumption REAL,
-    billed_standing_charge REAL,
-    billed_unit_rate REAL,
-    billed_amount REAL,
-    vat_rate REAL DEFAULT 20,
-    contracted_standing_charge REAL,
-    contracted_unit_rate REAL,
-    expected_amount REAL,
-    variance REAL,
-    status TEXT DEFAULT 'Pending',
-    claim_amount REAL DEFAULT 0,
-    findings TEXT,
-    notes TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  )`);
-  // CCL / EII / volume-tolerance claim fields
-  ["ccl_charged REAL", "ccl_rate REAL", "ccl_relief_pct REAL", "ccl_exempt INTEGER DEFAULT 0", "ccl_rebate REAL DEFAULT 0",
-   "eii_eligible INTEGER DEFAULT 0", "eii_policy_cost REAL", "eii_relief_pct REAL", "eii_relief REAL DEFAULT 0",
-   "eac REAL", "tolerance_pct REAL", "volume_status TEXT", "total_claim REAL DEFAULT 0"
-  ].forEach((c) => addCol(`ALTER TABLE bill_validations ADD COLUMN ${c}`));
   // Product price-book fields (match production Add Product form)
   const pc = (c) => addCol(`ALTER TABLE products ADD COLUMN ${c}`);
   ["standing_charge_type TEXT", "fuel_mix TEXT", "max_commission REAL", "commission_increment REAL",
@@ -482,6 +448,106 @@ export function migrate() {
       variance     REAL,
       status       TEXT NOT NULL DEFAULT 'Exception'
     );
+
+    -- Bill Validation & Energy Claims module
+    CREATE TABLE IF NOT EXISTS bill_validations (
+      id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+      ref                        TEXT,
+      contract_id                INTEGER REFERENCES contracts(id) ON DELETE SET NULL,
+      business_id                INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+      business_name              TEXT,
+      supplier_id                INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      supplier_name              TEXT,
+      utility                    TEXT,
+      meter_mpan_mpr             TEXT,
+      period                     TEXT,
+      days                       INTEGER DEFAULT 30,
+      billed_consumption         REAL,
+      billed_standing_charge     REAL,
+      billed_unit_rate           REAL,
+      billed_amount              REAL,
+      vat_rate                   REAL DEFAULT 20,
+      contracted_standing_charge REAL,
+      contracted_unit_rate       REAL,
+      expected_amount            REAL,
+      variance                   REAL DEFAULT 0,
+      -- CCL exemption / rebate
+      ccl_charged                REAL DEFAULT 0,
+      ccl_rate                   REAL DEFAULT 0.775,
+      ccl_relief_pct             REAL DEFAULT 0,
+      ccl_exempt                 INTEGER DEFAULT 0,
+      ccl_rebate                 REAL DEFAULT 0,
+      -- Energy-Intensive Industry relief
+      eii_eligible               INTEGER DEFAULT 0,
+      eii_policy_cost            REAL DEFAULT 0,
+      eii_relief_pct             REAL DEFAULT 85,
+      eii_relief                 REAL DEFAULT 0,
+      -- Volume tolerance
+      eac                        REAL,
+      tolerance_pct              REAL DEFAULT 20,
+      volume_status              TEXT DEFAULT 'Within',
+      -- Aggregate
+      total_claim                REAL DEFAULT 0,
+      status                     TEXT NOT NULL DEFAULT 'Pending',
+      claim_amount               REAL DEFAULT 0,
+      findings                   TEXT,
+      notes                      TEXT,
+      -- Meter reading cross-check
+      meter_reading_start        REAL,
+      meter_reading_end          REAL,
+      -- VAT rate verification
+      vat_rate_expected          REAL DEFAULT 20,
+      -- Pass-through verification: Transmission (TNUoS) & Distribution (DUoS) fixed charges
+      tnuos_charged               REAL DEFAULT 0,
+      tnuos_rate                  REAL DEFAULT 0,
+      duos_charged                REAL DEFAULT 0,
+      duos_rate                   REAL DEFAULT 0,
+      bsuos_charged                REAL DEFAULT 0,
+      ncc_compensation             REAL DEFAULT 0,
+      -- Error detection / supplier follow-up
+      duplicate_flag              INTEGER DEFAULT 0,
+      meter_data_flag             INTEGER DEFAULT 0,
+      supplier_query_status       TEXT DEFAULT 'Not Raised',   -- Not Raised | Raised | Resolved
+      supplier_query_notes        TEXT,
+      supplier_query_raised_at    TEXT,
+      -- Claim pipeline (Sales Agent -> Back Office -> Reporter workflow)
+      claim_stage                 TEXT DEFAULT 'service_agreed',
+      claim_stage_updated_at      TEXT,
+      payment_received_amount     REAL,
+      payment_received_at         TEXT,
+      -- Client Agreement / Letter of Authority (CCA/EII/CCL rebate service)
+      client_name                TEXT,
+      client_address             TEXT,
+      client_company_reg         TEXT,
+      sic_code                   TEXT,
+      bill_file_name              TEXT,
+      bill_uploaded_at             TEXT,
+      loa_status                 TEXT DEFAULT 'Not Sent',   -- Not Sent | Sent | Signed
+      loa_sent_at                TEXT,
+      created_at                 TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- EII Certificates (modelled on real DBT certificates, e.g. EVTEC Aluminium 6457-1/-2/-3)
+    -- One certificate can cover multiple meters (MSIDs), each with its own Proportion Exempt %.
+    CREATE TABLE IF NOT EXISTS eii_certificates (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      certificate_number  TEXT,
+      business_id         INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+      business_name       TEXT NOT NULL,
+      company_number      TEXT,
+      date_of_issue       TEXT,
+      validity_start      TEXT NOT NULL,
+      validity_end        TEXT NOT NULL,
+      eligible_product    TEXT,
+      notes               TEXT,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS eii_certificate_meters (
+      id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+      certificate_id         INTEGER NOT NULL REFERENCES eii_certificates(id) ON DELETE CASCADE,
+      msid                   TEXT NOT NULL,
+      proportion_exempt_pct  REAL NOT NULL DEFAULT 100
+    );
   `);
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
   setDef.run("brand_name", "AMSL Broker");
@@ -526,7 +592,9 @@ export const MENU_CATALOG = [
   { key: "/renewals", label: "Renewals" }, { key: "/contracts", label: "Contracts" },
   { key: "/master", label: "Master Management" },
   { key: "/tickets", label: "Tickets" }, { key: "/permissions", label: "Permissions" },
-  { key: "/commission", label: "Commission" }, { key: "/tutorials", label: "Platform Guide" },
+  { key: "/commission", label: "Commission" }, { key: "/bill-validation", label: "Bill Validation" },
+  { key: "/eii-certificates", label: "EII Certificates" },
+  { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];
 export const FULL_ACCESS_ROLES = ["Admin", "Super User"];

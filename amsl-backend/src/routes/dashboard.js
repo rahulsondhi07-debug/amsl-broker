@@ -165,34 +165,6 @@ r.get("/", (req, res) => {
   });
 
   const leadsN = stats.leads, converted = stats.customers;
-
-  // V1.6 #1: clickable status cards (by journey stage) + agencies active/inactive
-  const js = (keys) => one(`SELECT COUNT(*) c FROM businesses WHERE journey_stage IN (${keys.map(() => "?").join(",")})`, ...keys).c;
-  const agenciesActive = one("SELECT COUNT(*) c FROM agencies WHERE status='Active'").c;
-  const agenciesTotal = stats.agencies;
-  const statusCards = [
-    { key: "leads",      label: "Leads",              sub: "Raw / Qualified",        count: js(["RAW_LEAD", "QUALIFIED"]),           to: "/leads" },
-    { key: "prospects",  label: "Prospects",          sub: "Quoted / Sent for E-Sign", count: js(["QUOTE_CREATED", "QUOTED", "ESIGN_SENT"]), to: "/pipeline?group=Prospect" },
-    { key: "won",        label: "Won",                sub: null,                     count: js(["WON"]),                             to: "/pipeline?stage=WON" },
-    { key: "under_reg",  label: "Under Registration", sub: null,                     count: js(["UNDER_REGISTRATION"]),              to: "/pipeline?stage=UNDER_REGISTRATION" },
-    { key: "live",       label: "Live",               sub: null,                     count: js(["LIVE"]),                            to: "/pipeline?stage=LIVE" },
-    { key: "renewals",   label: "Renewals",           sub: "To Be Renewed / Renewed", count: js(["UP_FOR_RENEWAL", "RENEWED"]),       to: "/renewals" },
-    { key: "agencies",   label: "Total Agencies",     sub: `${agenciesActive} Active / ${agenciesTotal - agenciesActive} Inactive`, count: agenciesTotal, to: "/agencies" },
-    { key: "objected",   label: "Objected",           sub: null,                     count: js(["OBJECTED"]),                        to: "/pipeline?stage=OBJECTED" },
-    { key: "rejected",   label: "Rejected",           sub: null,                     count: js(["REJECTED"]),                        to: "/pipeline?stage=OBJECTED" },
-    { key: "lost",       label: "Lost",               sub: null,                     count: js(["LOST"]),                            to: "/pipeline?stage=LOST" },
-  ];
-
-  // V1.6 #1: Top 5 performing agencies (by commission on their contracts)
-  const topAgencies = all(`SELECT ag.id, ag.name, ag.status,
-                             (SELECT COUNT(*) FROM contracts c WHERE c.agency_id=ag.id) AS contracts,
-                             (SELECT COALESCE(SUM(c.commission_value),0) FROM contracts c WHERE c.agency_id=ag.id) AS commission
-                           FROM agencies ag ORDER BY commission DESC, contracts DESC LIMIT 5`);
-
-  // V1.6 #1: Commission Status widget (from the commission schedule)
-  const schedRow = (st) => one("SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM commission_schedule WHERE status=?", st);
-  const commissionStatus = ["Projected", "Reconciled", "Paid"].map((st) => ({ status: st, count: schedRow(st).c, amount: Math.round(schedRow(st).s) }));
-
   res.json({
     period: p,
     data: {
@@ -220,10 +192,7 @@ r.get("/", (req, res) => {
       recentContracts: all(`SELECT contract_no, business_name, status, commission_value FROM contracts ORDER BY created_at DESC LIMIT 5`),
       topAgents: all(`SELECT a.id, a.name, a.status,
                         (SELECT COALESCE(SUM(c.commission_value),0) FROM contracts c WHERE c.agent_id=a.id) AS commission
-                      FROM agents a ORDER BY commission DESC LIMIT 5`),
-      statusCards,
-      topAgencies,
-      commissionStatus,
+                      FROM agents a ORDER BY commission DESC`),
     },
   });
 });

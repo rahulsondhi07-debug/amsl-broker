@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, Link } from "react-router-do
 import {
   LayoutDashboard, Building2, Users, Truck, CreditCard, Package,
   UserPlus, FilePlus2, ClipboardList, UserCheck, FileSignature, Ticket,
-  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ReceiptText} from "lucide-react";
+  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2} from "lucide-react";
 import { useAuth } from "./AuthContext.jsx";
 import { api } from "../api.js";
 import { initials } from "./ui.jsx";
@@ -62,7 +62,8 @@ const NAV = [
   { to: "/contracts", icon: FileSignature, label: "Contracts" },
   { to: "/master", icon: Boxes, label: "Master Management" },
   { to: "/commission", icon: Coins, label: "Commission" },
-  { to: "/bill-validation", icon: ReceiptText, label: "Bill Validation" },
+  { to: "/bill-validation", icon: ShieldAlert, label: "Bill Validation" },
+  { to: "/eii-certificates", icon: FileCheck2, label: "EII Certificates" },
   { to: "/tutorials", icon: GraduationCap, label: "Platform Guide" },
   { to: "/settings", icon: SlidersHorizontal, label: "System Settings" },
   { to: "/branding", icon: Palette, label: "Branding" },

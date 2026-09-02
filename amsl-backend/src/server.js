@@ -13,6 +13,7 @@ import branding from "./routes/branding.js";
 import platform from "./routes/platform.js";
 import commission from "./routes/commission.js";
 import billValidation from "./routes/billValidation.js";
+import eiiCertificates from "./routes/eiiCertificates.js";
 import { seedCommissionConfig, generateAllCommissions } from "./commissionEngine.js";
 import { seedPipeline } from "./seedPipeline.js";
 
@@ -70,6 +71,7 @@ api.use("/branding", branding);
 api.use("/platform", platform);
 api.use("/commission", commission);
 api.use("/bill-validation", billValidation);
+api.use("/eii-certificates", eiiCertificates);
 api.use("/comparison", comparison);
 api.use("/auth", auth);
 api.use("/agencies", m.agencies);

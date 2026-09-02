@@ -232,7 +232,7 @@ export const contracts = (() => {
               "meter_serial","current_read","requested_start",
               "product_name","tariff_name","acq_renewal","tariff_type","supplier_start","tariff_end","supplier_end","fixed_price_term",
               "standing_charge","day_rate","night_rate","ewe_rate","kva_charge","broker_commission",
-              "payment_method","payment_amount","billing_period"],
+              "payment_method","payment_amount","billing_period","tolerance_pct"],
     searchColumns: ["contract_no","business_name","meter_mpan_mpr"],
     listSql: base,
   });
