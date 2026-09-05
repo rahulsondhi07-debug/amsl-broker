@@ -47,9 +47,10 @@ function NotificationsBell() {
 
 const NAV = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard", end: true },
-  { group: "Agency & Agents", icon: Building2, items: [
+  { group: "Agency, Agents & Branding", icon: Building2, items: [
     { to: "/agencies", icon: Building2, label: "Agencies" },
     { to: "/agents", icon: Users, label: "Agents" },
+    { to: "/branding", icon: Palette, label: "Branding" },
   ] },
   { group: "Suppliers & Products", icon: Truck, items: [
     { to: "/suppliers", icon: Truck, label: "Suppliers" },
@@ -57,21 +58,26 @@ const NAV = [
     { to: "/supplier-payments", icon: CreditCard, label: "Supplier Payments" },
     { to: "/products", icon: Package, label: "Products" },
   ] },
-  { to: "/leads", icon: UserPlus, label: "Leads" },
-  { to: "/quotes/new", icon: FilePlus2, label: "Get Quote" },
-  { to: "/quotes", icon: ClipboardList, label: "Quotes" },
+  { group: "Sales Pipeline", icon: Workflow, items: [
+    { to: "/leads", icon: UserPlus, label: "Leads" },
+    { to: "/pipeline", icon: Workflow, label: "Pipeline" },
+    { to: "/utility-opportunities", icon: Filter, label: "Utility Opportunities" },
+    { to: "/renewals", icon: CalendarClock, label: "Renewals" },
+    { to: "/master", icon: Boxes, label: "Master Management" },
+  ] },
+  { group: "Quotes", icon: ClipboardList, items: [
+    { to: "/quotes/new", icon: FilePlus2, label: "Get Quote" },
+    { to: "/quotes", icon: ClipboardList, label: "Quotes" },
+  ] },
   { to: "/customers", icon: UserCheck, label: "Customers" },
-  { to: "/pipeline", icon: Workflow, label: "Pipeline" },
-  { to: "/utility-opportunities", icon: Filter, label: "Utility Opportunities" },
-  { to: "/renewals", icon: CalendarClock, label: "Renewals" },
   { to: "/contracts", icon: FileSignature, label: "Contracts" },
-  { to: "/master", icon: Boxes, label: "Master Management" },
   { to: "/commission", icon: Coins, label: "Commission" },
-  { to: "/bill-validation", icon: ShieldAlert, label: "Bill Validation" },
-  { to: "/eii-certificates", icon: FileCheck2, label: "EII Certificates" },
+  { group: "Compliance", icon: ShieldAlert, items: [
+    { to: "/bill-validation", icon: ShieldAlert, label: "Bill Validation" },
+    { to: "/eii-certificates", icon: FileCheck2, label: "EII Certificates" },
+  ] },
   { to: "/tutorials", icon: GraduationCap, label: "Platform Guide" },
   { to: "/settings", icon: SlidersHorizontal, label: "System Settings" },
-  { to: "/branding", icon: Palette, label: "Branding" },
   { to: "/tickets", icon: Ticket, label: "Tickets" },
 ];
 
