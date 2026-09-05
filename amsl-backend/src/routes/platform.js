@@ -38,6 +38,18 @@ r.post("/config", (req, res) => {
     throw e;
   }
 });
+r.patch("/config/:id", (req, res) => {
+  const { value } = req.body;
+  if (!value) return res.status(400).json({ error: "value required" });
+  try {
+    const info = db.prepare("UPDATE config_lookups SET value=? WHERE id=?").run(value, req.params.id);
+    if (!info.changes) return res.status(404).json({ error: "not found" });
+    res.json({ data: one("SELECT * FROM config_lookups WHERE id=?", req.params.id) });
+  } catch (e) {
+    if (/UNIQUE/.test(e.message)) return res.status(409).json({ error: `"${value}" already exists in this category.` });
+    throw e;
+  }
+});
 r.delete("/config/:id", (req, res) => {
   const info = db.prepare("DELETE FROM config_lookups WHERE id=?").run(req.params.id);
   if (!info.changes) return res.status(404).json({ error: "not found" });

@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, Link } from "react-router-do
 import {
   LayoutDashboard, Building2, Users, Truck, CreditCard, Package,
   UserPlus, FilePlus2, ClipboardList, UserCheck, FileSignature, Ticket,
-  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2} from "lucide-react";
+  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter} from "lucide-react";
 import { useAuth } from "./AuthContext.jsx";
 import { api } from "../api.js";
 import { initials } from "./ui.jsx";
@@ -47,17 +47,22 @@ function NotificationsBell() {
 
 const NAV = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard", end: true },
-  { to: "/agencies", icon: Building2, label: "Agencies" },
-  { to: "/agents", icon: Users, label: "Agents" },
-  { to: "/suppliers", icon: Truck, label: "Suppliers" },
-  { to: "/tariffs", icon: PoundSterling, label: "Tariffs" },
-  { to: "/supplier-payments", icon: CreditCard, label: "Supplier Payments" },
-  { to: "/products", icon: Package, label: "Products" },
+  { group: "Agency & Agents", icon: Building2, items: [
+    { to: "/agencies", icon: Building2, label: "Agencies" },
+    { to: "/agents", icon: Users, label: "Agents" },
+  ] },
+  { group: "Suppliers & Products", icon: Truck, items: [
+    { to: "/suppliers", icon: Truck, label: "Suppliers" },
+    { to: "/tariffs", icon: PoundSterling, label: "Tariffs" },
+    { to: "/supplier-payments", icon: CreditCard, label: "Supplier Payments" },
+    { to: "/products", icon: Package, label: "Products" },
+  ] },
   { to: "/leads", icon: UserPlus, label: "Leads" },
   { to: "/quotes/new", icon: FilePlus2, label: "Get Quote" },
   { to: "/quotes", icon: ClipboardList, label: "Quotes" },
   { to: "/customers", icon: UserCheck, label: "Customers" },
   { to: "/pipeline", icon: Workflow, label: "Pipeline" },
+  { to: "/utility-opportunities", icon: Filter, label: "Utility Opportunities" },
   { to: "/renewals", icon: CalendarClock, label: "Renewals" },
   { to: "/contracts", icon: FileSignature, label: "Contracts" },
   { to: "/master", icon: Boxes, label: "Master Management" },
@@ -76,17 +81,63 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const doLogout = () => { logout(); nav("/login", { replace: true }); };
   const [allowed, setAllowed] = useState(null); // null = still loading -> show all
+  const [openGroup, setOpenGroup] = useState(null);
+  const railRef = useRef(null);
   useEffect(() => {
     api.permissionsEffective(user?.role || "").then((r) => setAllowed(r.data)).catch(() => setAllowed(null));
     api.branding().then((r) => { if (r.data?.primary_color) document.documentElement.style.setProperty("--brand", r.data.primary_color); }).catch(() => {});
   }, [user?.role]);
   const NAV_ADMIN = [...NAV, { to: "/permissions", icon: ShieldCheck, label: "Permissions" }];
-  const visibleNav = allowed ? NAV_ADMIN.filter((n) => allowed.includes(n.to)) : NAV;
+
+  // Filter both flat items and group sub-items by permission; drop a group entirely if none of its items are allowed.
+  // While permissions are still loading (allowed === null), fall back to the base NAV (Permissions stays hidden until we know).
+  const base = allowed === null ? NAV : NAV_ADMIN;
+  const isAllowed = (to) => allowed === null || allowed.includes(to);
+  const visibleNav = base
+    .map((n) => (n.group ? { ...n, items: n.items.filter((i) => isAllowed(i.to)) } : n))
+    .filter((n) => (n.group ? n.items.length > 0 : isAllowed(n.to)));
+
+  // Close an open flyout on outside click.
+  useEffect(() => {
+    if (!openGroup) return;
+    const onClick = (e) => { if (railRef.current && !railRef.current.contains(e.target)) setOpenGroup(null); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [openGroup]);
+
   return (
     <div className="app">
-      <aside className="rail">
+      <aside className="rail" ref={railRef}>
         <div className="logo">AB</div>
         {visibleNav.map((n) => {
+          if (n.group) {
+            const Icon = n.icon;
+            const groupActive = n.items.some((i) => loc.pathname.startsWith(i.to));
+            const open = openGroup === n.group;
+            return (
+              <div key={n.group} style={{ position: "relative" }}>
+                <button type="button" className={`rail-link ${groupActive ? "active" : ""}`}
+                  onClick={() => setOpenGroup(open ? null : n.group)}>
+                  <Icon size={19} />
+                  <span className="tip">{n.group}</span>
+                </button>
+                {open && (
+                  <div className="rail-flyout">
+                    <div className="rail-flyout-title">{n.group}</div>
+                    {n.items.map((i) => {
+                      const ItemIcon = i.icon;
+                      const active = loc.pathname.startsWith(i.to);
+                      return (
+                        <NavLink key={i.to} to={i.to} className={`rail-flyout-link ${active ? "active" : ""}`} onClick={() => setOpenGroup(null)}>
+                          <ItemIcon size={16} /> {i.label}
+                        </NavLink>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          }
           const Icon = n.icon;
           const active = n.end ? loc.pathname === "/" : loc.pathname.startsWith(n.to);
           return (

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, Eye } from "lucide-react";
+import { Plus, Eye, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "../components/ui.jsx";
@@ -11,6 +11,13 @@ const p = (v) => v == null ? "—" : Number(v).toFixed(2);
 export default function Suppliers() {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList("suppliers", { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+
+  const visible = data
+    .filter((r) => !statusFilter || (r.status || "").toLowerCase() === statusFilter.toLowerCase())
+    .filter((r) => !roleFilter || r.supplier_role === roleFilter);
+
   return (
     <>
       <div className="page-head">
@@ -18,21 +25,34 @@ export default function Suppliers() {
         <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={15} /> Add Supplier</button>
       </div>
       <Card>
-        <input placeholder="Search supplier, role…" value={q} onChange={(e) => setQ(e.target.value)}
-          style={{ width: "100%", padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)", marginBottom: 12 }} />
+        <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+          <input placeholder="Search supplier, role…" value={q} onChange={(e) => setQ(e.target.value)}
+            style={{ flex: 1, padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }} />
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Status</option><option value="Active">Active</option><option value="Inactive">Inactive</option>
+          </select>
+          <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Roles</option>{ROLES.map((r) => <option key={r}>{r}</option>)}
+          </select>
+          {(statusFilter || roleFilter || q) && (
+            <button className="btn ghost" onClick={() => { setStatusFilter(""); setRoleFilter(""); setQ(""); }}><RotateCcw size={14} /> Reset</button>
+          )}
+        </div>
         {error && <ErrorBanner error={error} onRetry={reload} />}
         {loading ? <Spinner /> : (
           <div className="table-wrap">
             <table className="tbl">
-              <thead><tr><th>Supplier</th><th>Role</th><th>Fuel Mix</th><th>Max Elec</th><th>Max Gas</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>Supplier</th><th>Role</th><th>Fuel Mix</th><th>Max Broker Comm Elec</th><th>Broker Comm Inc Elec</th><th>Max Broker Comm Gas</th><th>Broker Comm Inc Gas</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {data.map((r) => (
+                {visible.map((r) => (
                   <tr key={r.id}>
                     <td><span className="name">{r.name}</span></td>
                     <td style={{ fontSize: 12 }}>{r.supplier_role || "—"}</td>
                     <td style={{ fontSize: 12 }}>{r.fuel_mix || "—"}</td>
                     <td className="mono">{p(r.max_broker_comm_electric)}</td>
+                    <td className="mono">{p(r.broker_comm_inc_electric)}</td>
                     <td className="mono">{p(r.max_broker_comm_gas)}</td>
+                    <td className="mono">{p(r.broker_comm_inc_gas)}</td>
                     <td><Badge tone="green">{r.status}</Badge></td>
                     <td><Link className="btn ghost sm" to={`/suppliers/${r.id}`} title="View supplier"><Eye size={14} /> View</Link></td>
                   </tr>

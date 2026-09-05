@@ -9,6 +9,15 @@ const STRUCTURES = ["Charity", "Government Funded", "LLP", "LTD", "Non-profit Ma
 export default function Agencies() {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList("agencies", { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("");
+
+  const toggleStatus = async (r) => {
+    const next = (r.status === "Active" || r.status === "ACTIVE") ? "Inactive" : "Active";
+    await api.put(`/agencies/${r.id}`, { status: next });
+    reload();
+  };
+
+  const visible = statusFilter ? data.filter((r) => (r.status || "").toLowerCase() === statusFilter.toLowerCase()) : data;
 
   return (
     <>
@@ -18,15 +27,22 @@ export default function Agencies() {
       </div>
 
       <Card>
-        <input className="search" placeholder="Search agency, email, reg no…" value={q} onChange={(e) => setQ(e.target.value)}
-          style={{ width: "100%", padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)", marginBottom: 12 }} />
+        <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+          <input className="search" placeholder="Search agency, email, reg no…" value={q} onChange={(e) => setQ(e.target.value)}
+            style={{ flex: 1, padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }} />
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Status</option>
+            <option value="Active">Active</option>
+            <option value="Inactive">Inactive</option>
+          </select>
+        </div>
         {error && <ErrorBanner error={error} onRetry={reload} />}
         {loading ? <Spinner /> : (
           <div className="table-wrap">
             <table className="tbl">
               <thead><tr><th>Agency</th><th>Contact</th><th>Structure</th><th>Agents</th><th>White Label</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {data.map((r) => (
+                {visible.map((r) => (
                   <tr key={r.id}>
                     <td><span className="mini"><span className="ini sq">{initials(r.name)}</span><span className="name">{r.name}</span></span>
                       {r.company_reg_no && <div className="sub" style={{ fontSize: 11 }}>Reg {r.company_reg_no}</div>}</td>
@@ -34,7 +50,20 @@ export default function Agencies() {
                     <td style={{ fontSize: 12 }}>{r.business_structure || "—"}</td>
                     <td className="mono">{r.total_agents}</td>
                     <td>{Number(r.white_label) ? <Badge tone="indigo">On</Badge> : <span className="sub">—</span>}</td>
-                    <td><Badge tone={r.status === "Active" || r.status === "ACTIVE" ? "green" : "amber"}>{r.status}</Badge></td>
+                    <td>
+                      <label style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }} title="Click to toggle status">
+                        <input type="checkbox" checked={r.status === "Active" || r.status === "ACTIVE"} onChange={() => toggleStatus(r)} style={{ display: "none" }} />
+                        <span style={{
+                          width: 34, height: 18, borderRadius: 999, position: "relative", transition: "background .15s",
+                          background: (r.status === "Active" || r.status === "ACTIVE") ? "var(--indigo,#4F46E5)" : "#CBD5E1",
+                        }}>
+                          <span style={{
+                            position: "absolute", top: 2, left: (r.status === "Active" || r.status === "ACTIVE") ? 18 : 2,
+                            width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .15s",
+                          }} />
+                        </span>
+                      </label>
+                    </td>
                     <td><Link className="btn ghost sm" to={`/agencies/${r.id}`} title="View agency"><Eye size={14} /> View</Link></td>
                   </tr>
                 ))}
@@ -84,7 +113,13 @@ function AddAgency({ onClose, onSaved }) {
         </Field>
         <Field label="VAT No"><input value={f.vat_no} onChange={set("vat_no")} /></Field>
         <Field label="Agency Status">
-          <select value={f.status} onChange={set("status")}><option>Active</option><option>Inactive</option></select>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", paddingTop: 6 }}>
+            <input type="checkbox" checked={f.status === "Active"} onChange={(e) => setF({ ...f, status: e.target.checked ? "Active" : "Inactive" })} style={{ display: "none" }} />
+            <span style={{ width: 38, height: 20, borderRadius: 999, position: "relative", background: f.status === "Active" ? "var(--indigo,#4F46E5)" : "#CBD5E1", transition: "background .15s" }}>
+              <span style={{ position: "absolute", top: 2, left: f.status === "Active" ? 20 : 2, width: 16, height: 16, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+            </span>
+            <b style={{ fontSize: 11, color: f.status === "Active" ? "var(--indigo,#4F46E5)" : "#94A3B8" }}>{f.status.toUpperCase()}</b>
+          </label>
         </Field>
         <Field label="White Label">
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, paddingTop: 6 }}>

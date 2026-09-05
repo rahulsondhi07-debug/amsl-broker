@@ -192,7 +192,8 @@ export const JOURNEY_STAGES = [
   { key: "WON",                label: "Won",                 group: "Contract" },
   { key: "UNDER_REGISTRATION", label: "Under Registration",  group: "Contract" },
   { key: "LIVE",               label: "Live",                group: "Contract" },
-  { key: "OBJECTED",           label: "Objected / Rejected", group: "Other" },
+  { key: "OBJECTED",           label: "Objected",            group: "Other" },
+  { key: "REJECTED",           label: "Rejected",            group: "Other" },
   { key: "LOST",               label: "Lost",                group: "Other" },
   { key: "UP_FOR_RENEWAL",     label: "Up for Renewal",      group: "Other" },
   { key: "RENEWED",            label: "Renewed",             group: "Other" },
@@ -290,6 +291,14 @@ export function migrate() {
   addCol("ALTER TABLE meters ADD COLUMN transmission_charge REAL");
   addCol("ALTER TABLE meters ADD COLUMN aq                  INTEGER");
   addCol("ALTER TABLE meters ADD COLUMN last_read           TEXT");
+  // Lead Management parity: meter identity, supplier switching, segment, contract window
+  addCol("ALTER TABLE meters ADD COLUMN name                TEXT");
+  addCol("ALTER TABLE meters ADD COLUMN current_supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL");
+  addCol("ALTER TABLE meters ADD COLUMN transferring_supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL");
+  addCol("ALTER TABLE meters ADD COLUMN segment             TEXT");   // SME | Corporate | Domestic
+  addCol("ALTER TABLE meters ADD COLUMN contract_start      TEXT");
+  addCol("ALTER TABLE meters ADD COLUMN contract_end        TEXT");
+  addCol("ALTER TABLE sites ADD COLUMN postcode             TEXT");
   // V1.6-10/13 Bespoke Get Quick Quote fields
   addCol("ALTER TABLE quotes ADD COLUMN bespoke             INTEGER DEFAULT 0");
   addCol("ALTER TABLE quotes ADD COLUMN meter_point         TEXT");
@@ -555,23 +564,43 @@ export function migrate() {
   setDef.run("logo_url", "");
 }
 
-/* V1.0-17/19: seed platform settings lookups + tutorial entries. Idempotent. */
+/* V1.0-17/19: seed platform settings lookups + tutorial entries.
+   Made additive (not just "run once") the same way seedPermissions was fixed —
+   INSERT OR IGNORE against the UNIQUE(category,value) constraint means this is
+   safe to call on every boot and will pick up categories/values added later
+   without duplicating or disturbing anything a user has since edited. */
 export function seedPlatform() {
-  if (db.prepare("SELECT COUNT(*) c FROM config_lookups").get().c === 0) {
-    const cfg = {
-      "Contract Stage": ["New", "In Progress", "Signed", "Live", "Expired"],
-      "Lifecycle Status": ["Lead", "Active", "Closed", "Cancelled"],
-      "Lead Action": ["Call", "Email", "Callback", "No Answer", "Not Interested"],
-      "Callback Reason": ["No answer — retry", "Requested callback", "Send quote", "Awaiting documents", "Renewal discussion"],
-      "Priority Stage": ["Low", "Medium", "High", "Urgent"],
-      "Quote Status": ["Draft", "Quoted", "Sent", "Accepted", "Rejected"],
-      "Ticket Query Type": ["Billing", "Registration", "Objection", "General", "Complaint"],
-      "Payment Status": ["Projected", "Invoiced", "Paid", "Overdue", "Reconciled"],
-    };
-    const ins = db.prepare("INSERT OR IGNORE INTO config_lookups (category,value) VALUES (?,?)");
-    const tx = db.transaction(() => { for (const [cat, vals] of Object.entries(cfg)) vals.forEach((v) => ins.run(cat, v)); });
-    tx();
-  }
+  const cfg = {
+    "Contract Stage": ["New", "In Progress", "Signed", "Live", "Expired"],
+    "Lifecycle Status": ["Lead", "Active", "Closed", "Cancelled"],
+    "Lead Action": ["Call", "Email", "Callback", "No Answer", "Not Interested"],
+    "Callback Reason": ["No answer — retry", "Requested callback", "Send quote", "Awaiting documents", "Renewal discussion"],
+    "Priority Stage": ["Low", "Medium", "High", "Urgent"],
+    "Quote Status": ["Draft", "Quoted", "Sent", "Accepted", "Rejected"],
+    "Ticket Query Type": ["Pre-Contract Submission", "Live date request", "IT systems", "Partner Payments", "Registrations", "Pricing", "Partner Support", "Technical Support", "Contract Status", "Complaint"],
+    "Payment Status": ["Projected", "Invoiced", "Paid", "Overdue", "Reconciled"],
+    "Inclusion Type": ["Included", "Excluded", "Optional"],
+    "Supplier Status": ["Awaiting Price", "Failed Credit Check", "Quote Received", "Quote Not Received", "Deposit Required", "Declined due to Volume"],
+    "Billing Period": ["Monthly", "Quarterly", "Annually"],
+    "Contract Status": ["Pending", "Active", "Terminated", "Renewed"],
+    "Tariff Type": ["Fixed", "Variable", "Deemed", "Out of Contract"],
+    "Monthly Payment": ["Direct Debit", "BACS", "Card", "Cheque"],
+    "Price Book Status": ["Live", "Expired", "Pending Upload"],
+    "Position": ["Director", "Manager", "Sales Agent", "Admin", "Support"],
+    "Business Structure": ["Charity", "Government Funded", "LLP", "LTD", "Non-profit Making", "Partnership", "PLC", "Property Manager", "Private Limited Company", "Religious Institute", "Sole Trader", "Trust"],
+    "Payment Type": ["Direct Debit", "BACS", "Card"],
+    "Schedule Call Status": ["Scheduled", "Completed", "Missed", "Cancelled"],
+    "Contract Method": ["E-Sign", "Wet Signature", "Verbal (Recorded)"],
+    "Utility Mapping": ["Electricity", "Gas", "Water", "Dual Fuel"],
+    "Ticket Status": ["Open", "In Progress", "Resolved", "Closed"],
+  };
+  const ins = db.prepare("INSERT OR IGNORE INTO config_lookups (category,value) VALUES (?,?)");
+  const before = db.prepare("SELECT COUNT(*) c FROM config_lookups").get().c;
+  const tx = db.transaction(() => { for (const [cat, vals] of Object.entries(cfg)) vals.forEach((v) => ins.run(cat, v)); });
+  tx();
+  const after = db.prepare("SELECT COUNT(*) c FROM config_lookups").get().c;
+  if (before === 0) console.log(`Seeded config_lookups: ${after} values across ${Object.keys(cfg).length} categories.`);
+  else if (after > before) console.log(`Added ${after - before} new config_lookups value(s) for categories introduced since last deploy.`);
   if (db.prepare("SELECT COUNT(*) c FROM tutorials").get().c === 0) {
     const ins = db.prepare("INSERT INTO tutorials (title,kind,category,url,file_type) VALUES (?,?,?,?,?)");
     ins.run("Getting started with AMSL Broker", "video", "Onboarding", "https://example.com/getting-started.mp4", "MP4");
@@ -589,6 +618,7 @@ export const MENU_CATALOG = [
   { key: "/products", label: "Products" }, { key: "/leads", label: "Leads" },
   { key: "/quotes/new", label: "Get Quote" }, { key: "/quotes", label: "Quotes" },
   { key: "/customers", label: "Customers" }, { key: "/pipeline", label: "Pipeline" },
+  { key: "/utility-opportunities", label: "Utility Opportunities" },
   { key: "/renewals", label: "Renewals" }, { key: "/contracts", label: "Contracts" },
   { key: "/master", label: "Master Management" },
   { key: "/tickets", label: "Tickets" }, { key: "/permissions", label: "Permissions" },

@@ -67,6 +67,58 @@ r.get("/notifications", (_req, res) => {
   res.json({ data: all("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100") });
 });
 
+/* ---- Utility Opportunities: flat, filterable meter-level view across ALL leads/customers.
+   Matches the "manage the meters" flow — one row per meter, not per business, with the
+   full filter panel (business/agency/agent/segment/MPAN/postcode/consumption/supplier/
+   renewal window) needed to work a book of meters directly. Must come before /:id. */
+r.get("/utility-opportunities", (req, res) => {
+  const q = req.query;
+  const page = Math.max(1, parseInt(q.page) || 1);
+  const limit = Math.min(200, parseInt(q.limit) || 25);
+  const where = ["1=1"];
+  const params = [];
+
+  if (q.utility && q.utility !== "ALL") { where.push("m.utility=?"); params.push(q.utility); }
+  if (q.business_name) { where.push("b.business_name LIKE ?"); params.push(`%${q.business_name}%`); }
+  if (q.contact_name) { where.push("b.contact_name LIKE ?"); params.push(`%${q.contact_name}%`); }
+  if (q.contact_email) { where.push("b.contact_email LIKE ?"); params.push(`%${q.contact_email}%`); }
+  if (q.agency_id) { where.push("b.agency_id=?"); params.push(q.agency_id); }
+  if (q.agent_id) { where.push("b.agent_id=?"); params.push(q.agent_id); }
+  if (q.segment) { where.push("m.segment=?"); params.push(q.segment); }
+  if (q.mpan) { where.push("m.mpan_mprn LIKE ?"); params.push(`%${q.mpan}%`); }
+  if (q.postcode) { where.push("si.postcode LIKE ?"); params.push(`%${q.postcode}%`); }
+  if (q.city) { where.push("si.region LIKE ?"); params.push(`%${q.city}%`); }
+  if (q.current_supplier_id) { where.push("m.current_supplier_id=?"); params.push(q.current_supplier_id); }
+  if (q.min_consumption) { where.push("m.eac >= ?"); params.push(Number(q.min_consumption)); }
+  if (q.max_consumption) { where.push("m.eac <= ?"); params.push(Number(q.max_consumption)); }
+  if (q.stage) { where.push("b.journey_stage=?"); params.push(q.stage); }
+  if (q.days_to_renew) {
+    where.push("m.contract_end IS NOT NULL AND julianday(m.contract_end) - julianday('now') <= ?");
+    params.push(Number(q.days_to_renew));
+  }
+
+  const whereSql = "WHERE " + where.join(" AND ");
+  const baseSql = `
+    SELECT m.id AS meter_id, m.utility, m.mpan_mprn, m.eac, m.status, m.segment, m.name AS meter_name,
+           m.contract_start, m.contract_end,
+           CAST(julianday(m.contract_end) - julianday('now') AS INTEGER) AS days_to_renew,
+           cs.name AS current_supplier_name,
+           b.id AS business_id, b.ref, b.business_name, b.contact_name, b.contact_email, b.contact_mobile,
+           b.journey_stage, ag.name AS agency_name, a.name AS agent_name,
+           si.name AS site_name, si.postcode, si.region
+    FROM meters m
+    JOIN businesses b ON b.id = m.business_id
+    LEFT JOIN suppliers cs ON cs.id = m.current_supplier_id
+    LEFT JOIN sites si ON si.id = m.site_id
+    LEFT JOIN agencies ag ON ag.id = b.agency_id
+    LEFT JOIN agents a ON a.id = b.agent_id
+    ${whereSql}`;
+
+  const total = one(`SELECT COUNT(*) c FROM (${baseSql})`, ...params).c;
+  const rows = all(`${baseSql} ORDER BY m.id DESC LIMIT ? OFFSET ?`, ...params, limit, (page - 1) * limit);
+  res.json({ data: rows, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
+});
+
 /* ---- Full detail (details panel) ---- */
 r.get("/:id", (req, res) => {
   const row = one(`${baseSelect} WHERE b.id=?`, req.params.id);
@@ -75,6 +127,78 @@ r.get("/:id", (req, res) => {
   row.comments = all("SELECT * FROM customer_comments WHERE business_id=? ORDER BY created_at DESC", req.params.id);
   row.history = all("SELECT * FROM stage_history WHERE business_id=? ORDER BY changed_at DESC", req.params.id);
   res.json({ data: row });
+});
+
+/* ---- Sites (Site Address tab) ---- */
+r.get("/:id/sites", (req, res) => {
+  res.json({ data: all("SELECT * FROM sites WHERE business_id=? ORDER BY id", req.params.id) });
+});
+r.post("/:id/sites", (req, res) => {
+  const b = req.body || {};
+  const info = db.prepare("INSERT INTO sites (business_id,name,address,region,postcode) VALUES (?,?,?,?,?)")
+    .run(req.params.id, b.name || "Main Site", b.address || null, b.region || null, b.postcode || null);
+  res.status(201).json({ data: one("SELECT * FROM sites WHERE id=?", info.lastInsertRowid) });
+});
+r.put("/sites/:siteId", (req, res) => {
+  const b = req.body || {};
+  const cur = one("SELECT * FROM sites WHERE id=?", req.params.siteId);
+  if (!cur) return res.status(404).json({ error: "site not found" });
+  db.prepare("UPDATE sites SET name=?, address=?, region=?, postcode=? WHERE id=?")
+    .run(b.name ?? cur.name, b.address ?? cur.address, b.region ?? cur.region, b.postcode ?? cur.postcode, req.params.siteId);
+  res.json({ data: one("SELECT * FROM sites WHERE id=?", req.params.siteId) });
+});
+r.delete("/sites/:siteId", (req, res) => {
+  const info = db.prepare("DELETE FROM sites WHERE id=?").run(req.params.siteId);
+  if (!info.changes) return res.status(404).json({ error: "site not found" });
+  res.json({ data: { deleted: true } });
+});
+
+/* ---- Meters (Electric/Gas Meter Detail tabs) ---- */
+r.get("/:id/meters", (req, res) => {
+  const utility = req.query.utility; // ELEC | GAS
+  const rows = all(
+    `SELECT m.*, si.name AS site_name, cs.name AS current_supplier_name, ts.name AS transferring_supplier_name
+     FROM meters m LEFT JOIN sites si ON si.id=m.site_id
+     LEFT JOIN suppliers cs ON cs.id=m.current_supplier_id LEFT JOIN suppliers ts ON ts.id=m.transferring_supplier_id
+     WHERE m.business_id=?${utility ? " AND m.utility=?" : ""} ORDER BY m.id`,
+    ...(utility ? [req.params.id, utility] : [req.params.id])
+  );
+  res.json({ data: rows });
+});
+r.post("/:id/meters", (req, res) => {
+  const b = req.body || {};
+  if (!b.utility) return res.status(400).json({ error: "utility (ELEC|GAS) is required" });
+  const info = db.prepare(`INSERT INTO meters
+    (business_id, site_id, utility, mpan_mprn, eac, status, name, current_supplier_id, transferring_supplier_id, segment, contract_start, contract_end)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(req.params.id, b.site_id || null, b.utility, b.mpan_mprn || null, b.eac || null, b.status || "C",
+      b.name || null, b.current_supplier_id || null, b.transferring_supplier_id || null, b.segment || "SME",
+      b.contract_start || null, b.contract_end || null);
+  res.status(201).json({ data: one("SELECT * FROM meters WHERE id=?", info.lastInsertRowid) });
+});
+r.put("/meters/:meterId", (req, res) => {
+  const cur = one("SELECT * FROM meters WHERE id=?", req.params.meterId);
+  if (!cur) return res.status(404).json({ error: "meter not found" });
+  const b = req.body || {};
+  const cols = ["site_id", "mpan_mprn", "eac", "status", "name", "current_supplier_id", "transferring_supplier_id", "segment", "contract_start", "contract_end"];
+  const merged = Object.fromEntries(cols.map((c) => [c, b[c] !== undefined ? b[c] : cur[c]]));
+  db.prepare(`UPDATE meters SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`).run(...cols.map((c) => merged[c]), req.params.meterId);
+  res.json({ data: one("SELECT * FROM meters WHERE id=?", req.params.meterId) });
+});
+r.delete("/meters/:meterId", (req, res) => {
+  const info = db.prepare("DELETE FROM meters WHERE id=?").run(req.params.meterId);
+  if (!info.changes) return res.status(404).json({ error: "meter not found" });
+  res.json({ data: { deleted: true } });
+});
+
+/* ---- Quotes for this business (Quote tab) ---- */
+r.get("/:id/quotes", (req, res) => {
+  res.json({ data: all(`SELECT q.*, s.name AS supplier_name FROM quotes q LEFT JOIN suppliers s ON s.id=q.supplier_id WHERE q.business_id=? ORDER BY q.id DESC`, req.params.id) });
+});
+
+/* ---- Callbacks scoped to a business (Callback tab) ---- */
+r.get("/:id/callbacks", (req, res) => {
+  res.json({ data: all("SELECT * FROM callbacks WHERE business_id=? ORDER BY due_at DESC", req.params.id) });
 });
 
 /* ---- Move stage (records history) ---- */

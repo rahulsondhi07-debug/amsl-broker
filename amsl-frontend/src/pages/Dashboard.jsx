@@ -1,40 +1,54 @@
 import { useEffect, useState } from "react";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  AreaChart, Area, PieChart, Pie, Cell,
+  PieChart, Pie, Cell,
 } from "recharts";
-import {
-  UserPlus, ClipboardList, FileSignature, UserCheck, Building2, Truck, Users,
-  ArrowUpRight, TrendingUp, ChevronRight,
-} from "lucide-react";
+import { TrendingUp, CheckCircle2, Clock, Eye } from "lucide-react";
 import { Link } from "react-router-dom";
-import { api, JOURNEY_STAGES } from "../api.js";
+import { api } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, initials } from "../components/ui.jsx";
 
-const INDIGO = "#4f46e5", VIOLET = "#8b5cf6";
-const STAT_ICONS = { leads: UserPlus, quotes: ClipboardList, contracts: FileSignature, customers: UserCheck, sites: Building2, suppliers: Truck, agencies: Users, agents: Users };
-const STAT_ORDER = ["leads", "quotes", "contracts", "customers", "sites", "suppliers", "agencies", "agents"];
+const INDIGO = "#4f46e5";
 const tooltip = { borderRadius: 12, border: "1px solid #e2e8f0", boxShadow: "0 8px 24px rgba(15,23,42,.08)", fontSize: 12 };
+const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { maximumFractionDigits: 2 });
+
+// Matches production's exact per-card accent colours (stat-card-leads etc.)
+const CARD_ACCENTS = {
+  leads: "#f59e0b", prospects: "#8b5cf6", won: "#10b981", underRegistration: "#3b82f6", live: "#22c55e",
+  renewals: "#06b6d4", totalAgencies: "#f43f5e", objected: "#f97316", rejected: "#ef4444", lost: "#64748b",
+};
+const COMMISSION_COLORS = { Paid: "#22c55e", Pending: "#f59e0b", Processing: "#4f46e5", Overdue: "#ef4444" };
 
 export default function Dashboard() {
   const [period, setPeriod] = useState("monthly");
-  const [d, setD] = useState(null);
+  const [cards, setCards] = useState(null);
+  const [earning, setEarning] = useState(null);
+  const [earningView, setEarningView] = useState("Revenue"); // Revenue | Quotes | Contracts
+  const [earningRange, setEarningRange] = useState("Yearly");
+  const [commission, setCommission] = useState(null);
+  const [topAgents, setTopAgents] = useState(null);
+  const [topAgencies, setTopAgencies] = useState(null);
+  const [recentContracts, setRecentContracts] = useState(null);
   const [err, setErr] = useState(null);
-  const [loading, setLoading] = useState(true);
 
   const load = () => {
-    setLoading(true); setErr(null);
-    api.dashboard(period).then((r) => { setD(r.data); setLoading(false); })
-      .catch((e) => { setErr(e.message); setLoading(false); });
+    setErr(null);
+    Promise.all([
+      api.dashboardStatCards(), api.dashboardEarningStats(), api.dashboardCommissionStatus(),
+      api.dashboardTopAgentPerformance(), api.dashboardTopAgencies(), api.dashboardRecentContractsFull(),
+    ]).then(([c, e, cs, ta, tag, rc]) => {
+      setCards(c.data); setEarning(e.data); setCommission(cs.data);
+      setTopAgents(ta.data); setTopAgencies(tag.data); setRecentContracts(rc.data);
+    }).catch((err) => setErr(err.message));
   };
-  useEffect(load, [period]); // eslint-disable-line
+  useEffect(load, []); // eslint-disable-line
 
-  if (loading) return <Spinner label="Loading dashboard…" />;
   if (err) return <ErrorBanner error={err} onRetry={load} />;
-  if (!d) return null;
+  if (!cards || !earning || !commission || !topAgents || !topAgencies || !recentContracts) return <Spinner label="Loading dashboard…" />;
 
   const today = new Date().toLocaleDateString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-  const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { maximumFractionDigits: 2 });
+  const dataKey = earningView === "Revenue" ? "revenue" : earningView === "Quotes" ? "quotes" : "contracts";
+  const donutData = commission.breakdown.filter((b) => b.amount > 0);
 
   return (
     <>
@@ -57,203 +71,188 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* stat cards */}
-      <div className="grid stat-grid">
-        {STAT_ORDER.map((k) => {
-          const Icon = STAT_ICONS[k];
-          return (
-            <div className="stat" key={k}>
-              <div className="top"><span className="ic"><Icon size={18} /></span><ArrowUpRight size={16} color="#cbd5e1" /></div>
-              <div className="val">{d.stats[k]}</div>
-              <div className="lab">{k}</div>
-            </div>
-          );
-        })}
+      {/* status-card row — 5 columns x 2 rows, matching production exactly */}
+      <div className="grid" style={{ gridTemplateColumns: "repeat(5, 1fr)", marginBottom: 20 }}>
+        <StatCard to="/pipeline?stage=RAW_LEAD" label="Leads" value={cards.leads} accent={CARD_ACCENTS.leads} />
+        <StatCard to="/pipeline?stage=QUOTED" label="Prospects" value={cards.prospects.total} accent={CARD_ACCENTS.prospects}
+          subs={[["Quoted:", cards.prospects.quoted], ["Sent for E-Sign:", cards.prospects.sentForESign]]} />
+        <StatCard to="/pipeline?stage=WON" label="Won" value={cards.won} accent={CARD_ACCENTS.won} />
+        <StatCard to="/pipeline?stage=UNDER_REGISTRATION" label="Under Registration" value={cards.underRegistration} accent={CARD_ACCENTS.underRegistration} />
+        <StatCard to="/pipeline?stage=LIVE" label="Live" value={cards.live} accent={CARD_ACCENTS.live} />
+        <StatCard to="/pipeline?stage=UP_FOR_RENEWAL" label="Renewals" value={cards.renewals.total} accent={CARD_ACCENTS.renewals}
+          subs={[["To be Renewed:", cards.renewals.toBeRenewed], ["Renewed:", cards.renewals.renewed]]} />
+        <StatCard to="/agencies" label="Total Agencies" value={cards.totalAgencies.total} accent={CARD_ACCENTS.totalAgencies}
+          subs={[["Active:", cards.totalAgencies.active], ["Inactive:", cards.totalAgencies.inactive]]} />
+        <StatCard to="/pipeline?stage=OBJECTED" label="Objected" value={cards.objected} accent={CARD_ACCENTS.objected} />
+        <StatCard to="/pipeline?stage=REJECTED" label="Rejected" value={cards.rejected} accent={CARD_ACCENTS.rejected} />
+        <StatCard to="/pipeline?stage=LOST" label="Lost" value={cards.lost} accent={CARD_ACCENTS.lost} />
       </div>
 
-      <div className="grid cols-3" style={{ marginBottom: 0 }}>
-        <PipelineStrip />
-      </div>
-
-      {/* earning + demographics */}
+      {/* Earning Statistics + Commission Status */}
       <div className="grid cols-3">
-        <Card title="Yearly Earning Overview" className="span-2">
-          <div className="grid cols-3" style={{ marginBottom: 14 }}>
-            <div className="metric"><div className="v">{d.earning.quotesCreated}</div><div className="l">Quotes Created</div></div>
-            <div className="metric"><div className="v accent">{money(d.earning.expectedCommissions)}</div><div className="l">Expected Commissions</div></div>
-            <div className="metric"><div className="v">{d.earning.signedContracts}</div><div className="l">Signed Contracts</div></div>
+        <Card className="span-2" title="Earning Statistics" right={
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div className="toggle">
+              {["Revenue", "Quotes", "Contracts"].map((v) => (
+                <button key={v} className={earningView === v ? "active" : ""} onClick={() => setEarningView(v)}>{v}</button>
+              ))}
+            </div>
+            <div className="toggle">
+              {["Yearly", "Monthly"].map((v) => (
+                <button key={v} className={earningRange === v ? "active" : ""} onClick={() => setEarningRange(v)}>{v}</button>
+              ))}
+            </div>
           </div>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={d.earning.byMonth} barCategoryGap={18}>
-              <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={INDIGO} /><stop offset="100%" stopColor={VIOLET} /></linearGradient></defs>
+        }>
+          <div className="sub" style={{ marginTop: -8, marginBottom: 14 }}>Real-time commission and revenue analytics</div>
+          <div className="grid cols-2" style={{ marginBottom: 16 }}>
+            <MetricBox icon={<TrendingUp size={14} />} label="Total Earnings" value={money(earning.totalEarnings)} delta="+14.2%" />
+            <MetricBox icon={<TrendingUp size={14} />} label="Monthly Earnings" value={money(earning.monthlyEarnings)} delta="+8.7%" />
+            <MetricBox icon={<Clock size={14} />} label="Pending Commission" value={money(earning.pendingCommission)} tag="Pending Review" />
+            <MetricBox icon={<CheckCircle2 size={14} />} label="Paid Commission" value={money(earning.paidCommission)} tag="Completed" />
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={earning.byMonth} barCategoryGap={18}>
               <CartesianGrid vertical={false} stroke="#eef2f7" />
               <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#94a3b8" }} />
               <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#94a3b8" }} allowDecimals={false} />
               <Tooltip cursor={{ fill: "#f1f5f9" }} contentStyle={tooltip} />
-              <Bar dataKey="quotes" fill="url(#bg)" radius={[6, 6, 0, 0]} />
+              <Bar dataKey={dataKey} fill={INDIGO} radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </Card>
 
-        <Card title="Demographics">
-          <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-            <div style={{ position: "relative", width: 112, height: 112, flexShrink: 0 }}>
+        <Card title="Commission Status" right={<Badge>Total: {money(commission.total)}</Badge>}>
+          <div className="sub" style={{ marginTop: -8, marginBottom: 14 }}>Commission payouts &amp; status breakdown</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <div style={{ position: "relative", width: 120, height: 120, flexShrink: 0 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={[{ v: d.demographics.leads || 1 }, { v: Math.max(1, d.demographics.converted) }]} dataKey="v" innerRadius={38} outerRadius={54} startAngle={90} endAngle={-270} stroke="none">
-                    <Cell fill={INDIGO} /><Cell fill="#e2e8f0" />
+                  <Pie data={donutData.length ? donutData : [{ label: "None", amount: 1 }]} dataKey="amount" nameKey="label" innerRadius={40} outerRadius={58} startAngle={90} endAngle={-270} stroke="none">
+                    {(donutData.length ? donutData : [{ label: "None" }]).map((d, i) => (
+                      <Cell key={i} fill={COMMISSION_COLORS[d.label] || "#e2e8f0"} />
+                    ))}
                   </Pie>
                 </PieChart>
               </ResponsiveContainer>
               <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>{d.demographics.total}</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: "#0f172a" }}>{money(commission.total)}</div>
                   <div style={{ fontSize: 10, color: "#94a3b8" }}>Total</div>
                 </div>
               </div>
             </div>
             <div style={{ flex: 1 }}>
-              <div className="legend"><span className="l"><span className="dot" style={{ background: INDIGO }} />New Leads</span><span className="v">{d.demographics.leads}</span></div>
-              <div className="legend"><span className="l"><span className="dot" style={{ background: VIOLET }} />Prospects</span><span className="v">0</span></div>
-              <div className="legend"><span className="l"><span className="dot" style={{ background: "#e2e8f0" }} />Converted</span><span className="v">{d.demographics.converted}</span></div>
+              {commission.breakdown.map((b) => (
+                <div key={b.label} className="legend">
+                  <span className="l"><span className="dot" style={{ background: COMMISSION_COLORS[b.label] }} />{b.label}</span>
+                  <span style={{ textAlign: "right" }}>
+                    <div className="v">{money(b.amount)}</div>
+                    <div style={{ fontSize: 10, color: "#94a3b8" }}>{b.pct}%</div>
+                  </span>
+                </div>
+              ))}
             </div>
-          </div>
-          <div style={{ borderTop: "1px solid #f1f5f9", marginTop: 14, paddingTop: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "#94a3b8" }}>New Leads</span>
-            </div>
-            {d.demographics.newLeads.map((l) => (
-              <div key={l.ref} className="legend">
-                <span><span className="name" style={{ fontSize: 13 }}>{l.business_name}</span> <span className="mono">#{l.ref}</span></span>
-                <Badge>LEAD</Badge>
-              </div>
-            ))}
           </div>
         </Card>
       </div>
 
-      {/* regional + revenue + campaigns */}
-      <div className="grid cols-3">
-        <Card title="UK Active Locations">
-          <div style={{ maxHeight: 288, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-            {d.regional.map((r) => (
-              <div key={r.region} style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontSize: 12, fontWeight: 500, color: "#475569" }}>{r.region}</span>
-                    <span style={{ fontSize: 11, color: "#94a3b8" }}>{r.active} Active</span>
-                  </div>
-                  <div className="bar" style={{ marginTop: 4 }}><span style={{ width: `${r.pct}%` }} /></div>
-                </div>
-                <span style={{ width: 36, textAlign: "right", fontSize: 11, fontWeight: 700, color: "#64748b" }}>{r.pct}%</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card title="Commissions Generated" right={<Badge tone="green">Active</Badge>}>
-          <div style={{ fontSize: 24, fontWeight: 800, color: "#0f172a" }}>{money(d.revenue.total)}</div>
-          <div style={{ display: "flex", gap: 4, alignItems: "center", color: "#059669", fontSize: 12, fontWeight: 600, margin: "4px 0 12px" }}>
-            <TrendingUp size={14} /> Revenue growth this year
-          </div>
-          <ResponsiveContainer width="100%" height={190}>
-            <AreaChart data={d.revenue.byMonth}>
-              <defs><linearGradient id="rev" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={INDIGO} stopOpacity={0.35} /><stop offset="100%" stopColor={INDIGO} stopOpacity={0} /></linearGradient></defs>
-              <CartesianGrid vertical={false} stroke="#eef2f7" />
-              <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#94a3b8" }} interval={1} />
-              <YAxis hide />
-              <Tooltip contentStyle={tooltip} formatter={(v) => money(v)} />
-              <Area type="monotone" dataKey="value" stroke={INDIGO} strokeWidth={2.5} fill="url(#rev)" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
-
-        <Card title="Performance Metrics">
-          <div style={{ display: "flex", flexDirection: "column", gap: 16, paddingTop: 4 }}>
-            {d.campaigns.map((c) => (
-              <div key={c.label}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                  <span style={{ fontWeight: 500, color: "#475569" }}>{c.label}</span>
-                  <span style={{ fontWeight: 700, color: "#64748b" }}>{c.pct}%</span>
-                </div>
-                <div className="bar"><span style={{ width: `${c.pct}%` }} /></div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      {/* payment + recent contracts + top agents */}
-      <div className="grid cols-3">
-        <Card title="Client Payment Status">
-          <div style={{ display: "flex", gap: 16, marginBottom: 10, fontSize: 12 }}>
-            <span className="legend" style={{ gap: 6 }}><span className="dot" style={{ background: "#22c55e" }} />Paid <b style={{ marginLeft: 4 }}>{d.paymentStatus.paid}</b></span>
-            <span className="legend" style={{ gap: 6 }}><span className="dot" style={{ background: INDIGO }} />Pending <b style={{ marginLeft: 4 }}>{d.paymentStatus.pending}</b></span>
-            <span className="legend" style={{ gap: 6 }}><span className="dot" style={{ background: "#f43f5e" }} />Overdue <b style={{ marginLeft: 4 }}>{d.paymentStatus.overdue}</b></span>
-          </div>
-          <ResponsiveContainer width="100%" height={190}>
-            <BarChart data={["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((day, i) => ({ day, pending: [0,1,1,0,2,1,0][i] }))} barCategoryGap={14}>
-              <CartesianGrid vertical={false} stroke="#eef2f7" />
-              <XAxis dataKey="day" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#94a3b8" }} />
-              <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#94a3b8" }} allowDecimals={false} />
-              <Tooltip cursor={{ fill: "#f1f5f9" }} contentStyle={tooltip} />
-              <Bar dataKey="pending" fill={INDIGO} radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </Card>
-
-        <Card title="Recent Contracts">
-          {d.recentContracts.map((c) => (
-            <div key={c.contract_no} className="legend" style={{ padding: "8px 0" }}>
-              <span className="mini">
-                <span className="ini sq"><FileSignature size={15} /></span>
-                <span><div className="name">{c.contract_no}</div><div className="mono">{c.business_name}</div></span>
-              </span>
-              <span style={{ textAlign: "right" }}>
-                <div style={{ fontWeight: 700, color: "#334155" }}>{money(c.commission_value)}</div>
-                <Badge tone="green">ACTIVE</Badge>
-              </span>
-            </div>
-          ))}
-        </Card>
-
-        <Card title="Top Agents Listing">
-          {d.topAgents.map((a, i) => (
+      {/* Top 5 leaderboards */}
+      <div className="grid cols-2">
+        <Card title="Top 5 Agent Performance" right={<Link to="/agents" className="btn ghost sm">View All</Link>}>
+          <div className="sub" style={{ marginTop: -8, marginBottom: 10 }}>Leading sales agents by deal closures &amp; commission</div>
+          {topAgents.length === 0 && <div className="sub" style={{ padding: 12 }}>No agent data yet.</div>}
+          {topAgents.map((a) => (
             <div key={a.id} className="legend" style={{ padding: "8px 0" }}>
               <span className="mini">
-                <b style={{ width: 14, color: "#cbd5e1" }}>{i + 1}</b>
                 <span className="ini">{initials(a.name)}</span>
-                <span><div className="name">{a.name}</div><div className="mono">{money(a.commission)} commission</div></span>
+                <span><div className="name">{a.name}</div><div className="mono">{a.agency_name || "—"}</div></span>
               </span>
-              <Badge tone="green">Active</Badge>
+              <span style={{ textAlign: "right" }}>
+                <div style={{ fontWeight: 700, color: "#334155" }}>{a.deals} Deals Closed</div>
+                <div className="mono">{money(a.commission)}</div>
+              </span>
+            </div>
+          ))}
+        </Card>
+
+        <Card title="Top 5 Performing Agencies" right={<Link to="/agencies" className="btn ghost sm">View All</Link>}>
+          <div className="sub" style={{ marginTop: -8, marginBottom: 10 }}>Agency leaderboard ranked by sales volume &amp; growth</div>
+          {topAgencies.length === 0 && <div className="sub" style={{ padding: 12 }}>No agency data yet.</div>}
+          {topAgencies.map((a) => (
+            <div key={a.id} className="legend" style={{ padding: "8px 0" }}>
+              <span className="mini">
+                <span className="ini sq">{initials(a.name)}</span>
+                <span><div className="name">{a.name}</div><div className="mono">{a.active_agents} Active Agents • {a.sales} Sales</div></span>
+              </span>
+              <span style={{ fontWeight: 700, color: "#334155" }}>{money(a.revenue)}</span>
             </div>
           ))}
         </Card>
       </div>
+
+      {/* Recent Contracts */}
+      <Card title="Recent Contracts" right={<Link to="/contracts" className="btn ghost sm">View All Contracts →</Link>}>
+        <div className="sub" style={{ marginTop: -8, marginBottom: 10 }}>Latest submitted and processed energy contracts</div>
+        <div className="table-wrap">
+          <table className="tbl">
+            <thead>
+              <tr><th>Contract ID</th><th>Client / Business</th><th>Agent</th><th>Agency</th><th>Status</th><th>Date</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              {recentContracts.length === 0 && <tr><td colSpan={7} className="sub" style={{ padding: 16, textAlign: "center" }}>No contracts yet.</td></tr>}
+              {recentContracts.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.contract_no}</td>
+                  <td>{c.business_name || "Unassigned Client"}</td>
+                  <td>{c.agent_name || "—"}</td>
+                  <td>{c.agency_name || "—"}</td>
+                  <td><Badge tone="slate">{c.status}</Badge></td>
+                  <td>{new Date(c.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}</td>
+                  <td><Link to={`/contracts/${c.id}`} className="btn ghost sm"><Eye size={14} /></Link></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
       <div className="footer-note">Live data from {api.base}</div>
     </>
   );
 }
 
-
-/* ---- V1.6: clickable Sales Pipeline stage cards ---- */
-const GROUP_COLORS = { Lead: "#64748b", Prospect: "#4f46e5", Contract: "#0f766e", Other: "#b45309" };
-function PipelineStrip() {
-  const [stages, setStages] = useState(null);
-  useEffect(() => { api.pipelineStages().then((r) => setStages(r.data)).catch(() => setStages({ stages: [], total: 0 })); }, []);
-  if (!stages) return null;
+function StatCard({ to, label, value, accent, subs }) {
   return (
-    <Card title="Sales Pipeline" right={<Link to="/pipeline" className="btn ghost sm">Open pipeline →</Link>} className="span-2" >
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 }}>
-        {stages.stages.map((s) => (
-          <Link key={s.key} to={`/pipeline?stage=${s.key}`}
-            style={{ textDecoration: "none", border: "1px solid #e7ebf0", borderRadius: 12, padding: "12px 14px", background: "#fff", display: "block", borderLeft: `3px solid ${GROUP_COLORS[s.group]}` }}>
-            <div style={{ fontSize: 24, fontWeight: 800, color: "#0f172a", lineHeight: 1 }}>{s.count}</div>
-            <div style={{ fontSize: 11.5, fontWeight: 600, color: "#64748b", marginTop: 4 }}>{s.label}</div>
-          </Link>
-        ))}
+    <Link to={to} style={{
+      textDecoration: "none", background: "#fff", border: "1px solid #e7ebf0", borderRadius: 16, padding: 14,
+      borderLeft: `3px solid ${accent}`, boxShadow: "var(--shadow)", display: "block", transition: "transform .15s",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12, fontWeight: 800, color: "#334155", textTransform: "uppercase", letterSpacing: ".02em" }}>{label}</span>
+        <span style={{ fontSize: 24, fontWeight: 900, color: "#0f172a", lineHeight: 1 }}>{value}</span>
       </div>
-    </Card>
+      {subs && (
+        <div style={{ display: "flex", gap: 14, marginTop: 8, fontSize: 11, color: "#94a3b8" }}>
+          {subs.map(([l, v]) => <span key={l}>{l} <b style={{ color: "#64748b" }}>{v}</b></span>)}
+        </div>
+      )}
+    </Link>
+  );
+}
+
+function MetricBox({ icon, label, value, delta, tag }) {
+  return (
+    <div style={{ border: "1px solid #eef1f4", borderRadius: 12, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontSize: 10.5, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase" }}>{label}</span>
+        <span style={{ color: "#94a3b8" }}>{icon}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 20, fontWeight: 800, color: "#0f172a" }}>{value}</span>
+        {delta && <Badge tone="green">{delta}</Badge>}
+        {tag && <span style={{ fontSize: 10, color: "#94a3b8" }}>{tag}</span>}
+      </div>
+    </div>
   );
 }

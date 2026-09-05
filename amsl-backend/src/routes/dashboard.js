@@ -125,6 +125,107 @@ r.get("/top-agents", (req, res) => {
   });
 });
 
+/**
+ * V2 dashboard — matches the production crm.amslgroup.co.uk/dashboard layout exactly:
+ * clickable status-card row, Earning Statistics + Commission Status panels,
+ * Top 5 Agent Performance + Top 5 Performing Agencies leaderboards, Recent Contracts.
+ */
+
+/* Clickable status-card row */
+r.get("/stat-cards", (req, res) => {
+  const c = (stage) => one("SELECT COUNT(*) c FROM businesses WHERE journey_stage=?", stage).c;
+  const leads = c("RAW_LEAD") + c("QUALIFIED");
+  const quoted = c("QUOTED"), sentForESign = c("ESIGN_SENT");
+  const prospects = c("QUOTE_CREATED") + quoted + sentForESign;
+  const toBeRenewed = c("UP_FOR_RENEWAL"), renewed = c("RENEWED");
+  const renewals = toBeRenewed + renewed;
+  const agencyActive = one("SELECT COUNT(*) c FROM agencies WHERE status='Active'").c;
+  const agencyInactive = one("SELECT COUNT(*) c FROM agencies WHERE status!='Active'").c;
+  res.json({
+    data: {
+      leads,
+      prospects: { total: prospects, quoted, sentForESign },
+      won: c("WON"),
+      underRegistration: c("UNDER_REGISTRATION"),
+      live: c("LIVE"),
+      renewals: { total: renewals, toBeRenewed, renewed },
+      totalAgencies: { total: agencyActive + agencyInactive, active: agencyActive, inactive: agencyInactive },
+      objected: c("OBJECTED"),
+      rejected: c("REJECTED"),
+      lost: c("LOST"),
+    },
+  });
+});
+
+/* Earning Statistics panel — Total/Monthly Earnings, Pending/Paid Commission, Jan-Dec chart */
+r.get("/earning-stats", (req, res) => {
+  const sumSched = (statusFrag) => one(`SELECT COALESCE(SUM(amount),0) s FROM commission_schedule WHERE 1=1 ${statusFrag}`).s;
+  const totalEarnings = sumSched("");
+  const monthlyEarnings = one(`SELECT COALESCE(SUM(amount),0) s FROM commission_schedule WHERE strftime('%Y-%m',due_date)=strftime('%Y-%m','now')`).s;
+  const pendingCommission = sumSched("AND status IN ('Projected','Invoiced')");
+  const paidCommission = sumSched("AND status='Paid'");
+  const byMonth = MONTHS.map((m, i) => ({
+    month: m,
+    revenue: one(`SELECT COALESCE(SUM(amount),0) s FROM commission_schedule WHERE strftime('%m',due_date)=?`, String(i + 1).padStart(2, "0")).s,
+    quotes: one(`SELECT COUNT(*) c FROM quotes WHERE strftime('%m',created_at)=?`, String(i + 1).padStart(2, "0")).c,
+    contracts: one(`SELECT COUNT(*) c FROM contracts WHERE strftime('%m',created_at)=?`, String(i + 1).padStart(2, "0")).c,
+  }));
+  res.json({ data: { totalEarnings: Math.round(totalEarnings), monthlyEarnings: Math.round(monthlyEarnings), pendingCommission: Math.round(pendingCommission), paidCommission: Math.round(paidCommission), byMonth } });
+});
+
+/* Commission Status panel — Total/Paid/Pending/Processing/Overdue */
+r.get("/commission-status", (req, res) => {
+  const sum = (statusFrag) => one(`SELECT COALESCE(SUM(amount),0) s FROM commission_schedule WHERE 1=1 ${statusFrag}`).s;
+  const total = sum("");
+  const paid = sum("AND status='Paid'");
+  const pending = sum("AND status IN ('Projected','Invoiced')");
+  const processing = sum("AND status='Reconciled'");
+  const overdue = sum("AND status='Overdue'");
+  const pct = (n) => (total > 0 ? Math.round((n / total) * 100) : 0);
+  res.json({
+    data: {
+      total: Math.round(total),
+      breakdown: [
+        { label: "Paid", amount: Math.round(paid), pct: pct(paid) },
+        { label: "Pending", amount: Math.round(pending), pct: pct(pending) },
+        { label: "Processing", amount: Math.round(processing), pct: pct(processing) },
+        { label: "Overdue", amount: Math.round(overdue), pct: pct(overdue) },
+      ],
+    },
+  });
+});
+
+/* Top 5 Agent Performance leaderboard */
+r.get("/top-agent-performance", (req, res) => {
+  res.json({
+    data: all(`SELECT a.id, a.name, ag.name AS agency_name,
+                 (SELECT COUNT(*) FROM contracts c WHERE c.agent_id=a.id) AS deals,
+                 (SELECT COALESCE(SUM(c.commission_value),0) FROM contracts c WHERE c.agent_id=a.id) AS commission
+               FROM agents a LEFT JOIN agencies ag ON ag.id=a.agency_id
+               ORDER BY commission DESC, deals DESC LIMIT 5`),
+  });
+});
+
+/* Top 5 Performing Agencies leaderboard */
+r.get("/top-agencies", (req, res) => {
+  res.json({
+    data: all(`SELECT ag.id, ag.name,
+                 (SELECT COUNT(*) FROM agents a WHERE a.agency_id=ag.id AND a.status='Active') AS active_agents,
+                 (SELECT COUNT(*) FROM contracts c JOIN agents a ON a.id=c.agent_id WHERE a.agency_id=ag.id) AS sales,
+                 (SELECT COALESCE(SUM(c.commission_value),0) FROM contracts c JOIN agents a ON a.id=c.agent_id WHERE a.agency_id=ag.id) AS revenue
+               FROM agencies ag ORDER BY revenue DESC, sales DESC LIMIT 5`),
+  });
+});
+
+/* Recent Contracts table — Contract ID / Client / Agent / Agency / Status / Date */
+r.get("/recent-contracts-full", (req, res) => {
+  res.json({
+    data: all(`SELECT c.id, c.contract_no, c.business_name, a.name AS agent_name, ag.name AS agency_name, c.status, c.created_at
+               FROM contracts c LEFT JOIN agents a ON a.id=c.agent_id LEFT JOIN agencies ag ON ag.id=c.agency_id
+               ORDER BY c.created_at DESC LIMIT 10`),
+  });
+});
+
 // everything in one call for convenience (matches the whole dashboard page)
 r.get("/", (req, res) => {
   const p = req.query.period === "monthly" ? "monthly" : "total";

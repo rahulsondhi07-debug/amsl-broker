@@ -4,8 +4,10 @@ import Layout from "./components/Layout.jsx";
 import Login from "./pages/Login.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Leads from "./pages/Leads.jsx";
+import LeadDetail from "./pages/LeadDetail.jsx";
 import Customers from "./pages/Customers.jsx";
 import Pipeline from "./pages/Pipeline.jsx";
+import UtilityOpportunities from "./pages/UtilityOpportunities.jsx";
 import Renewals from "./pages/Renewals.jsx";
 import Permissions from "./pages/Permissions.jsx";
 import Master from "./pages/Master.jsx";
@@ -59,12 +61,14 @@ export default function App() {
               <Route path="supplier-payments" element={<SupplierPayments />} />
               <Route path="products" element={<Products />} />
               <Route path="leads" element={<Leads />} />
+              <Route path="leads/:id" element={<LeadDetail />} />
               <Route path="quotes" element={<Quotes />} />
               <Route path="quotes/:id" element={<QuoteDetail />} />
               <Route path="quotes/new" element={<NewQuote />} />
               <Route path="customers" element={<Customers />} />
               <Route path="customers/:id" element={<CustomerDetail />} />
               <Route path="pipeline" element={<Pipeline />} />
+              <Route path="utility-opportunities" element={<UtilityOpportunities />} />
               <Route path="renewals" element={<Renewals />} />
               <Route path="permissions" element={<Permissions />} />
               <Route path="master" element={<Master />} />

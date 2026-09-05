@@ -68,9 +68,14 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
                             </Link>
                           )}
                           {isLead && (
-                            <button className="btn ghost sm" disabled={busy === b.id} onClick={() => convert(b.id)} title="Convert to customer">
-                              <ArrowRightLeft size={14} /> Convert
-                            </button>
+                            <>
+                              <Link className="btn ghost sm" to={`/leads/${b.id}`} title="View / edit lead">
+                                <Eye size={14} /> View
+                              </Link>
+                              <button className="btn ghost sm" disabled={busy === b.id} onClick={() => convert(b.id)} title="Convert to customer">
+                                <ArrowRightLeft size={14} /> Convert
+                              </button>
+                            </>
                           )}
                           {/* V1.6-14: no delete once beyond Prospect */}
                           {!(["WON","UNDER_REGISTRATION","LIVE","UP_FOR_RENEWAL","RENEWED"].includes(b.journey_stage)) && (

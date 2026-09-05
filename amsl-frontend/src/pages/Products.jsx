@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Plus, Table2 } from "lucide-react";
+import { Plus, Table2, Eye, Pencil, Trash2, RotateCcw } from "lucide-react";
 import { api } from "../api.js";
 import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "../components/ui.jsx";
 
@@ -24,6 +24,22 @@ export default function Products() {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList("products", { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
   const [pmFor, setPmFor] = useState(null);
+  const [viewing, setViewing] = useState(null);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [supplierFilter, setSupplierFilter] = useState("");
+  const [suppliers, setSuppliers] = useState([]);
+  useEffect(() => { api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {}); }, []);
+
+  const del = async (row) => {
+    if (!confirm(`Delete product "${row.name}"?`)) return;
+    await api.delete(`/products/${row.id}`); reload();
+  };
+
+  const visible = data
+    .filter((r) => !statusFilter || (r.price_book_status || r.status) === statusFilter)
+    .filter((r) => !supplierFilter || String(r.supplier_id) === supplierFilter);
+
   return (
     <>
       <div className="page-head">
@@ -31,21 +47,37 @@ export default function Products() {
         <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={15} /> Add Product</button>
       </div>
       <Card>
-        <input placeholder="Search product…" value={q} onChange={(e) => setQ(e.target.value)}
-          style={{ width: "100%", padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)", marginBottom: 12 }} />
+        <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+          <input placeholder="Search product…" value={q} onChange={(e) => setQ(e.target.value)}
+            style={{ flex: 1, padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }} />
+          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Status</option>{PB_STATUS.map((s) => <option key={s}>{s}</option>)}
+          </select>
+          <select value={supplierFilter} onChange={(e) => setSupplierFilter(e.target.value)} style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Suppliers</option>{suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          {(statusFilter || supplierFilter || q) && (
+            <button className="btn ghost" onClick={() => { setStatusFilter(""); setSupplierFilter(""); setQ(""); }}><RotateCcw size={14} /> Reset</button>
+          )}
+        </div>
         {error && <ErrorBanner error={error} onRetry={reload} />}
         {loading ? <Spinner /> : (
           <div className="table-wrap">
             <table className="tbl">
-              <thead><tr><th>Product</th><th>Supplier</th><th>Utility</th><th>Segment</th><th>Acq/Renewal</th><th>Valid</th><th>Price Book</th><th>Price Matrix</th></tr></thead>
+              <thead><tr><th>Product</th><th>Supplier</th><th>Utility</th><th>Segment</th><th>Acq/Renewal</th><th>Valid</th><th>Price Book</th><th>Actions</th><th>Price Matrix</th></tr></thead>
               <tbody>
-                {data.map((r) => (
+                {visible.map((r) => (
                   <tr key={r.id}>
                     <td><span className="name">{r.name}</span></td>
                     <td>{r.supplier_name || "—"}</td>
                     <td>{r.utility}</td><td>{r.segment}</td><td style={{ fontSize: 12 }}>{r.acq_renewal}</td>
                     <td className="mono" style={{ fontSize: 11 }}>{r.valid_from || "—"} → {r.valid_till || "—"}</td>
                     <td><Badge tone={r.price_book_status === "Released" ? "green" : "amber"}>{r.price_book_status || r.status}</Badge></td>
+                    <td>
+                      <button className="btn ghost sm" onClick={() => setViewing(r)}><Eye size={13} /></button>
+                      <button className="btn ghost sm" onClick={() => setEditingProduct(r)}><Pencil size={13} /></button>
+                      <button className="btn ghost sm" onClick={() => del(r)}><Trash2 size={13} /></button>
+                    </td>
                     <td><button className="btn ghost sm" onClick={() => setPmFor(r)}><Table2 size={14} /> Price Matrix</button></td>
                   </tr>
                 ))}
@@ -56,14 +88,46 @@ export default function Products() {
         {meta && meta.pages > 1 && <Pager meta={meta} page={page} setPage={setPage} />}
       </Card>
       {showAdd && <AddProduct onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); reload(); }} />}
+      {editingProduct && <AddProduct product={editingProduct} onClose={() => setEditingProduct(null)} onSaved={() => { setEditingProduct(null); reload(); }} />}
       {pmFor && <PriceMatrix product={pmFor} onClose={() => setPmFor(null)} />}
+      {viewing && <ViewProduct product={viewing} onClose={() => setViewing(null)} />}
     </>
   );
 }
 
-function AddProduct({ onClose, onSaved }) {
+function ViewProduct({ product, onClose }) {
+  const Row = ({ k, v }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--line,#EEF1F4)", fontSize: 13 }}>
+      <span className="sub">{k}</span><span style={{ fontWeight: 600, textAlign: "right" }}>{v || "N/A"}</span>
+    </div>
+  );
+  return (
+    <Modal title={`View Product — ${product.name}`} onClose={onClose} wide footer={<button className="btn" onClick={onClose}>Close</button>}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 24px" }}>
+        <Row k="Product Name" v={product.name} /><Row k="Supplier" v={product.supplier_name} />
+        <Row k="Corporate/SME" v={product.segment} /><Row k="Utility" v={product.utility} />
+        <Row k="Fuel Mix" v={product.fuel_mix} /><Row k="Standing Charge Type" v={product.standing_charge_type} />
+        <Row k="Max Commission" v={product.max_commission != null ? `${product.max_commission} p/kWh` : null} />
+        <Row k="Acquisition/Renewal" v={product.acq_renewal} />
+        <Row k="Valid From" v={product.valid_from} /><Row k="Valid Till" v={product.valid_till} />
+        <Row k="Price Book Status" v={product.price_book_status || product.status} />
+        <Row k="Min Start Days" v={product.min_start_days} />
+      </div>
+    </Modal>
+  );
+}
+
+function AddProduct({ product, onClose, onSaved }) {
+  const isEdit = !!product;
   const [suppliers, setSuppliers] = useState([]);
-  const [f, setF] = useState({
+  const [f, setF] = useState(product ? {
+    name: product.name || "", supplier_id: product.supplier_id || "", segment: product.segment || "SME", utility: product.utility || "NHH",
+    standing_charge_type: product.standing_charge_type || "Pence", fuel_mix: product.fuel_mix || "Green",
+    max_commission: product.max_commission ?? "", commission_increment: product.commission_increment ?? "", commission_banded: product.commission_banded || "No", standing_charge: product.standing_charge || "No",
+    payment_method: product.payment_method || "Cash/Cheque/Bacs", payment_mode: product.payment_mode || "Upfront Recon yearly", initial: product.initial || "", final: product.final || "", dd_discount: product.dd_discount ?? "",
+    valid_from: product.valid_from || "", valid_till: product.valid_till || "", price_book_status: product.price_book_status || "Pending", acq_renewal: product.acq_renewal || "Acquisition",
+    min_start_days: product.min_start_days ?? "", min_start_date: product.min_start_date ?? "", max_start_date: product.max_start_date ?? "", status: product.status || "Active",
+  } : {
     name: "", supplier_id: "", segment: "SME", utility: "NHH", standing_charge_type: "Pence", fuel_mix: "Green",
     max_commission: "", commission_increment: "", commission_banded: "No", standing_charge: "No",
     payment_method: "Cash/Cheque/Bacs", payment_mode: "Upfront Recon yearly", initial: "", final: "", dd_discount: "",
@@ -78,12 +142,16 @@ function AddProduct({ onClose, onSaved }) {
     if (!f.name.trim()) return setErr("Product Name is required");
     if (!f.supplier_id) return setErr("Current Supplier is required");
     setSaving(true); setErr(null);
-    try { const p = { ...f }; nums.forEach((k) => p[k] = f[k] === "" ? null : Number(f[k])); await api.post("/products", p); onSaved(); }
+    try {
+      const p = { ...f }; nums.forEach((k) => p[k] = f[k] === "" ? null : Number(f[k]));
+      if (isEdit) await api.put(`/products/${product.id}`, p); else await api.post("/products", p);
+      onSaved();
+    }
     catch (e) { setErr(e.message); setSaving(false); }
   };
   return (
-    <Modal title="Add Product" onClose={onClose} wide
-      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Submit"}</button></>}>
+    <Modal title={isEdit ? `Edit Product — ${product.name}` : "Add Product"} onClose={onClose} wide
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : isEdit ? "Save" : "Submit"}</button></>}>
       {err && <ErrorBanner error={err} />}
       <Section title="Product Details">
         <Field label="Product Name *"><input value={f.name} onChange={set("name")} /></Field>
