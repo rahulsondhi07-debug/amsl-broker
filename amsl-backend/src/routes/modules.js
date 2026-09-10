@@ -81,6 +81,46 @@ export const products = (() => {
     ).run(req.params.id, b.min_consumption, b.max_consumption, b.term_months, b.unit_rate, b.standing_charge, b.commission);
     res.status(201).json({ data: db.prepare("SELECT * FROM price_matrix WHERE id = ?").get(info.lastInsertRowid) });
   });
+  // Bulk import for real supplier flat files (thousands of rows in one request/transaction —
+  // avoids the impracticality of one HTTP round-trip per row for a 28,980-row file).
+  r.post("/:id/price-matrix/bulk", (req, res) => {
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    if (!rows.length) return res.status(400).json({ error: "No rows to import. Provide a 'rows' array." });
+    if (rows.length > 50000) return res.status(400).json({ error: "Too many rows in one import (max 50,000)." });
+    const ins = db.prepare(`INSERT INTO price_matrix
+      (product_id, dist_id, region, meter_type, profile, day_rate, night_rate, eve_wknd_rate,
+       standing_charge, min_aq, max_aq, effective_from, effective_to, renewable_energy,
+       set_name, product_name, voltage_tcr_band, capacity_charge, term_months)
+      VALUES (@product_id,@dist_id,@region,@meter_type,@profile,@day_rate,@night_rate,@eve_wknd_rate,
+       @standing_charge,@min_aq,@max_aq,@effective_from,@effective_to,@renewable_energy,
+       @set_name,@product_name,@voltage_tcr_band,@capacity_charge,@term_months)`);
+    let imported = 0, failed = 0;
+    const tx = db.transaction((items) => {
+      for (const row of items) {
+        try {
+          ins.run({
+            product_id: req.params.id,
+            dist_id: row.dist_id ?? null, region: row.region ?? null, meter_type: row.meter_type ?? null,
+            profile: row.profile ?? null, day_rate: row.day_rate ?? null, night_rate: row.night_rate ?? null,
+            eve_wknd_rate: row.eve_wknd_rate ?? null, standing_charge: row.standing_charge ?? null,
+            min_aq: row.min_aq ?? null, max_aq: row.max_aq ?? null,
+            effective_from: row.effective_from ?? null, effective_to: row.effective_to ?? null,
+            renewable_energy: row.renewable_energy ?? null, set_name: row.set_name ?? null,
+            product_name: row.product_name ?? null,
+            voltage_tcr_band: row.voltage_tcr_band ?? null, capacity_charge: row.capacity_charge ?? null,
+            term_months: row.term_months ?? null,
+          });
+          imported++;
+        } catch { failed++; }
+      }
+    });
+    tx(rows);
+    res.status(201).json({ data: { imported, failed, total: rows.length } });
+  });
+  r.delete("/:id/price-matrix", (req, res) => {
+    const info = db.prepare("DELETE FROM price_matrix WHERE product_id=?").run(req.params.id);
+    res.json({ data: { deleted: info.changes } });
+  });
   return r;
 })();
 
@@ -259,7 +299,7 @@ export const tickets = crudRouter({
 /* ---- Tariffs (power the comparison; editable in-app) ---- */
 export const tariffs = (() => {
   const r = Router();
-  const cols = ["supplier_id","utility","term_months","unit_rate","standing_charge","status"];
+  const cols = ["supplier_id","utility","term_months","unit_rate","standing_charge","status","acq_renewal"];
 
   r.get("/", (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);

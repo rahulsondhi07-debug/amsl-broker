@@ -2,14 +2,16 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Zap, Flame, Search, Trophy, Check } from "lucide-react";
 import { api } from "../api.js";
-import { Card, Field, ErrorBanner, Badge, Spinner } from "../components/ui.jsx";
+import { Card, Field, ErrorBanner, Badge, Spinner, Modal } from "../components/ui.jsx";
 
 const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export default function NewQuote() {
   const nav = useNavigate();
   const [businesses, setBusinesses] = useState([]);
-  const [form, setForm] = useState({ utility: "Electricity", business_id: "", business_name: "", meter_number: "", eac: "30000", term: "24", uplift: "1.0", start_date: "", acq_renewal: "Acquisition", business_type: "" });
+  const [form, setForm] = useState({ utility: "Electricity", business_id: "", business_name: "", site_id: "", meter_id: "", meter_number: "", postcode: "", eac: "30000", term: "", uplift: "1.0", start_date: "", current_supplier_id: "", business_type: "" });
+  const [sites, setSites] = useState([]);
+  const [meters, setMeters] = useState([]);
   const [bespoke, setBespoke] = useState(false);
   const [bf, setBf] = useState({ meter_point: "", meter_details: "", supplier_id: "", product_name: "", unit_rate: "", standing_charge: "", distribution_charge: "", transmission_charge: "", term: "24" });
   const [suppliers, setSuppliers] = useState([]);
@@ -20,6 +22,7 @@ export default function NewQuote() {
   const [saving, setSaving] = useState(null);
   const [saved, setSaved] = useState(null);
   const [cap, setCap] = useState(null);
+  const [breakdown, setBreakdown] = useState(null); // offer shown in the "Show More" cost breakdown modal
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   useEffect(() => {
@@ -28,6 +31,37 @@ export default function NewQuote() {
       .catch(() => {});
     api.list("suppliers", { limit: 100 }).then((s) => setSuppliers(s.data)).catch(() => {});
   }, []);
+
+  // Cascading: Business -> Site -> Meter (mirrors the reference "Get Quick Quote" flow)
+  const onBusinessChange = (e) => {
+    const id = e.target.value;
+    const b = businesses.find((x) => String(x.id) === id);
+    setForm({ ...form, business_id: id, business_name: b ? b.business_name : "", site_id: "", meter_id: "", meter_number: "", postcode: "" });
+    setSites([]); setMeters([]);
+    if (id) api.pipelineSites(id).then((r) => setSites(r.data)).catch(() => setSites([]));
+  };
+  const onSiteChange = (e) => {
+    const siteId = e.target.value;
+    setForm({ ...form, site_id: siteId, meter_id: "", meter_number: "" });
+    const site = sites.find((s) => String(s.id) === siteId);
+    setForm((f) => ({ ...f, site_id: siteId, postcode: site?.postcode || f.postcode, meter_id: "", meter_number: "" }));
+    setMeters([]);
+    if (form.business_id) {
+      const utilKey = form.utility === "Gas" ? "GAS" : "ELEC";
+      api.pipelineMeters(form.business_id, utilKey).then((r) => setMeters(r.data.filter((m) => !siteId || String(m.site_id) === siteId))).catch(() => setMeters([]));
+    }
+  };
+  const onMeterChange = (e) => {
+    const meterId = e.target.value;
+    const m = meters.find((x) => String(x.id) === meterId);
+    setForm((f) => ({ ...f, meter_id: meterId, meter_number: m?.mpan_mprn || f.meter_number, eac: m?.eac ? String(m.eac) : f.eac }));
+  };
+  // If the person switches Electricity<->Gas after already picking a site, refresh the meter list for that utility.
+  useEffect(() => {
+    if (!form.business_id || !form.site_id) return;
+    const utilKey = form.utility === "Gas" ? "GAS" : "ELEC";
+    api.pipelineMeters(form.business_id, utilKey).then((r) => setMeters(r.data.filter((m) => String(m.site_id) === form.site_id))).catch(() => setMeters([]));
+  }, [form.utility]); // eslint-disable-line
 
   const saveBespoke = async () => {
     if (!bf.meter_point) return setErr("Enter the meter point (MPAN/MPRN) for the bespoke quote");
@@ -47,7 +81,7 @@ export default function NewQuote() {
         status: "Quoted", bespoke: 1, meter_point: bf.meter_point, meter_details: bf.meter_details,
         product_name: bf.product_name, distribution_charge: Number(bf.distribution_charge) || null,
         transmission_charge: Number(bf.transmission_charge) || null,
-        acq_renewal: form.acq_renewal, business_type: form.business_type,
+        acq_renewal: form.current_supplier_id && String(form.current_supplier_id) === String(bf.supplier_id) ? "Renewal" : "Acquisition", business_type: form.business_type,
       });
       nav("/quotes"); // V1.6-13: redirect to Quote page after creation
       return q;
@@ -72,8 +106,8 @@ export default function NewQuote() {
     try {
       const { data } = await api.compare({
         utility: form.utility, eac: Number(form.eac),
-        term: form.term ? Number(form.term) : undefined,
         uplift: form.uplift ? Number(form.uplift) : 1.0,
+        current_supplier_id: form.current_supplier_id || undefined,
       });
       setResult(data);
     } catch (e) { setErr(e.message); }
@@ -124,37 +158,43 @@ export default function NewQuote() {
             </select>
           </Field>
           <Field label="Business">
-            <select value={form.business_id} onChange={(e) => {
-              const b = businesses.find((x) => String(x.id) === e.target.value);
-              setForm({ ...form, business_id: e.target.value, business_name: b ? b.business_name : "" });
-            }}>
+            <select value={form.business_id} onChange={onBusinessChange}>
               <option value="">— Select existing business —</option>
               {businesses.map((b) => <option key={b.id} value={b.id}>{b.business_name} (#{b.ref})</option>)}
             </select>
           </Field>
-          <Field label={meterLabel}><input value={form.meter_number} onChange={set("meter_number")} placeholder={meterLabel} /></Field>
+          {form.business_id && (
+            <Field label="Select Site">
+              <select value={form.site_id} onChange={onSiteChange}>
+                <option value="">— Select site —</option>
+                {sites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.postcode ? ` (${s.postcode})` : ""}</option>)}
+              </select>
+            </Field>
+          )}
+          {form.business_id && form.site_id && (
+            <Field label="Select Meter">
+              <select value={form.meter_id} onChange={onMeterChange}>
+                <option value="">— Select meter —</option>
+                {meters.map((m) => <option key={m.id} value={m.id}>{form.utility === "Gas" ? "GAS" : "ELEC"} - {m.mpan_mprn || "no MPAN/MPRN"}{m.eac ? ` (${m.eac.toLocaleString()} kWh)` : ""}</option>)}
+                {meters.length === 0 && <option disabled>No {form.utility === "Gas" ? "gas" : "electric"} meters on this site</option>}
+              </select>
+            </Field>
+          )}
+          <Field label={meterLabel}><input value={form.meter_number} onChange={set("meter_number")} placeholder={`${meterLabel} (auto-filled if a meter is selected above)`} /></Field>
+          <Field label="Postcode"><input value={form.postcode} onChange={set("postcode")} placeholder="Supply postcode" /></Field>
           <Field label="Consumption kWh/yr (EAC) *"><input type="number" value={form.eac} onChange={set("eac")} placeholder="30000" /></Field>
-          <Field label="Contract Term">
-            <select value={form.term} onChange={set("term")}>
-              <option value="">All terms</option>
-              <option value="12">12 months</option>
-              <option value="24">24 months</option>
-              <option value="36">36 months</option>
+          <Field label="Current Supplier">
+            <select value={form.current_supplier_id} onChange={set("current_supplier_id")}>
+              <option value="">— Select supplier —</option>
+              {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </Field>
-          <Field label="Broker Uplift (p/kWh)"><input type="number" step="0.1" value={form.uplift} onChange={set("uplift")} placeholder="1.0" /></Field>
           {cap && cap.max != null && (
             <div style={{ gridColumn: "1 / -1", marginTop: -6, fontSize: 12, fontWeight: 600,
               color: cap.allowed ? "var(--ok,#0F766E)" : "var(--urgent,#E11D48)" }}>
               {cap.allowed ? "✓ " : "⚠ "}{cap.message}{cap.band ? ` (band ${cap.band})` : ""}
             </div>
           )}
-          <Field label="Acquisition / Renewal">
-            <select value={form.acq_renewal} onChange={set("acq_renewal")}>
-              <option>Acquisition</option>
-              <option>Renewal</option>
-            </select>
-          </Field>
           <Field label="Business Type">
             <select value={form.business_type} onChange={set("business_type")}>
               <option value="">Select…</option>
@@ -162,6 +202,10 @@ export default function NewQuote() {
             </select>
           </Field>
           <Field label="Start Date"><input type="date" value={form.start_date} onChange={set("start_date")} /></Field>
+        </div>
+        <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
+          Contract term and broker uplift are applied as filters once prices come back below — no need to pick them up front.
+          Acquisition vs Renewal is worked out automatically per offer from the Current Supplier you select here.
         </div>
         {bespoke && (
           <div style={{ marginTop: 8, paddingTop: 14, borderTop: "1px solid var(--line,#EEF1F4)" }}>
@@ -228,28 +272,44 @@ export default function NewQuote() {
 
           <div className="page-head"><h2 style={{ fontSize: 16 }}>Supplier Offers</h2></div>
           <Card>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-end", marginBottom: 14, flexWrap: "wrap" }}>
+              <Field label="Contract Term">
+                <select value={form.term} onChange={(e) => setForm({ ...form, term: e.target.value })}>
+                  <option value="">All terms</option>
+                  <option value="12">12 months</option>
+                  <option value="24">24 months</option>
+                  <option value="36">36 months</option>
+                </select>
+              </Field>
+              <Field label="Broker Uplift (p/kWh)">
+                <input type="number" step="0.1" value={form.uplift} onChange={(e) => setForm({ ...form, uplift: e.target.value })} onBlur={runCompare} style={{ width: 120 }} />
+              </Field>
+              <span className="sub" style={{ fontSize: 11, paddingBottom: 9 }}>Changing uplift re-prices offers automatically.</span>
+            </div>
             <div className="table-wrap">
               <table className="tbl">
                 <thead>
                   <tr>
-                    <th>Rank</th><th>Supplier</th><th>Term</th><th>Unit Rate</th><th>Standing Charge</th>
+                    <th>Rank</th><th>Supplier</th><th>Deal</th><th>Term</th><th>Unit Rate</th><th>Standing Charge</th>
                     <th>Annual Cost</th><th>Monthly</th><th>Your Commission</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.offers.map((o) => {
+                  {result.offers.filter((o) => !form.term || String(o.term_months) === String(form.term)).map((o) => {
                     const key = o.supplier_id + "-" + o.term_months;
                     return (
                       <tr key={key} style={o.best ? { background: "#f5f3ff" } : {}}>
                         <td>{o.best ? <Badge tone="green"><Trophy size={11} style={{ verticalAlign: "-1px" }} /> Best</Badge> : <span className="mono">#{o.rank}</span>}</td>
                         <td><span className="mini"><span className="ini sq">{o.utility === "GAS" ? <Flame size={14} /> : <Zap size={14} />}</span><span className="name">{o.supplier}</span></span></td>
+                        <td><Badge tone={o.deal_type === "Renewal" ? "indigo" : "slate"}>{o.deal_type}</Badge></td>
                         <td>{o.term_months} m</td>
                         <td className="mono">{o.unit_rate}p</td>
                         <td className="mono">{o.standing_charge}p/d</td>
                         <td className="name">{money(o.annual_cost)}</td>
                         <td className="mono">{money(o.monthly_cost)}</td>
                         <td><span style={{ color: "var(--indigo)", fontWeight: 700 }}>{money(o.total_commission)}</span></td>
-                        <td style={{ textAlign: "right" }}>
+                        <td style={{ textAlign: "right", display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                          <button className="btn ghost sm" onClick={() => setBreakdown(o)}>Show More</button>
                           <button className="btn sm primary" disabled={saving === key} onClick={() => selectOffer(o)}>
                             <Check size={13} /> {saving === key ? "…" : "Quote"}
                           </button>
@@ -272,6 +332,43 @@ export default function NewQuote() {
           </Card>
         </>
       )}
+
+      {breakdown && <CostBreakdownModal offer={breakdown} eac={Number(form.eac) || 0} days={365} onClose={() => setBreakdown(null)} />}
     </>
+  );
+}
+
+function CostBreakdownModal({ offer, eac, days, onClose }) {
+  const standingTotal = (offer.standing_charge * days) / 100;
+  const unitTotal = (offer.unit_rate * eac) / 100;
+  const annualExVat = standingTotal + unitTotal;
+  const monthlyExVat = annualExVat / 12;
+  const vatPct = 20; // standard rate; reduced-rate (5%) sites should confirm eligibility separately (see Bill Validation's school/CCL checker)
+  const vat = (annualExVat * vatPct) / 100;
+  const annualIncVat = annualExVat + vat;
+  const monthlyIncVat = annualIncVat / 12;
+  const row = (label, val, strong) => (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", fontWeight: strong ? 700 : 400, background: strong ? "#F8FAFC" : "transparent" }}>
+      <span>{label}</span><span>£{val.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+    </div>
+  );
+  return (
+    <Modal title="Estimated Annual Cost" onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
+      <div className="sub" style={{ fontSize: 12, marginBottom: 8 }}>{offer.supplier} · {offer.term_months} months · {eac.toLocaleString()} kWh/yr</div>
+      <div style={{ border: "1px solid var(--line,#EEF1F4)", borderRadius: 10, overflow: "hidden" }}>
+        {row(`Standing Charge (${offer.standing_charge}p/day × ${days} days)`, standingTotal)}
+        {row(`Unit Rate (${offer.unit_rate}p/kWh × ${eac.toLocaleString()} kWh)`, unitTotal)}
+        {row("Total Monthly Cost (excl. VAT)", monthlyExVat, true)}
+        {row("Total Annual Cost (excl. VAT)", annualExVat, true)}
+        {row(`VAT (${vatPct}%)`, vat)}
+        {row("Total Monthly Cost (incl. VAT)", monthlyIncVat)}
+        <div style={{ display: "flex", justifyContent: "space-between", padding: "12px", fontWeight: 800, background: "var(--brand,#0E7C7B)", color: "#fff" }}>
+          <span>Total Annual Cost (incl. VAT)</span><span>£{annualIncVat.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        </div>
+      </div>
+      <div className="sub" style={{ fontSize: 11, marginTop: 8 }}>
+        Assumes standard-rate 20% VAT and excludes Climate Change Levy — check the Bill Validation module's school/CCA eligibility tools if this site may qualify for reduced-rate VAT or a CCL exemption.
+      </div>
+    </Modal>
   );
 }

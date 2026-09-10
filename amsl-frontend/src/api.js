@@ -124,6 +124,8 @@ export const api = {
   eiiCertificateMatch: (msid, date) => request(`/eii-certificates/match`, { params: { msid, date } }),
   productPriceMatrix: (id) => request(`/products/${id}/price-matrix`),
   productPriceMatrixAdd: (id, row) => request(`/products/${id}/price-matrix`, { method: "POST", body: row }),
+  productPriceMatrixBulkImport: (id, rows) => request(`/products/${id}/price-matrix/bulk`, { method: "POST", body: { rows } }),
+  productPriceMatrixClear: (id) => request(`/products/${id}/price-matrix`, { method: "DELETE" }),
   upliftCaps: () => request(`/uplift-caps`),
   upliftValidate: (utility, consumption, uplift) => request(`/uplift-caps/validate`, { method: "POST", body: { utility, consumption, uplift } }),
 };

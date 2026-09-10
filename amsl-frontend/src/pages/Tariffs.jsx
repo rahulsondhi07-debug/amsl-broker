@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "../components/ui.jsx";
 
 const money = (n) => Number(n).toFixed(2);
-const EMPTY = { supplier_id: "", utility: "ELECTRICITY", term_months: 24, unit_rate: "", standing_charge: "", status: "Active" };
+const EMPTY = { supplier_id: "", utility: "ELECTRICITY", term_months: 24, unit_rate: "", standing_charge: "", status: "Active", acq_renewal: "Both" };
 
 export default function Tariffs() {
   const [rows, setRows] = useState({ data: [], meta: {}, loading: true, error: null });
@@ -54,7 +54,7 @@ export default function Tariffs() {
             <div className="table-wrap">
               <table className="tbl">
                 <thead>
-                  <tr><th>Supplier</th><th>Utility</th><th>Term</th><th>Unit Rate (p/kWh)</th><th>Standing Charge (p/day)</th><th>Status</th><th></th></tr>
+                  <tr><th>Supplier</th><th>Utility</th><th>Term</th><th>Unit Rate (p/kWh)</th><th>Standing Charge (p/day)</th><th>Deal Type</th><th>Status</th><th></th></tr>
                 </thead>
                 <tbody>
                   {rows.data.map((t) => (
@@ -64,6 +64,7 @@ export default function Tariffs() {
                       <td>{t.term_months} m</td>
                       <td className="mono">{money(t.unit_rate)}</td>
                       <td className="mono">{money(t.standing_charge)}</td>
+                      <td><Badge tone={t.acq_renewal === "Renewal" ? "indigo" : t.acq_renewal === "Acquisition" ? "amber" : "slate"}>{t.acq_renewal || "Both"}</Badge></td>
                       <td><Badge tone={t.status === "Active" ? "green" : "slate"}>{t.status}</Badge></td>
                       <td style={{ textAlign: "right" }}>
                         <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
@@ -100,6 +101,7 @@ function TariffModal({ tariff, suppliers, onClose, onSaved }) {
     unit_rate: tariff.unit_rate ?? "",
     standing_charge: tariff.standing_charge ?? "",
     status: tariff.status || "Active",
+    acq_renewal: tariff.acq_renewal || "Both",
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
@@ -113,6 +115,7 @@ function TariffModal({ tariff, suppliers, onClose, onSaved }) {
       supplier_id: Number(form.supplier_id), utility: form.utility,
       term_months: Number(form.term_months), unit_rate: Number(form.unit_rate),
       standing_charge: Number(form.standing_charge), status: form.status,
+      acq_renewal: form.acq_renewal,
     };
     try {
       if (isEdit) await api.put(`/tariffs/${tariff.id}`, payload);
@@ -159,6 +162,16 @@ function TariffModal({ tariff, suppliers, onClose, onSaved }) {
           <option>Inactive</option>
         </select>
       </Field>
+      <Field label="Deal Type Restriction">
+        <select value={form.acq_renewal} onChange={set("acq_renewal")}>
+          <option value="Both">Both (default — available for Acquisition and Renewal)</option>
+          <option value="Acquisition">Acquisition only</option>
+          <option value="Renewal">Renewal only</option>
+        </select>
+      </Field>
+      <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
+        Renewal only applies when the customer's selected "Current Supplier" on the quote matches this tariff's supplier — it won't show as an acquisition offer for customers switching from another supplier.
+      </div>
     </Modal>
   );
 }

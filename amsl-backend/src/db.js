@@ -132,7 +132,8 @@ export function initSchema() {
     term_months     INTEGER NOT NULL,        -- 12 | 24 | 36
     unit_rate       REAL NOT NULL,           -- base p/kWh (before broker uplift)
     standing_charge REAL NOT NULL,           -- p/day
-    status          TEXT NOT NULL DEFAULT 'Active'
+    status          TEXT NOT NULL DEFAULT 'Active',
+    acq_renewal     TEXT NOT NULL DEFAULT 'Both'  -- Acquisition | Renewal | Both — which deal type this tariff is valid for
   );
 
   CREATE TABLE IF NOT EXISTS contracts (
@@ -298,7 +299,20 @@ export function migrate() {
   addCol("ALTER TABLE meters ADD COLUMN segment             TEXT");   // SME | Corporate | Domestic
   addCol("ALTER TABLE meters ADD COLUMN contract_start      TEXT");
   addCol("ALTER TABLE meters ADD COLUMN contract_end        TEXT");
+  addCol("ALTER TABLE tariffs ADD COLUMN acq_renewal TEXT NOT NULL DEFAULT 'Both'");
   addCol("ALTER TABLE sites ADD COLUMN postcode             TEXT");
+  // Price Matrix — real supplier flat-file columns (e.g. "SEB Electricity Flat File"):
+  // ProductType, Dist ID, Region, Meter Type, Profile, Product, StandingCharge, Day/All,
+  // Night, Eve&Wkend, MinAQ, MaxAQ, Effective From/To Date, Renewable Energy, ProductName,
+  // Voltage/TCR Band, CapacityCharge. Existing min_consumption/max_consumption/unit_rate/
+  // standing_charge/commission columns are kept for the original single-row manual-entry
+  // flow; these new columns support real bulk file imports without breaking that.
+  const pmc = (c) => addCol(`ALTER TABLE price_matrix ADD COLUMN ${c}`);
+  ["dist_id INTEGER", "region TEXT", "meter_type TEXT", "profile INTEGER", "day_rate REAL",
+   "night_rate REAL", "eve_wknd_rate REAL", "min_aq INTEGER", "max_aq INTEGER",
+   "effective_from TEXT", "effective_to TEXT", "renewable_energy TEXT", "product_name TEXT",
+   "voltage_tcr_band TEXT", "capacity_charge REAL", "set_name TEXT",
+  ].forEach(pmc);
   // V1.6-10/13 Bespoke Get Quick Quote fields
   addCol("ALTER TABLE quotes ADD COLUMN bespoke             INTEGER DEFAULT 0");
   addCol("ALTER TABLE quotes ADD COLUMN meter_point         TEXT");
