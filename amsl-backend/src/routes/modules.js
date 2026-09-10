@@ -296,48 +296,48 @@ export const tickets = crudRouter({
             FROM tickets t LEFT JOIN agencies ag ON ag.id=t.agency_id LEFT JOIN agents a ON a.id=t.agent_id`,
 });
 
-/* ---- Tariffs (power the comparison; editable in-app) ---- */
+/* ---- Tariffs ----
+ * Read-only. This is NOT its own data source — it's a filtered reflection of the same
+ * price-book uploads shown under Products → Price Matrix. Every row here is a
+ * price_matrix row joined back to its parent product/supplier; there is nothing to add,
+ * edit, or delete here. To change a rate, edit the product's price matrix directly.
+ */
 export const tariffs = (() => {
   const r = Router();
-  const cols = ["supplier_id","utility","term_months","unit_rate","standing_charge","status","acq_renewal"];
 
   r.get("/", (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(500, parseInt(req.query.limit) || 20);
     const where = [];
     const params = [];
-    if (req.query.utility) { where.push("UPPER(t.utility) = ?"); params.push(String(req.query.utility).toUpperCase()); }
-    if (req.query.supplier_id) { where.push("t.supplier_id = ?"); params.push(Number(req.query.supplier_id)); }
-    if (req.query.term_months) { where.push("t.term_months = ?"); params.push(Number(req.query.term_months)); }
-    if (req.query.q) { where.push("s.name LIKE ?"); params.push(`%${req.query.q}%`); }
+    if (req.query.utility) {
+      const u = String(req.query.utility).toUpperCase();
+      where.push(u === "GAS" ? "p.utility LIKE '%Gas%'" : "p.utility NOT LIKE '%Gas%'");
+    }
+    if (req.query.supplier_id) { where.push("p.supplier_id = ?"); params.push(Number(req.query.supplier_id)); }
+    if (req.query.term_months) { where.push("pm.term_months = ?"); params.push(Number(req.query.term_months)); }
+    if (req.query.price_book_status) { where.push("COALESCE(p.price_book_status, p.status) = ?"); params.push(req.query.price_book_status); }
+    if (req.query.q) { where.push("(s.name LIKE ? OR p.name LIKE ?)"); params.push(`%${req.query.q}%`, `%${req.query.q}%`); }
     const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const from = `FROM tariffs t JOIN suppliers s ON s.id = t.supplier_id ${w}`;
+    const from = `FROM price_matrix pm
+                  JOIN products p ON p.id = pm.product_id
+                  JOIN suppliers s ON s.id = p.supplier_id
+                  ${w}`;
     const total = db.prepare(`SELECT COUNT(*) c ${from}`).get(...params).c;
-    const rows = db.prepare(
-      `SELECT t.*, s.name AS supplier_name ${from} ORDER BY s.name, t.utility, t.term_months LIMIT ? OFFSET ?`
-    ).all(...params, limit, (page - 1) * limit);
-    res.json({ data: rows, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
+    const rows = db.prepare(`
+      SELECT pm.id, pm.product_id, p.name AS product_name, p.supplier_id, s.name AS supplier_name,
+             p.utility AS product_utility, p.acq_renewal,
+             COALESCE(p.price_book_status, p.status) AS price_book_status,
+             pm.term_months, COALESCE(pm.day_rate, pm.unit_rate) AS unit_rate, pm.standing_charge,
+             pm.min_aq, pm.max_aq, pm.min_consumption, pm.max_consumption,
+             pm.effective_from, pm.effective_to
+      ${from}
+      ORDER BY s.name, p.utility, pm.term_months
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, (page - 1) * limit);
+    const data = rows.map((row) => ({ ...row, utility: /gas/i.test(row.product_utility || "") ? "GAS" : "ELECTRICITY" }));
+    res.json({ data, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
   });
 
-  r.post("/", (req, res) => {
-    const c = cols.filter((k) => req.body[k] !== undefined);
-    if (!c.length) return res.status(400).json({ error: "No valid fields" });
-    const info = db.prepare(`INSERT INTO tariffs (${c.join(",")}) VALUES (${c.map(() => "?").join(",")})`).run(...c.map((k) => req.body[k]));
-    res.status(201).json({ data: db.prepare("SELECT * FROM tariffs WHERE id=?").get(info.lastInsertRowid) });
-  });
-
-  const upd = (req, res) => {
-    const c = cols.filter((k) => req.body[k] !== undefined);
-    if (!c.length) return res.status(400).json({ error: "No valid fields" });
-    const info = db.prepare(`UPDATE tariffs SET ${c.map((k) => `${k}=?`).join(",")} WHERE id=?`).run(...c.map((k) => req.body[k]), req.params.id);
-    if (!info.changes) return res.status(404).json({ error: "not found" });
-    res.json({ data: db.prepare("SELECT * FROM tariffs WHERE id=?").get(req.params.id) });
-  };
-  r.put("/:id", upd); r.patch("/:id", upd);
-  r.delete("/:id", (req, res) => {
-    const info = db.prepare("DELETE FROM tariffs WHERE id=?").run(req.params.id);
-    if (!info.changes) return res.status(404).json({ error: "not found" });
-    res.json({ data: { id: Number(req.params.id), deleted: true } });
-  });
   return r;
 })();

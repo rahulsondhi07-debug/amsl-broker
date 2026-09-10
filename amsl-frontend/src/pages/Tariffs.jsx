@@ -1,80 +1,99 @@
 import { useState, useEffect, useCallback } from "react";
-import { Plus, Pencil, Trash2, Zap, Flame } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Zap, Flame, RotateCcw, Table2 } from "lucide-react";
 import { api } from "../api.js";
-import { Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "../components/ui.jsx";
+import { Card, Badge, Spinner, ErrorBanner, Pager } from "../components/ui.jsx";
 
 const money = (n) => Number(n).toFixed(2);
-const EMPTY = { supplier_id: "", utility: "ELECTRICITY", term_months: 24, unit_rate: "", standing_charge: "", status: "Active", acq_renewal: "Both" };
+const PB_STATUS = ["Pending", "Released"];
 
 export default function Tariffs() {
+  const nav = useNavigate();
   const [rows, setRows] = useState({ data: [], meta: {}, loading: true, error: null });
   const [page, setPage] = useState(1);
   const [utility, setUtility] = useState("");
+  const [supplierId, setSupplierId] = useState("");
+  const [term, setTerm] = useState("");
+  const [pbStatus, setPbStatus] = useState("");
   const [suppliers, setSuppliers] = useState([]);
-  const [editing, setEditing] = useState(null); // null | {} for new | row for edit
-  const [busy, setBusy] = useState(null);
 
   const load = useCallback(() => {
     setRows((s) => ({ ...s, loading: true }));
-    api.list("tariffs", { page, limit: 15, utility })
+    api.list("tariffs", { page, limit: 15, utility, supplier_id: supplierId, term_months: term, price_book_status: pbStatus })
       .then((r) => setRows({ data: r.data, meta: r.meta, loading: false, error: null }))
       .catch((e) => setRows({ data: [], meta: {}, loading: false, error: e.message }));
-  }, [page, utility]);
+  }, [page, utility, supplierId, term, pbStatus]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { api.list("suppliers", { limit: 200 }).then((r) => setSuppliers(r.data)).catch(() => {}); }, []);
+  useEffect(() => { api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {}); }, []);
 
-  const remove = async (id) => {
-    if (!confirm("Delete this tariff?")) return;
-    setBusy(id);
-    try { await api.del(`/tariffs/${id}`); load(); } catch (e) { alert(e.message); }
-    setBusy(null);
-  };
+  const resetFilters = () => { setUtility(""); setSupplierId(""); setTerm(""); setPbStatus(""); setPage(1); };
+  const filtersActive = utility || supplierId || term || pbStatus;
 
   return (
     <>
       <div className="page-head">
         <div>
           <h2>Tariff Management</h2>
-          <div className="desc">Maintain the supplier rates that power the energy comparison. Edits apply to new comparisons immediately.</div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <div className="toggle">
-            {[["", "All"], ["ELECTRICITY", "Electricity"], ["GAS", "Gas"]].map(([v, l]) => (
-              <button key={l} className={utility === v ? "active" : ""} onClick={() => { setPage(1); setUtility(v); }}>{l}</button>
-            ))}
+          <div className="desc">
+            A filtered view of the rates uploaded under Products → Price Matrix — not a separate list. To
+            change a rate, edit the price matrix on the product itself; only Released price books ever
+            reach the customer-facing comparison.
           </div>
-          <button className="btn primary" onClick={() => setEditing({ ...EMPTY })}><Plus size={15} /> Add Tariff</button>
+        </div>
+        <div className="toggle">
+          {[["", "All"], ["ELECTRICITY", "Electricity"], ["GAS", "Gas"]].map(([v, l]) => (
+            <button key={l} className={utility === v ? "active" : ""} onClick={() => { setPage(1); setUtility(v); }}>{l}</button>
+          ))}
         </div>
       </div>
 
       <Card>
+        <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+          <select value={supplierId} onChange={(e) => { setPage(1); setSupplierId(e.target.value); }}
+            style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Suppliers</option>
+            {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <select value={term} onChange={(e) => { setPage(1); setTerm(e.target.value); }}
+            style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Terms</option>
+            <option value="12">12 months</option>
+            <option value="24">24 months</option>
+            <option value="36">36 months</option>
+          </select>
+          <select value={pbStatus} onChange={(e) => { setPage(1); setPbStatus(e.target.value); }}
+            style={{ padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" }}>
+            <option value="">All Price Book Statuses</option>
+            {PB_STATUS.map((s) => <option key={s}>{s}</option>)}
+          </select>
+          {filtersActive && <button className="btn ghost" onClick={resetFilters}><RotateCcw size={14} /> Reset</button>}
+        </div>
+
         {rows.loading ? <Spinner /> : rows.error ? <ErrorBanner error={rows.error} onRetry={load} /> : (
           <>
             <div className="table-wrap">
               <table className="tbl">
                 <thead>
-                  <tr><th>Supplier</th><th>Utility</th><th>Term</th><th>Unit Rate (p/kWh)</th><th>Standing Charge (p/day)</th><th>Deal Type</th><th>Status</th><th></th></tr>
+                  <tr><th>Supplier</th><th>Product</th><th>Utility</th><th>Term</th><th>Unit Rate (p/kWh)</th><th>Standing Charge (p/day)</th><th>Deal Type</th><th>Price Book</th><th></th></tr>
                 </thead>
                 <tbody>
                   {rows.data.map((t) => (
                     <tr key={t.id}>
                       <td><span className="mini"><span className="ini sq">{t.utility === "GAS" ? <Flame size={14} /> : <Zap size={14} />}</span><span className="name">{t.supplier_name}</span></span></td>
+                      <td style={{ fontSize: 12 }}>{t.product_name}</td>
                       <td>{t.utility}</td>
-                      <td>{t.term_months} m</td>
-                      <td className="mono">{money(t.unit_rate)}</td>
-                      <td className="mono">{money(t.standing_charge)}</td>
+                      <td>{t.term_months ? `${t.term_months} m` : "—"}</td>
+                      <td className="mono">{t.unit_rate != null ? money(t.unit_rate) : "—"}</td>
+                      <td className="mono">{t.standing_charge != null ? money(t.standing_charge) : "—"}</td>
                       <td><Badge tone={t.acq_renewal === "Renewal" ? "indigo" : t.acq_renewal === "Acquisition" ? "amber" : "slate"}>{t.acq_renewal || "Both"}</Badge></td>
-                      <td><Badge tone={t.status === "Active" ? "green" : "slate"}>{t.status}</Badge></td>
+                      <td><Badge tone={t.price_book_status === "Released" ? "green" : "amber"}>{t.price_book_status}</Badge></td>
                       <td style={{ textAlign: "right" }}>
-                        <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                          <button className="btn ghost sm" onClick={() => setEditing(t)}><Pencil size={14} /></button>
-                          <button className="btn ghost sm danger" disabled={busy === t.id} onClick={() => remove(t.id)}><Trash2 size={14} /></button>
-                        </div>
+                        <button className="btn ghost sm" onClick={() => nav("/products")}><Table2 size={13} /> View in Products</button>
                       </td>
                     </tr>
                   ))}
-                  {!rows.data.length && <tr><td colSpan={7} className="state">No tariffs found.</td></tr>}
+                  {!rows.data.length && <tr><td colSpan={9} className="state">No matrix rows found for these filters.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -82,96 +101,6 @@ export default function Tariffs() {
           </>
         )}
       </Card>
-
-      {editing && (
-        <TariffModal tariff={editing} suppliers={suppliers}
-          onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); load(); }} />
-      )}
     </>
-  );
-}
-
-function TariffModal({ tariff, suppliers, onClose, onSaved }) {
-  const isEdit = !!tariff.id;
-  const [form, setForm] = useState({
-    supplier_id: tariff.supplier_id || "",
-    utility: tariff.utility || "ELECTRICITY",
-    term_months: tariff.term_months || 24,
-    unit_rate: tariff.unit_rate ?? "",
-    standing_charge: tariff.standing_charge ?? "",
-    status: tariff.status || "Active",
-    acq_renewal: tariff.acq_renewal || "Both",
-  });
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState(null);
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
-
-  const save = async () => {
-    if (!form.supplier_id) return setErr("Choose a supplier");
-    if (form.unit_rate === "" || form.standing_charge === "") return setErr("Unit rate and standing charge are required");
-    setSaving(true); setErr(null);
-    const payload = {
-      supplier_id: Number(form.supplier_id), utility: form.utility,
-      term_months: Number(form.term_months), unit_rate: Number(form.unit_rate),
-      standing_charge: Number(form.standing_charge), status: form.status,
-      acq_renewal: form.acq_renewal,
-    };
-    try {
-      if (isEdit) await api.put(`/tariffs/${tariff.id}`, payload);
-      else await api.post("/tariffs", payload);
-      onSaved();
-    } catch (e) { setErr(e.message); setSaving(false); }
-  };
-
-  return (
-    <Modal title={isEdit ? "Edit Tariff" : "Add Tariff"} onClose={onClose}
-      footer={<>
-        <button className="btn" onClick={onClose}>Cancel</button>
-        <button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button>
-      </>}>
-      {err && <div className="error-banner">{err}</div>}
-      <Field label="Supplier *">
-        <select value={form.supplier_id} onChange={set("supplier_id")}>
-          <option value="">— Select supplier —</option>
-          {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-      </Field>
-      <div className="grid cols-2" style={{ gap: 12 }}>
-        <Field label="Utility">
-          <select value={form.utility} onChange={set("utility")}>
-            <option value="ELECTRICITY">Electricity</option>
-            <option value="GAS">Gas</option>
-          </select>
-        </Field>
-        <Field label="Term">
-          <select value={form.term_months} onChange={set("term_months")}>
-            <option value={12}>12 months</option>
-            <option value={24}>24 months</option>
-            <option value={36}>36 months</option>
-          </select>
-        </Field>
-      </div>
-      <div className="grid cols-2" style={{ gap: 12 }}>
-        <Field label="Unit Rate (p/kWh) *"><input type="number" step="0.01" value={form.unit_rate} onChange={set("unit_rate")} placeholder="24.50" /></Field>
-        <Field label="Standing Charge (p/day) *"><input type="number" step="0.01" value={form.standing_charge} onChange={set("standing_charge")} placeholder="42.00" /></Field>
-      </div>
-      <Field label="Status">
-        <select value={form.status} onChange={set("status")}>
-          <option>Active</option>
-          <option>Inactive</option>
-        </select>
-      </Field>
-      <Field label="Deal Type Restriction">
-        <select value={form.acq_renewal} onChange={set("acq_renewal")}>
-          <option value="Both">Both (default — available for Acquisition and Renewal)</option>
-          <option value="Acquisition">Acquisition only</option>
-          <option value="Renewal">Renewal only</option>
-        </select>
-      </Field>
-      <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
-        Renewal only applies when the customer's selected "Current Supplier" on the quote matches this tariff's supplier — it won't show as an acquisition offer for customers switching from another supplier.
-      </div>
-    </Modal>
   );
 }
