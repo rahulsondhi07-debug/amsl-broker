@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, Eye } from "lucide-react";
+import { Plus, Eye, Pencil, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field, initials } from "../components/ui.jsx";
@@ -9,12 +9,19 @@ const STRUCTURES = ["Charity", "Government Funded", "LLP", "LTD", "Non-profit Ma
 export default function Agencies() {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList("agencies", { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
+  const [editing, setEditing] = useState(null); // agency row being edited, or null
   const [statusFilter, setStatusFilter] = useState("");
 
   const toggleStatus = async (r) => {
     const next = (r.status === "Active" || r.status === "ACTIVE") ? "Inactive" : "Active";
     await api.put(`/agencies/${r.id}`, { status: next });
     reload();
+  };
+
+  const del = async (r) => {
+    if (!confirm(`Delete agency "${r.name}"? This can't be undone.`)) return;
+    try { await api.delete(`/agencies/${r.id}`); reload(); }
+    catch (e) { alert(e.message); }
   };
 
   const visible = statusFilter ? data.filter((r) => (r.status || "").toLowerCase() === statusFilter.toLowerCase()) : data;
@@ -64,7 +71,11 @@ export default function Agencies() {
                         </span>
                       </label>
                     </td>
-                    <td><Link className="btn ghost sm" to={`/agencies/${r.id}`} title="View agency"><Eye size={14} /> View</Link></td>
+                    <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <Link className="btn ghost sm" to={`/agencies/${r.id}`} title="View agency"><Eye size={14} /></Link>
+                      <button className="btn ghost sm" title="Edit agency" onClick={() => setEditing(r)}><Pencil size={13} /></button>
+                      <button className="btn ghost sm" title="Delete agency" onClick={() => del(r)}><Trash2 size={13} /></button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -74,13 +85,23 @@ export default function Agencies() {
         {meta && meta.pages > 1 && <Pager meta={meta} page={page} setPage={setPage} />}
       </Card>
 
-      {showAdd && <AddAgency onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); reload(); }} />}
+      {showAdd && <AgencyFormModal onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); reload(); }} />}
+      {editing && <AgencyFormModal agency={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); }} />}
     </>
   );
 }
 
-function AddAgency({ onClose, onSaved }) {
-  const [f, setF] = useState({ name: "", email: "", phone: "", website: "", max_users: "", company_reg_no: "", business_structure: "", vat_no: "", address: "", white_label: false, status: "Active" });
+// Shared by "Add Agency" and the Edit action — same fields, either POSTs a new agency or
+// PUTs the one passed in via the `agency` prop, pre-filled with its current values.
+function AgencyFormModal({ agency, onClose, onSaved }) {
+  const isEdit = !!agency;
+  const [f, setF] = useState(() => agency
+    ? {
+        name: agency.name || "", email: agency.email || "", phone: agency.phone || "", website: agency.website || "",
+        max_users: agency.max_users ?? "", company_reg_no: agency.company_reg_no || "", business_structure: agency.business_structure || "",
+        vat_no: agency.vat_no || "", address: agency.address || "", white_label: !!Number(agency.white_label), status: agency.status || "Active",
+      }
+    : { name: "", email: "", phone: "", website: "", max_users: "", company_reg_no: "", business_structure: "", vat_no: "", address: "", white_label: false, status: "Active" });
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
@@ -88,15 +109,17 @@ function AddAgency({ onClose, onSaved }) {
   const save = async () => {
     if (!f.name.trim()) return setErr("Agency Name is required");
     setSaving(true); setErr(null);
+    const body = { ...f, max_users: f.max_users ? Number(f.max_users) : null, white_label: f.white_label ? 1 : 0 };
     try {
-      await api.post("/agencies", { ...f, max_users: f.max_users ? Number(f.max_users) : null, white_label: f.white_label ? 1 : 0 });
+      if (isEdit) await api.put(`/agencies/${agency.id}`, body);
+      else await api.post("/agencies", body);
       onSaved();
     } catch (e) { setErr(e.message); setSaving(false); }
   };
 
   return (
-    <Modal title="Add Agency" onClose={onClose}
-      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Submit"}</button></>}>
+    <Modal title={isEdit ? `Edit Agency — ${agency.name}` : "Add Agency"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : isEdit ? "Save Changes" : "Submit"}</button></>}>
       {err && <ErrorBanner error={err} />}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <Field label="Agency Name *"><input value={f.name} onChange={set("name")} /></Field>
