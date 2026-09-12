@@ -62,6 +62,7 @@ export default function SupplierDetail() {
             <Card title="Overview">
               <Row k="Supplier Role" v={s.supplier_role} /><Row k="TPI Role" v={s.tpi_role} />
               <Row k="Fuel Mix" v={s.fuel_mix} /><Row k="Status" v={s.status} />
+              <Row k="Agent ID" v={s.contract_agent_id} />
               <Row k="Max Broker Comm — Elec" v={s.max_broker_comm_electric != null ? `${s.max_broker_comm_electric}p` : null} />
               <Row k="Max Broker Comm — Gas" v={s.max_broker_comm_gas != null ? `${s.max_broker_comm_gas}p` : null} />
             </Card>
@@ -158,6 +159,7 @@ function EditSupplier({ supplier: sp, onClose, onSaved }) {
     ind_name: sp.ind_name || "", ind_email: sp.ind_email || "", ind_password: "", ind_mobile: sp.ind_mobile || "", ind_landline: sp.ind_landline || "", ind_threshold: sp.ind_threshold ?? "",
     contract_condition: sp.contract_condition || "", credit_check: sp.credit_check || "", commission_payment: sp.commission_payment || "", customer_billing: sp.customer_billing || "",
     supplier_contact: sp.supplier_contact || "", supplier_address: sp.supplier_address || "", restricted_business_types: sp.restricted_business_types || "", about: sp.about || "",
+    contract_agent_id: sp.contract_agent_id || "",
   });
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -190,6 +192,7 @@ function EditSupplier({ supplier: sp, onClose, onSaved }) {
         <Field label="Max Broker Comm — Elec (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_electric} onChange={set("max_broker_comm_electric")} /></Field>
         <Field label="Max Broker Comm — Gas (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_gas} onChange={set("max_broker_comm_gas")} /></Field>
         <Field label="Supplier Status"><select value={f.status} onChange={set("status")}><option>Active</option><option>Inactive</option></select></Field>
+        <Field label="Agent ID"><input value={f.contract_agent_id} onChange={set("contract_agent_id")} placeholder="This supplier's Agent ID for us" /></Field>
       </Section>
       <Section title="SME TPI Contact">
         <Field label="SME Email"><input type="email" value={f.sme_email} onChange={set("sme_email")} /></Field>

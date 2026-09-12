@@ -169,18 +169,18 @@ r.post("/:id/meters", (req, res) => {
   const b = req.body || {};
   if (!b.utility) return res.status(400).json({ error: "utility (ELEC|GAS) is required" });
   const info = db.prepare(`INSERT INTO meters
-    (business_id, site_id, utility, mpan_mprn, eac, status, name, current_supplier_id, transferring_supplier_id, segment, contract_start, contract_end)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    (business_id, site_id, utility, mpan_mprn, eac, status, name, current_supplier_id, transferring_supplier_id, segment, contract_start, contract_end, topline)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(req.params.id, b.site_id || null, b.utility, b.mpan_mprn || null, b.eac || null, b.status || "C",
       b.name || null, b.current_supplier_id || null, b.transferring_supplier_id || null, b.segment || "SME",
-      b.contract_start || null, b.contract_end || null);
+      b.contract_start || null, b.contract_end || null, b.topline || null);
   res.status(201).json({ data: one("SELECT * FROM meters WHERE id=?", info.lastInsertRowid) });
 });
 r.put("/meters/:meterId", (req, res) => {
   const cur = one("SELECT * FROM meters WHERE id=?", req.params.meterId);
   if (!cur) return res.status(404).json({ error: "meter not found" });
   const b = req.body || {};
-  const cols = ["site_id", "mpan_mprn", "eac", "status", "name", "current_supplier_id", "transferring_supplier_id", "segment", "contract_start", "contract_end"];
+  const cols = ["site_id", "mpan_mprn", "eac", "status", "name", "current_supplier_id", "transferring_supplier_id", "segment", "contract_start", "contract_end", "topline"];
   const merged = Object.fromEntries(cols.map((c) => [c, b[c] !== undefined ? b[c] : cur[c]]));
   db.prepare(`UPDATE meters SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`).run(...cols.map((c) => merged[c]), req.params.meterId);
   res.json({ data: one("SELECT * FROM meters WHERE id=?", req.params.meterId) });
@@ -240,6 +240,33 @@ r.post("/:id/comments", (req, res) => {
   const info = db.prepare("INSERT INTO customer_comments (business_id,author,body) VALUES (?,?,?)")
     .run(req.params.id, req.body.author || "You", req.body.body.trim());
   res.status(201).json({ data: one("SELECT * FROM customer_comments WHERE id=?", info.lastInsertRowid) });
+});
+
+/* ---- Contract dates (V1.7-04/07 fix): the ONLY place these can be recorded.
+   Without this, contract_start/contract_end are never set outside demo seed data, so the
+   Under-Registration→Live and Live→Up-for-Renewal automations below can never actually
+   fire from real usage — this closes that gap. ---- */
+r.post("/:id/contract-dates", (req, res) => {
+  const { contract_start, contract_end } = req.body || {};
+  if (contract_start === undefined && contract_end === undefined) {
+    return res.status(400).json({ error: "Provide contract_start and/or contract_end" });
+  }
+  const cur = one("SELECT contract_start, contract_end FROM businesses WHERE id=?", req.params.id);
+  if (!cur) return res.status(404).json({ error: "not found" });
+  const cols = [];
+  const vals = [];
+  if (contract_start !== undefined) { cols.push("contract_start"); vals.push(contract_start || null); }
+  if (contract_end !== undefined) { cols.push("contract_end"); vals.push(contract_end || null); }
+  db.prepare(`UPDATE businesses SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`).run(...vals, req.params.id);
+  const note = [
+    contract_start !== undefined && contract_start !== cur.contract_start ? `Contract start set to ${contract_start || "—"}` : null,
+    contract_end !== undefined && contract_end !== cur.contract_end ? `Contract end set to ${contract_end || "—"}` : null,
+  ].filter(Boolean).join("; ");
+  if (note) {
+    db.prepare("INSERT INTO stage_history (business_id,from_stage,to_stage,note,changed_by) VALUES (?,?,?,?,?)")
+      .run(req.params.id, null, "contract-dates", note, req.body.by || "You");
+  }
+  res.json({ data: one("SELECT id, contract_start, contract_end FROM businesses WHERE id=?", req.params.id) });
 });
 
 /* ---- Disposition (V1.6-06): record the outcome of a contact attempt ---- */

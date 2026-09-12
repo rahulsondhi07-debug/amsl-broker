@@ -137,6 +137,14 @@ function DetailsPanel({ id, onClose, onChanged }) {
   const addComment = async () => { if (comment.trim()) { await api.pipelineComment(id, comment.trim()); setComment(""); load(); onChanged?.(); } };
   const saveDisp = async () => { if (disp) { await api.pipelineDisposition(id, disp); setDisp(""); load(); } };
   const schedule = async () => { if (cbDate) { await api.pipelineCallback(id, cbDate.replace("T", " "), cbReason); setCbDate(""); load(); } };
+  const [cStart, setCStart] = useState("");
+  const [cEnd, setCEnd] = useState("");
+  useEffect(() => { if (data) { setCStart(data.contract_start || ""); setCEnd(data.contract_end || ""); } }, [data]);
+  const saveDates = async () => {
+    await api.pipelineContractDates(id, { contract_start: cStart || null, contract_end: cEnd || null });
+    await api.pipelineRunAutomations(); // pick up an immediate Live/Renewal move rather than waiting for the hourly sweep
+    load(); onChanged?.();
+  };
   const DISPOSITIONS = ["Spoke - interested", "Spoke - not interested", "No answer", "Left voicemail", "Wrong number", "Requested callback", "Do not contact"];
 
   const rn = data ? renewal(data.contract_end) : null;
@@ -184,6 +192,21 @@ function DetailsPanel({ id, onClose, onChanged }) {
 
           {tab === "actions" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div>
+                <div className="lab" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted,#94A3B8)", marginBottom: 4 }}>Contract dates</div>
+                <div className="sub" style={{ fontSize: 11, marginBottom: 6 }}>Drives automatic Live and Up-for-Renewal moves — set these once the contract is signed.</div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+                  <div style={{ flex: 1 }}>
+                    <div className="sub" style={{ fontSize: 10.5, marginBottom: 2 }}>Start date</div>
+                    <input type="date" value={cStart} onChange={(e) => setCStart(e.target.value)} style={{ width: "100%", padding: "7px 9px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div className="sub" style={{ fontSize: 10.5, marginBottom: 2 }}>End date</div>
+                    <input type="date" value={cEnd} onChange={(e) => setCEnd(e.target.value)} style={{ width: "100%", padding: "7px 9px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} />
+                  </div>
+                </div>
+                <button className="btn primary sm" disabled={cStart === (data.contract_start || "") && cEnd === (data.contract_end || "")} onClick={saveDates}>Save dates</button>
+              </div>
               <div>
                 <div className="lab" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted,#94A3B8)", marginBottom: 4 }}>Log disposition</div>
                 <div style={{ display: "flex", gap: 6 }}>

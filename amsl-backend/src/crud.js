@@ -15,7 +15,7 @@ export function paginate(baseSql, params, req) {
  * Build a REST router for a table.
  * opts: { table, columns:[...writable], listSql?, searchColumns?:[] }
  */
-export function crudRouter({ table, columns, listSql, searchColumns = [], detailSql, detailTransform }) {
+export function crudRouter({ table, columns, listSql, searchColumns = [], detailSql, detailTransform, onCreate }) {
   const r = Router();
   const selectAll = listSql || `SELECT * FROM ${table}`;
   const selectOne = detailSql || selectAll;
@@ -50,6 +50,7 @@ export function crudRouter({ table, columns, listSql, searchColumns = [], detail
     );
     const info = stmt.run(...cols.map((c) => req.body[c]));
     const row = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid);
+    if (onCreate) { try { onCreate(row); } catch (e) { console.error(`onCreate hook failed for ${table}:`, e.message); } }
     res.status(201).json({ data: row });
   });
 

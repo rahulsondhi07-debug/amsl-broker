@@ -25,12 +25,28 @@ export default function GenerateContract() {
     telephone: "", mobile: "", email: "",
     billing_same: true, billing_title: "", billing_first_name: "", billing_last_name: "", billing_address1: "",
     billing_address2: "", billing_town: "", billing_postcode: "", billing_telephone: "", billing_mobile: "", billing_email: "",
-    supplier_id: "", utility: "Electricity", meter_mpan_mpr: "", meter_serial: "", consumption: "", current_read: "", requested_start: "",
+    site_same: true, site_address1: "", site_address2: "", site_town: "", site_postcode: "",
+    supplier_id: "", utility: "Electricity", meter_mpan_mpr: "", topline: "", meter_serial: "", consumption: "", current_read: "", requested_start: "",
     product_name: "", tariff_name: "", acq_renewal: "Acquisition", tariff_type: "", supplier_start: "", tariff_end: "", supplier_end: "",
     term_months: "", fixed_price_term: "", standing_charge: "", day_rate: "", night_rate: "", ewe_rate: "", kva_charge: "", broker_commission: "",
-    payment_method: "", payment_amount: "", billing_period: "Monthly",
+    payment_method: "", payment_amount: "", billing_period: "Monthly", supplier_agent_id: "",
   });
-  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
+  const set = (k) => (e) => setF((p) => {
+    const val = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    const next = { ...p, [k]: val };
+    // Bug fix (V1.7-12): ticking "Site Address same as Business Address" — or editing the
+    // business address while it's ticked — must actually copy the business address across,
+    // not just leave the site fields blank.
+    if (k === "site_same" && val) {
+      next.site_address1 = p.address_line1; next.site_address2 = p.address_line2;
+      next.site_town = p.town; next.site_postcode = p.postcode;
+    }
+    if (p.site_same && ["address_line1", "address_line2", "town", "postcode"].includes(k)) {
+      const map = { address_line1: "site_address1", address_line2: "site_address2", town: "site_town", postcode: "site_postcode" };
+      next[map[k]] = val;
+    }
+    return next;
+  });
 
   useEffect(() => {
     if (!quoteId) { setLoading(false); return; }
@@ -40,10 +56,17 @@ export default function GenerateContract() {
         ...p,
         business_id: q.business_id || "", business_name: q.business_name || "", business_type: q.business_type || "",
         acq_renewal: q.acq_renewal || "Acquisition", supplier_id: q.supplier_id || "", utility: q.utility || "Electricity",
-        meter_mpan_mpr: q.meter_number || q.meter_point || "", consumption: q.eac || "", requested_start: q.start_date || "",
+        meter_mpan_mpr: q.meter_number || q.meter_point || "", topline: q.topline || "", consumption: q.eac || "", requested_start: q.start_date || "",
         product_name: q.product_name || "", term_months: q.term_months || "", standing_charge: q.standing_charge ?? "",
         day_rate: q.unit_rate ?? "", broker_commission: q.commission ?? "",
       }));
+      // V1.7-14: pull the chosen supplier's Agent ID so it's automatically published on
+      // this contract — nothing for the agent generating it to remember to fill in.
+      if (q.supplier_id) {
+        api.get(`/suppliers/${q.supplier_id}`)
+          .then((sr) => setF((p) => ({ ...p, supplier_agent_id: sr.data?.contract_agent_id || "" })))
+          .catch(() => {});
+      }
       setLoading(false);
     }).catch((e) => { setErr(e.message); setLoading(false); });
   }, [quoteId]);
@@ -57,6 +80,7 @@ export default function GenerateContract() {
     try {
       const payload = { ...f, quote_id: quoteId ? Number(quoteId) : null, contract_no: "CN-" + Date.now().toString().slice(-6),
         business_id: f.business_id || null, supplier_id: f.supplier_id || null, billing_same: f.billing_same ? 1 : 0,
+        site_same: f.site_same ? 1 : 0,
         consumption: Number(f.consumption) || null, commission_value: Number(f.broker_commission) || 0,
         status: "Contract Sent to Client" };
       numKeys.forEach((k) => { payload[k] = f[k] === "" ? null : Number(f[k]); });
@@ -80,6 +104,11 @@ export default function GenerateContract() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <Section title="Supply Details">
+          {f.supplier_agent_id && (
+            <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--muted,#64748B)", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, padding: "8px 10px" }}>
+              Supplier Agent ID <strong>{f.supplier_agent_id}</strong> will be published on this contract automatically.
+            </div>
+          )}
           <Field label="Company Name *"><input value={f.business_name} onChange={set("business_name")} /></Field>
           <Field label="Company Registration"><input value={f.company_reg} onChange={set("company_reg")} /></Field>
           <Field label="Business Structure"><select value={f.business_structure} onChange={set("business_structure")}><option value="">Select Structure</option>{STRUCTURES.map((x) => <option key={x}>{x}</option>)}</select></Field>
@@ -119,11 +148,28 @@ export default function GenerateContract() {
 
         <Section title="Meter Details">
           <Field label="MPAN / MPRN *"><input value={f.meter_mpan_mpr} onChange={set("meter_mpan_mpr")} /></Field>
+          {f.utility === "Electricity" && (
+            <Field label="Topline"><input value={f.topline} onChange={set("topline")} placeholder="8-digit header above the MPAN barcode" /></Field>
+          )}
           <Field label="Meter Serial Number"><input value={f.meter_serial} onChange={set("meter_serial")} /></Field>
           <Field label="Estimated Annual Consumption (kWh) *"><input type="number" value={f.consumption} onChange={set("consumption")} /></Field>
           <Field label="Current Meter Reading"><input value={f.current_read} onChange={set("current_read")} /></Field>
           <Field label="Requested Start Date *"><input type="date" value={f.requested_start} onChange={set("requested_start")} /></Field>
         </Section>
+
+        <Card title="Site Address">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: f.site_same ? 0 : 12 }}>
+            <input type="checkbox" checked={f.site_same} onChange={set("site_same")} style={{ width: 16, height: 16, accentColor: "var(--brand,#0E7C7B)" }} /> Site Address same as Business Address
+          </label>
+          {!f.site_same && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+              <Field label="Site Address Line 1"><input value={f.site_address1} onChange={set("site_address1")} /></Field>
+              <Field label="Site Address Line 2"><input value={f.site_address2} onChange={set("site_address2")} /></Field>
+              <Field label="Site Town / City"><input value={f.site_town} onChange={set("site_town")} /></Field>
+              <Field label="Site Postcode"><input value={f.site_postcode} onChange={set("site_postcode")} /></Field>
+            </div>
+          )}
+        </Card>
 
         <Section title="Product & Contract Details">
           <Field label="Product Name *"><input value={f.product_name} onChange={set("product_name")} /></Field>

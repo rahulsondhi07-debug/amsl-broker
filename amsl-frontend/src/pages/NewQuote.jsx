@@ -9,7 +9,7 @@ const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFrac
 export default function NewQuote() {
   const nav = useNavigate();
   const [businesses, setBusinesses] = useState([]);
-  const [form, setForm] = useState({ utility: "Electricity", business_id: "", business_name: "", site_id: "", meter_id: "", meter_number: "", postcode: "", eac: "30000", term: "", uplift: "1.0", start_date: "", current_supplier_id: "", business_type: "" });
+  const [form, setForm] = useState({ utility: "Electricity", business_id: "", business_name: "", site_id: "", meter_id: "", meter_number: "", topline: "", postcode: "", eac: "30000", term: "", uplift: "1.0", start_date: "", current_supplier_id: "", business_type: "" });
   const [sites, setSites] = useState([]);
   const [meters, setMeters] = useState([]);
   const [bespoke, setBespoke] = useState(false);
@@ -23,6 +23,12 @@ export default function NewQuote() {
   const [saved, setSaved] = useState(null);
   const [cap, setCap] = useState(null);
   const [breakdown, setBreakdown] = useState(null); // offer shown in the "Show More" cost breakdown modal
+  const [disclaimer, setDisclaimer] = useState(
+    "This quote is valid until 5:30pm today; after that, prices may change and are subject to availability. " +
+    "All contracts are subject to credit approval from the supplier. Unit rates are quoted in pence per kWh. " +
+    "Prices exclude Climate Change Levy and VAT. This quote is based on estimated annual consumption — your actual future usage may differ."
+  );
+  useEffect(() => { api.disclaimer().then((r) => setDisclaimer(r.data.text)).catch(() => {}); }, []);
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
   useEffect(() => {
@@ -54,8 +60,14 @@ export default function NewQuote() {
   const onMeterChange = (e) => {
     const meterId = e.target.value;
     const m = meters.find((x) => String(x.id) === meterId);
-    setForm((f) => ({ ...f, meter_id: meterId, meter_number: m?.mpan_mprn || f.meter_number, eac: m?.eac ? String(m.eac) : f.eac }));
+    setForm((f) => ({ ...f, meter_id: meterId, meter_number: m?.mpan_mprn || f.meter_number, topline: m?.topline || f.topline, eac: m?.eac ? String(m.eac) : f.eac }));
   };
+  // First 2 digits of the MPAN = Distributor ID; first 2 digits of the Topline = Profile
+  // Class. These are how a real price matrix (Dist ID / Profile columns) gets filtered
+  // down to the rates that actually apply to this meter.
+  const first2 = (v) => { const d = String(v || "").replace(/\D/g, ""); return d.length >= 2 ? d.slice(0, 2) : null; };
+  const distId = first2(form.meter_number);
+  const profileClass = first2(form.topline);
   // If the person switches Electricity<->Gas after already picking a site, refresh the meter list for that utility.
   useEffect(() => {
     if (!form.business_id || !form.site_id) return;
@@ -70,7 +82,11 @@ export default function NewQuote() {
     try {
       const chosen = businesses.find((b) => String(b.id) === String(form.business_id));
       const unit = Number(bf.unit_rate) || 0, sc = Number(bf.standing_charge) || 0, eac = Number(form.eac) || 0;
-      const annual = (unit * eac) / 100 + (sc * 365) / 100;
+      const dist = Number(bf.distribution_charge) || 0, trans = Number(bf.transmission_charge) || 0;
+      // Bug fix (V1.7-16): Distribution and Transmission are p/day charges, same as Standing
+      // Charge — they were being collected on this form but never actually added into the
+      // annual cost total.
+      const annual = (unit * eac) / 100 + (sc * 365) / 100 + (dist * 365) / 100 + (trans * 365) / 100;
       const q = await api.post("/quotes", {
         quote_no: "QT-" + Date.now().toString().slice(-6),
         business_id: form.business_id || null,
@@ -108,6 +124,8 @@ export default function NewQuote() {
         utility: form.utility, eac: Number(form.eac),
         uplift: form.uplift ? Number(form.uplift) : 1.0,
         current_supplier_id: form.current_supplier_id || undefined,
+        meter_number: form.meter_number || undefined,
+        topline: form.topline || undefined,
       });
       setResult(data);
     } catch (e) { setErr(e.message); }
@@ -122,11 +140,12 @@ export default function NewQuote() {
         quote_no: "QT-" + Date.now().toString().slice(-6),
         business_id: form.business_id || null,
         business_name: chosen ? chosen.business_name : (form.business_name || "Unassigned Business"),
-        utility: form.utility, meter_number: form.meter_number,
+        utility: form.utility, meter_number: form.meter_number, topline: form.topline,
         eac: Number(form.eac), start_date: form.start_date,
         supplier_id: o.supplier_id, term_months: o.term_months,
         unit_rate: o.unit_rate, standing_charge: o.standing_charge,
         annual_cost: o.annual_cost, commission: o.total_commission,
+        uplift: o.uplift,
         status: "Quoted",
       });
       setSaved({ quote_no: q.data.quote_no, supplier: o.supplier });
@@ -181,6 +200,11 @@ export default function NewQuote() {
             </Field>
           )}
           <Field label={meterLabel}><input value={form.meter_number} onChange={set("meter_number")} placeholder={`${meterLabel} (auto-filled if a meter is selected above)`} /></Field>
+          {form.utility === "Electricity" && (
+            <Field label="Topline">
+              <input value={form.topline} onChange={set("topline")} placeholder="8-digit header above the MPAN barcode" />
+            </Field>
+          )}
           <Field label="Postcode"><input value={form.postcode} onChange={set("postcode")} placeholder="Supply postcode" /></Field>
           <Field label="Consumption kWh/yr (EAC) *"><input type="number" value={form.eac} onChange={set("eac")} placeholder="30000" /></Field>
           <Field label="Current Supplier">
@@ -206,6 +230,9 @@ export default function NewQuote() {
         <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
           Contract term and broker uplift are applied as filters once prices come back below — no need to pick them up front.
           Acquisition vs Renewal is worked out automatically per offer from the Current Supplier you select here.
+          {form.utility === "Electricity" && (distId || profileClass) && (
+            <> · Matrix filter: {distId && <>Distributor ID <b>{distId}</b></>}{distId && profileClass && ", "}{profileClass && <>Profile Class <b>{profileClass}</b></>}</>
+          )}
         </div>
         {bespoke && (
           <div style={{ marginTop: 8, paddingTop: 14, borderTop: "1px solid var(--line,#EEF1F4)" }}>
@@ -222,8 +249,8 @@ export default function NewQuote() {
               <Field label="Product Name"><input value={bf.product_name} onChange={setB("product_name")} placeholder="e.g. Fixed 24m Bespoke" /></Field>
               <Field label="Unit Rate (p/kWh)"><input type="number" step="0.01" value={bf.unit_rate} onChange={setB("unit_rate")} /></Field>
               <Field label="Standing Charge (p/day)"><input type="number" step="0.01" value={bf.standing_charge} onChange={setB("standing_charge")} /></Field>
-              <Field label="Distribution Charge (p/kWh)"><input type="number" step="0.01" value={bf.distribution_charge} onChange={setB("distribution_charge")} /></Field>
-              <Field label="Transmission Charge (p/kWh)"><input type="number" step="0.01" value={bf.transmission_charge} onChange={setB("transmission_charge")} /></Field>
+              <Field label="Distribution Charge (p/day)"><input type="number" step="0.01" value={bf.distribution_charge} onChange={setB("distribution_charge")} /></Field>
+              <Field label="Transmission Charge (p/day)"><input type="number" step="0.01" value={bf.transmission_charge} onChange={setB("transmission_charge")} /></Field>
               <Field label="Term (months)">
                 <select value={bf.term} onChange={setB("term")}>
                   <option value="12">12</option><option value="24">24</option><option value="36">36</option>
@@ -324,10 +351,8 @@ export default function NewQuote() {
               Unit rate shown includes your {form.uplift || 1}p/kWh broker uplift. Costs are estimates for {Number(form.eac).toLocaleString()} kWh/yr.
             </div>
             <div style={{ marginTop: 12, padding: "10px 12px", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, fontSize: 11, lineHeight: 1.5, color: "var(--muted,#64748B)" }}>
-              <strong>Quote disclaimer:</strong> This quote is valid until 5:30pm today; after that, prices may change and are subject to availability.
-              All contracts are subject to credit approval from the supplier. Unit rates are quoted in pence per kWh.
-              Prices exclude Climate Change Levy and VAT. This quote is based on estimated annual consumption — your actual future usage may differ.
-              The amounts shown are calculated using estimated consumption splits, which may not match the consumption splits you provided for this quote.
+              <strong>Quote disclaimer:</strong> {disclaimer}
+              {" "}The amounts shown are calculated using estimated consumption splits, which may not match the consumption splits you provided for this quote.
             </div>
           </Card>
         </>

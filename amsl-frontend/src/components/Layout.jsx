@@ -88,10 +88,17 @@ export default function Layout() {
   const doLogout = () => { logout(); nav("/login", { replace: true }); };
   const [allowed, setAllowed] = useState(null); // null = still loading -> show all
   const [openGroup, setOpenGroup] = useState(null);
+  const [brand, setBrand] = useState(null);
   const railRef = useRef(null);
   useEffect(() => {
     api.permissionsEffective(user?.role || "").then((r) => setAllowed(r.data)).catch(() => setAllowed(null));
-    api.branding().then((r) => { if (r.data?.primary_color) document.documentElement.style.setProperty("--brand", r.data.primary_color); }).catch(() => {});
+    // V1.7-10: apply the full branding config (not just colour) so a logo/name set in
+    // Settings → Branding actually shows up here, instead of the hardcoded "AB" mark.
+    api.branding().then((r) => {
+      if (r.data?.primary_color) document.documentElement.style.setProperty("--brand", r.data.primary_color);
+      setBrand(r.data || null);
+      if (r.data?.brand_name) document.title = r.data.brand_name;
+    }).catch(() => {});
   }, [user?.role]);
   const NAV_ADMIN = [...NAV, { to: "/permissions", icon: ShieldCheck, label: "Permissions" }];
 
@@ -114,7 +121,11 @@ export default function Layout() {
   return (
     <div className="app">
       <aside className="rail" ref={railRef}>
-        <div className="logo">AB</div>
+        <div className="logo">
+          {brand?.logo_url
+            ? <img src={brand.logo_url} alt={brand.brand_name || "logo"} style={{ width: "100%", height: "100%", objectFit: "contain", borderRadius: "inherit" }} onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = (brand.brand_name || "AB").slice(0, 2).toUpperCase(); }} />
+            : (brand?.brand_name || "AB").slice(0, 2).toUpperCase()}
+        </div>
         {visibleNav.map((n) => {
           if (n.group) {
             const Icon = n.icon;

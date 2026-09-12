@@ -255,7 +255,9 @@ export function migrate() {
    "sme_email TEXT", "sme_mobile TEXT", "sme_landline TEXT", "sme_password TEXT", "sme_threshold INTEGER",
    "corporate_login_email TEXT",
    "mm_name TEXT", "mm_email TEXT", "mm_password TEXT", "mm_mobile TEXT", "mm_landline TEXT", "mm_threshold INTEGER",
-   "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER"
+   "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER",
+   "contract_agent_id TEXT"   // V1.7-14: the Agent ID this supplier issues to AMSL — gets
+                              // auto-published onto every contract generated for them.
   ].forEach(sc);
   // Contract generation fields (match production contract/generate form)
   const cc = (c) => addCol(`ALTER TABLE contracts ADD COLUMN ${c}`);
@@ -265,11 +267,13 @@ export function migrate() {
    "billing_same INTEGER DEFAULT 1", "billing_title TEXT", "billing_first_name TEXT", "billing_last_name TEXT",
    "billing_address1 TEXT", "billing_address2 TEXT", "billing_town TEXT", "billing_postcode TEXT",
    "billing_telephone TEXT", "billing_mobile TEXT", "billing_email TEXT",
+   "site_same INTEGER DEFAULT 1", "site_address1 TEXT", "site_address2 TEXT", "site_town TEXT", "site_postcode TEXT",
    "meter_serial TEXT", "current_read TEXT", "requested_start TEXT",
    "product_name TEXT", "tariff_name TEXT", "acq_renewal TEXT", "tariff_type TEXT",
    "supplier_start TEXT", "tariff_end TEXT", "supplier_end TEXT", "fixed_price_term INTEGER",
    "standing_charge REAL", "day_rate REAL", "night_rate REAL", "ewe_rate REAL", "kva_charge REAL", "broker_commission REAL",
-   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT", "tolerance_pct REAL"
+   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT", "tolerance_pct REAL",
+   "topline TEXT", "supplier_agent_id TEXT"   // V1.7-14: copied from the supplier's Agent ID at generation time
   ].forEach(cc);
   // Ticket fields (match production Add Ticket form)
   addCol("ALTER TABLE tickets ADD COLUMN corporate_sme TEXT");
@@ -322,6 +326,29 @@ export function migrate() {
   addCol("ALTER TABLE quotes ADD COLUMN product_name        TEXT");
   addCol("ALTER TABLE quotes ADD COLUMN acq_renewal         TEXT");
   addCol("ALTER TABLE quotes ADD COLUMN business_type       TEXT");
+  // Topline — the 8-digit header printed above an electricity MPAN's barcode (Profile
+  // Class + Meter Time Switch Code + Line Loss Factor Class). Its first 2 digits give the
+  // Profile Class, which — together with the Distributor ID (the first 2 digits of the
+  // MPAN itself) — is how a real supplier price matrix (see price_matrix.profile /
+  // price_matrix.dist_id) is filtered down to the rates that actually apply to a meter.
+  addCol("ALTER TABLE meters ADD COLUMN topline             TEXT");
+  addCol("ALTER TABLE quotes ADD COLUMN topline             TEXT");
+  addCol("ALTER TABLE quotes ADD COLUMN uplift              REAL");
+
+  // V1.7-11: Quote Price History — retains every price a quote has ever shown, so a
+  // superseded price can be flagged Invalid rather than silently disappearing, and the
+  // current one shown as the Best Price.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS quote_price_history (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_id        INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+      unit_rate       REAL, standing_charge REAL, annual_cost REAL, commission REAL,
+      term_months     INTEGER, supplier_id INTEGER,
+      valid           INTEGER NOT NULL DEFAULT 1,   -- 0 once superseded by a refresh
+      source          TEXT NOT NULL DEFAULT 'created', -- created | refresh
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
   // Backfill journey_stage from the legacy 3-stage field
   db.exec(`UPDATE businesses SET journey_stage='RAW_LEAD' WHERE journey_stage IS NULL AND stage='LEAD'`);

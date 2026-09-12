@@ -3,6 +3,37 @@ import { Plus, Pencil, Trash2, Layers, Settings as SettingsIcon } from "lucide-r
 import { api } from "../api.js";
 import { Card, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
 
+function DisclaimerCard() {
+  const [text, setText] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => { api.disclaimer().then((r) => setText(r.data.text)).catch((e) => setErr(e.message)); }, []);
+  const save = async () => {
+    setSaving(true); setErr(null);
+    try { await api.disclaimerSet(text); setSaved(true); setTimeout(() => setSaved(false), 2500); }
+    catch (e) { setErr(e.message); }
+    setSaving(false);
+  };
+  return (
+    <Card title="Quote Disclaimer">
+      <p className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
+        Shown on every quote and quote download across the portal. Changing it here updates it everywhere at once.
+      </p>
+      {err && <ErrorBanner error={err} />}
+      {text === null ? <Spinner /> : (
+        <>
+          <textarea value={text} onChange={(e) => { setText(e.target.value); setSaved(false); }} rows={4}
+            style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)", fontSize: 13, fontFamily: "inherit", resize: "vertical" }} />
+          <div style={{ marginTop: 10 }}>
+            <button className="btn primary sm" onClick={save} disabled={saving || !text.trim()}>{saving ? "Saving…" : saved ? "Saved ✓" : "Save disclaimer"}</button>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 export default function Settings() {
   const [cfg, setCfg] = useState(null);
   const [err, setErr] = useState(null);
@@ -52,6 +83,8 @@ export default function Settings() {
       </div>
 
       {err && <ErrorBanner error={err} />}
+
+      <div style={{ marginBottom: 16 }}><DisclaimerCard /></div>
 
       <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, alignItems: "start" }}>
         <Card title="Categories" className="settings-cat-card">

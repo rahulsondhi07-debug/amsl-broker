@@ -4,6 +4,13 @@ import { db } from "../db.js";
 const r = Router();
 const round2 = (n) => Math.round(n * 100) / 100;
 
+// First 2 digits of a string, as an integer, or null if there aren't enough digits.
+// Used for both the MPAN → Distributor ID and Topline → Profile Class derivations below.
+const first2Digits = (v) => {
+  const digits = String(v || "").replace(/\D/g, "");
+  return digits.length >= 2 ? parseInt(digits.slice(0, 2), 10) : null;
+};
+
 /**
  * Core energy comparison. Given a utility, annual consumption (EAC kWh) and a broker
  * uplift (p/kWh), price every eligible rate and rank by projected annual cost.
@@ -23,12 +30,26 @@ const round2 = (n) => Math.round(n * 100) / 100;
  * price-book uploads. There is no fallback to the old standalone `tariffs` table, so a
  * supplier only ever appears in a customer-facing comparison if you actually hold a price
  * book (a product) for them — never because of unrelated seed/demo data.
+ *
+ * A real electricity price matrix (e.g. the SEB flat file) is banded by Distributor ID and
+ * Profile Class, not just consumption and term — the same product has different rates in
+ * different distribution areas and for different meter profiles. Two optional inputs let
+ * a matrix row be matched down to the right band:
+ *   - meter_number (the MPAN): its first 2 digits are the Distributor ID.
+ *   - topline (the 8-digit header printed above the MPAN's barcode — Profile Class +
+ *     Meter Time Switch Code + Line Loss Factor Class): its first 2 digits are the
+ *     Profile Class.
+ * A price_matrix row is only excluded on these grounds when BOTH the row itself specifies
+ * a dist_id/profile AND the caller supplied an MPAN/topline that disagrees with it — rows
+ * without that data (e.g. older manually-entered rows) are never filtered out by this.
  */
-export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id }) {
+export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline }) {
   const u = String(utility || "").toUpperCase().startsWith("G") ? "GAS" : "ELECTRICITY";
   const kwh = Number(eac) || 0;
   const requested = Math.max(0, Number(uplift) || 0);
   const today = new Date().toISOString().slice(0, 10);
+  const distId = first2Digits(meter_number);   // Distributor ID, from the MPAN
+  const profile = first2Digits(topline);        // Profile Class, from the Topline
 
   const dealTypeFor = (supplierId) =>
     current_supplier_id && String(supplierId) === String(current_supplier_id) ? "Renewal" : "Acquisition";
@@ -67,6 +88,10 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id 
         if (maxC != null && kwh > maxC) return false;
         if (row.effective_from && row.effective_from > today) return false;
         if (row.effective_to && row.effective_to < today) return false;
+        // Distributor ID / Profile Class band matching — only rejects a row when both the
+        // row and the request specify a value and they disagree (see the note above).
+        if (distId != null && row.dist_id != null && Number(row.dist_id) !== distId) return false;
+        if (profile != null && row.profile != null && Number(row.profile) !== profile) return false;
         const rate = row.day_rate ?? row.unit_rate;
         return rate != null && row.standing_charge != null;
       });
@@ -114,17 +139,19 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id 
     cheapest_annual_cost: cheapest.annual_cost,
     max_saving: round2(dearest.annual_cost - cheapest.annual_cost),
     best_commission: cheapest.total_commission,
-  } : { utility: u, eac: kwh, offers: 0 };
+    dist_id: distId,
+    profile: profile,
+  } : { utility: u, eac: kwh, offers: 0, dist_id: distId, profile: profile };
 
   return { summary, offers };
 }
 
-// POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id? }
+// POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id?, meter_number?, topline? }
 r.post("/", (req, res) => {
-  const { utility, eac, term, uplift, current_supplier_id } = req.body || {};
+  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline } = req.body || {};
   if (!utility) return res.status(400).json({ error: "utility is required" });
   if (!eac || Number(eac) <= 0) return res.status(400).json({ error: "eac (annual consumption) is required" });
-  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id }) });
+  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline }) });
 });
 
 // GET /api/comparison/tariffs?utility=ELECTRICITY  — inspect the raw tariff book

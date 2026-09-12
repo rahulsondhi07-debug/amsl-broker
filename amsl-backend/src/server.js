@@ -10,6 +10,7 @@ import pipeline from "./routes/pipeline.js";
 import uplift from "./routes/uplift.js";
 import permissions from "./routes/permissions.js";
 import branding from "./routes/branding.js";
+import disclaimer from "./routes/disclaimer.js";
 import platform from "./routes/platform.js";
 import commission from "./routes/commission.js";
 import billValidation from "./routes/billValidation.js";
@@ -28,6 +29,16 @@ if (db.prepare("SELECT COUNT(*) c FROM agencies").get().c === 0) {
 }
 seedPipeline();
 runAutomations();
+// V1.7-04/07 promotions (Under Registration→Live on contract start, Live→Up for Renewal
+// within 30 days of contract end) are date-driven, not event-driven — running them only
+// once at boot means a date that arrives while the server is already up would be missed
+// until the next restart. Re-run hourly so these actually happen the day they're due.
+setInterval(() => {
+  try {
+    const r = runAutomations();
+    if (r.toLive || r.toRenewal) console.log(`[automations] ${r.toLive} → Live, ${r.toRenewal} → Up for Renewal`);
+  } catch (e) { console.error("[automations] failed:", e.message); }
+}, 60 * 60 * 1000);
 seedUpliftCaps();
 seedPermissions();
 seedPlatform();
@@ -68,6 +79,7 @@ api.use("/pipeline", pipeline);
 api.use("/uplift-caps", uplift);
 api.use("/permissions", permissions);
 api.use("/branding", branding);
+api.use("/disclaimer", disclaimer);
 api.use("/platform", platform);
 api.use("/commission", commission);
 api.use("/bill-validation", billValidation);

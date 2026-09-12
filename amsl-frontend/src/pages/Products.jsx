@@ -398,17 +398,32 @@ function PriceMatrix({ product, onClose }) {
         </>
       )}
 
-      {showMapping && mapping && (
-        <HeaderMappingModal mapping={mapping} setMapping={setMapping} rowCount={dataRows?.length || 0}
-          onCancel={() => setShowMapping(false)} onConfirm={confirmMapping} />
-      )}
+        {showMapping && mapping && (
+          <HeaderMappingModal mapping={mapping} setMapping={setMapping} rowCount={dataRows?.length || 0} dataRows={dataRows}
+            onCancel={() => setShowMapping(false)} onConfirm={confirmMapping} />
+        )}
     </Modal>
   );
 }
 
-function HeaderMappingModal({ mapping, setMapping, rowCount, onCancel, onConfirm }) {
+function HeaderMappingModal({ mapping, setMapping, rowCount, dataRows, onCancel, onConfirm }) {
   const setRow = (i, patch) => setMapping(mapping.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
   const preMapped = mapping.filter((m) => HEADER_GUESS[norm(m.header)]).length;
+  // V1.7-15: a quick, real sample of this column's actual values — up to 3 distinct,
+  // non-blank examples pulled straight from the uploaded file — so the person mapping a
+  // header can see what's actually in it rather than guessing from the header name alone.
+  const extractFor = (colIdx) => {
+    if (!dataRows?.length) return "—";
+    const seen = [];
+    for (const row of dataRows) {
+      const v = row[colIdx];
+      if (v == null || v === "") continue;
+      const s = v instanceof Date ? v.toISOString().slice(0, 10) : String(v);
+      if (!seen.includes(s)) seen.push(s);
+      if (seen.length >= 3) break;
+    }
+    return seen.length ? seen.join(", ") : "—";
+  };
   return (
     <Modal title="CSV Header Mapping" onClose={onCancel} wide
       footer={<>
@@ -421,7 +436,7 @@ function HeaderMappingModal({ mapping, setMapping, rowCount, onCancel, onConfirm
       </div>
       <div className="table-wrap" style={{ maxHeight: 420, overflow: "auto" }}>
         <table className="tbl">
-          <thead><tr><th>CSV Header</th><th>Category</th><th>Attribute</th><th>Calculation</th></tr></thead>
+          <thead><tr><th>CSV Header</th><th>Extract</th><th>Category</th><th>Attribute</th><th>Calculation</th></tr></thead>
           <tbody>
             {mapping.map((m, i) => {
               const attrs = Object.keys(CATEGORY_TREE[m.category] || {});
@@ -429,6 +444,7 @@ function HeaderMappingModal({ mapping, setMapping, rowCount, onCancel, onConfirm
               return (
                 <tr key={i}>
                   <td style={{ fontWeight: 600, fontSize: 12 }}>{m.header}</td>
+                  <td style={{ fontSize: 11.5, color: "var(--slate-500,#64748B)", fontFamily: "monospace", whiteSpace: "nowrap" }} title={extractFor(i)}>{extractFor(i)}</td>
                   <td>
                     <select value={m.category} onChange={(e) => setRow(i, { category: e.target.value, attribute: "" })} style={{ fontSize: 12 }}>
                       {Object.keys(CATEGORY_TREE).map((c) => <option key={c}>{c}</option>)}

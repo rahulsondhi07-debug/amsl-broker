@@ -29,12 +29,12 @@ export default function ListPage({ title, desc, resource, columns, searchable = 
           <>
             <div className="table-wrap">
               <table className="tbl">
-                <thead><tr>{columns.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
+                <thead><tr>{columns.map((c) => <th key={c.key} className={c.className}>{c.label}</th>)}</tr></thead>
                 <tbody>
                   {data.map((row) => (
                     <tr key={row.id}>
                       {columns.map((c) => (
-                        <td key={c.key} className={c.className}>{c.render ? c.render(row) : (row[c.key] ?? "—")}</td>
+                        <td key={c.key} className={c.className}>{c.render ? c.render(row, reload) : (row[c.key] ?? "—")}</td>
                       ))}
                     </tr>
                   ))}

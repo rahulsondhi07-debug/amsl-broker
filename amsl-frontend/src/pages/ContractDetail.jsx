@@ -21,14 +21,15 @@ function downloadContract(c) {
     "AMSL BROKER — CONTRACT", "".padEnd(44, "="), "",
     `Contract No:   ${c.contract_no}`, `Business:      ${c.business_name}`,
     `Supplier:      ${c.supplier_name || "—"}`, `Utility:       ${c.utility || "—"}`,
-    `MPAN/MPRN:     ${c.meter_mpan_mpr || "—"}`, `Term:          ${c.term_months || "—"} months`,
+    `MPAN/MPRN:     ${c.meter_mpan_mpr || "—"}`, `Topline:       ${c.topline || "—"}`, `Term:          ${c.term_months || "—"} months`,
+    c.supplier_agent_id ? `Supplier Agent ID: ${c.supplier_agent_id}` : null,
     `Consumption:   ${c.consumption ? Number(c.consumption).toLocaleString() + " kWh/yr" : "—"}`,
     `Product:       ${c.product_name || "—"}`, `Standing Chg:  ${c.standing_charge ?? "—"}p/day`,
     `Day Rate:      ${c.day_rate ?? "—"}p/kWh`, `Payment:       ${c.payment_method || "—"} (${c.billing_period || "—"})`,
     `Signatory:     ${[c.title, c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}`,
     `Email:         ${c.email || "—"}`, `Status:        ${c.status || "—"}`, "",
     `Generated:     ${new Date().toLocaleString("en-GB")}`,
-  ];
+  ].filter(Boolean);
   const blob = new Blob([L.join("\n")], { type: "text/plain" });
   const url = URL.createObjectURL(blob); const a = document.createElement("a");
   a.href = url; a.download = `Contract-${c.contract_no}.txt`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
@@ -75,12 +76,13 @@ export default function ContractDetail() {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
           <Card title="Overview">
             <Row k="Supplier" v={c.supplier_name} /><Row k="Utility" v={c.utility} />
-            <Row k="MPAN / MPRN" v={c.meter_mpan_mpr} /><Row k="Term" v={c.term_months ? `${c.term_months} months` : "—"} />
+            <Row k="MPAN / MPRN" v={c.meter_mpan_mpr} /><Row k="Topline" v={c.topline} /><Row k="Term" v={c.term_months ? `${c.term_months} months` : "—"} />
             <Row k="Agency" v={c.agency_name} /><Row k="Broker" v={c.agent_name} /><Row k="Created On" v={date(c.created_at)} />
+            {c.supplier_agent_id && <Row k="Supplier Agent ID" v={c.supplier_agent_id} />}
           </Card>
           <Card title="Meter Details">
             <Row k="Meter Serial Number" v={c.meter_serial} /><Row k="Estimated Consumption" v={c.consumption ? `${Number(c.consumption).toLocaleString()} kWh` : "—"} />
-            <Row k="Last Reading" v={c.current_read} /><Row k="Site Address" v={[c.address_line1, c.town, c.postcode].filter(Boolean).join(", ")} />
+            <Row k="Last Reading" v={c.current_read} /><Row k="Site Address" v={c.site_same ? [c.address_line1, c.town, c.postcode].filter(Boolean).join(", ") : [c.site_address1, c.site_town, c.site_postcode].filter(Boolean).join(", ")} />
           </Card>
           <Card title="Business & Contact Details">
             <Row k="Business Name" v={c.business_name} /><Row k="Company Reg No" v={c.company_reg} />

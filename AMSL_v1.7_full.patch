@@ -1,0 +1,1318 @@
+diff --git a/amsl-backend/src/crud.js b/amsl-backend/src/crud.js
+index c40e45b..c6835e7 100644
+--- a/amsl-backend/src/crud.js
++++ b/amsl-backend/src/crud.js
+@@ -15,7 +15,7 @@ export function paginate(baseSql, params, req) {
+  * Build a REST router for a table.
+  * opts: { table, columns:[...writable], listSql?, searchColumns?:[] }
+  */
+-export function crudRouter({ table, columns, listSql, searchColumns = [], detailSql, detailTransform }) {
++export function crudRouter({ table, columns, listSql, searchColumns = [], detailSql, detailTransform, onCreate }) {
+   const r = Router();
+   const selectAll = listSql || `SELECT * FROM ${table}`;
+   const selectOne = detailSql || selectAll;
+@@ -50,6 +50,7 @@ export function crudRouter({ table, columns, listSql, searchColumns = [], detail
+     );
+     const info = stmt.run(...cols.map((c) => req.body[c]));
+     const row = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(info.lastInsertRowid);
++    if (onCreate) { try { onCreate(row); } catch (e) { console.error(`onCreate hook failed for ${table}:`, e.message); } }
+     res.status(201).json({ data: row });
+   });
+ 
+diff --git a/amsl-backend/src/db.js b/amsl-backend/src/db.js
+index 1149525..9692df2 100644
+--- a/amsl-backend/src/db.js
++++ b/amsl-backend/src/db.js
+@@ -255,7 +255,9 @@ export function migrate() {
+    "sme_email TEXT", "sme_mobile TEXT", "sme_landline TEXT", "sme_password TEXT", "sme_threshold INTEGER",
+    "corporate_login_email TEXT",
+    "mm_name TEXT", "mm_email TEXT", "mm_password TEXT", "mm_mobile TEXT", "mm_landline TEXT", "mm_threshold INTEGER",
+-   "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER"
++   "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER",
++   "contract_agent_id TEXT"   // V1.7-14: the Agent ID this supplier issues to AMSL — gets
++                              // auto-published onto every contract generated for them.
+   ].forEach(sc);
+   // Contract generation fields (match production contract/generate form)
+   const cc = (c) => addCol(`ALTER TABLE contracts ADD COLUMN ${c}`);
+@@ -265,11 +267,13 @@ export function migrate() {
+    "billing_same INTEGER DEFAULT 1", "billing_title TEXT", "billing_first_name TEXT", "billing_last_name TEXT",
+    "billing_address1 TEXT", "billing_address2 TEXT", "billing_town TEXT", "billing_postcode TEXT",
+    "billing_telephone TEXT", "billing_mobile TEXT", "billing_email TEXT",
++   "site_same INTEGER DEFAULT 1", "site_address1 TEXT", "site_address2 TEXT", "site_town TEXT", "site_postcode TEXT",
+    "meter_serial TEXT", "current_read TEXT", "requested_start TEXT",
+    "product_name TEXT", "tariff_name TEXT", "acq_renewal TEXT", "tariff_type TEXT",
+    "supplier_start TEXT", "tariff_end TEXT", "supplier_end TEXT", "fixed_price_term INTEGER",
+    "standing_charge REAL", "day_rate REAL", "night_rate REAL", "ewe_rate REAL", "kva_charge REAL", "broker_commission REAL",
+-   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT", "tolerance_pct REAL"
++   "payment_method TEXT", "payment_amount REAL", "billing_period TEXT", "tolerance_pct REAL",
++   "topline TEXT", "supplier_agent_id TEXT"   // V1.7-14: copied from the supplier's Agent ID at generation time
+   ].forEach(cc);
+   // Ticket fields (match production Add Ticket form)
+   addCol("ALTER TABLE tickets ADD COLUMN corporate_sme TEXT");
+@@ -322,6 +326,29 @@ export function migrate() {
+   addCol("ALTER TABLE quotes ADD COLUMN product_name        TEXT");
+   addCol("ALTER TABLE quotes ADD COLUMN acq_renewal         TEXT");
+   addCol("ALTER TABLE quotes ADD COLUMN business_type       TEXT");
++  // Topline — the 8-digit header printed above an electricity MPAN's barcode (Profile
++  // Class + Meter Time Switch Code + Line Loss Factor Class). Its first 2 digits give the
++  // Profile Class, which — together with the Distributor ID (the first 2 digits of the
++  // MPAN itself) — is how a real supplier price matrix (see price_matrix.profile /
++  // price_matrix.dist_id) is filtered down to the rates that actually apply to a meter.
++  addCol("ALTER TABLE meters ADD COLUMN topline             TEXT");
++  addCol("ALTER TABLE quotes ADD COLUMN topline             TEXT");
++  addCol("ALTER TABLE quotes ADD COLUMN uplift              REAL");
++
++  // V1.7-11: Quote Price History — retains every price a quote has ever shown, so a
++  // superseded price can be flagged Invalid rather than silently disappearing, and the
++  // current one shown as the Best Price.
++  db.exec(`
++    CREATE TABLE IF NOT EXISTS quote_price_history (
++      id              INTEGER PRIMARY KEY AUTOINCREMENT,
++      quote_id        INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
++      unit_rate       REAL, standing_charge REAL, annual_cost REAL, commission REAL,
++      term_months     INTEGER, supplier_id INTEGER,
++      valid           INTEGER NOT NULL DEFAULT 1,   -- 0 once superseded by a refresh
++      source          TEXT NOT NULL DEFAULT 'created', -- created | refresh
++      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++  `);
+ 
+   // Backfill journey_stage from the legacy 3-stage field
+   db.exec(`UPDATE businesses SET journey_stage='RAW_LEAD' WHERE journey_stage IS NULL AND stage='LEAD'`);
+diff --git a/amsl-backend/src/routes/comparison.js b/amsl-backend/src/routes/comparison.js
+index 654e7ea..c8f6a13 100644
+--- a/amsl-backend/src/routes/comparison.js
++++ b/amsl-backend/src/routes/comparison.js
+@@ -4,6 +4,13 @@ import { db } from "../db.js";
+ const r = Router();
+ const round2 = (n) => Math.round(n * 100) / 100;
+ 
++// First 2 digits of a string, as an integer, or null if there aren't enough digits.
++// Used for both the MPAN → Distributor ID and Topline → Profile Class derivations below.
++const first2Digits = (v) => {
++  const digits = String(v || "").replace(/\D/g, "");
++  return digits.length >= 2 ? parseInt(digits.slice(0, 2), 10) : null;
++};
++
+ /**
+  * Core energy comparison. Given a utility, annual consumption (EAC kWh) and a broker
+  * uplift (p/kWh), price every eligible rate and rank by projected annual cost.
+@@ -23,12 +30,26 @@ const round2 = (n) => Math.round(n * 100) / 100;
+  * price-book uploads. There is no fallback to the old standalone `tariffs` table, so a
+  * supplier only ever appears in a customer-facing comparison if you actually hold a price
+  * book (a product) for them — never because of unrelated seed/demo data.
++ *
++ * A real electricity price matrix (e.g. the SEB flat file) is banded by Distributor ID and
++ * Profile Class, not just consumption and term — the same product has different rates in
++ * different distribution areas and for different meter profiles. Two optional inputs let
++ * a matrix row be matched down to the right band:
++ *   - meter_number (the MPAN): its first 2 digits are the Distributor ID.
++ *   - topline (the 8-digit header printed above the MPAN's barcode — Profile Class +
++ *     Meter Time Switch Code + Line Loss Factor Class): its first 2 digits are the
++ *     Profile Class.
++ * A price_matrix row is only excluded on these grounds when BOTH the row itself specifies
++ * a dist_id/profile AND the caller supplied an MPAN/topline that disagrees with it — rows
++ * without that data (e.g. older manually-entered rows) are never filtered out by this.
+  */
+-export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id }) {
++export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline }) {
+   const u = String(utility || "").toUpperCase().startsWith("G") ? "GAS" : "ELECTRICITY";
+   const kwh = Number(eac) || 0;
+   const requested = Math.max(0, Number(uplift) || 0);
+   const today = new Date().toISOString().slice(0, 10);
++  const distId = first2Digits(meter_number);   // Distributor ID, from the MPAN
++  const profile = first2Digits(topline);        // Profile Class, from the Topline
+ 
+   const dealTypeFor = (supplierId) =>
+     current_supplier_id && String(supplierId) === String(current_supplier_id) ? "Renewal" : "Acquisition";
+@@ -67,6 +88,10 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id
+         if (maxC != null && kwh > maxC) return false;
+         if (row.effective_from && row.effective_from > today) return false;
+         if (row.effective_to && row.effective_to < today) return false;
++        // Distributor ID / Profile Class band matching — only rejects a row when both the
++        // row and the request specify a value and they disagree (see the note above).
++        if (distId != null && row.dist_id != null && Number(row.dist_id) !== distId) return false;
++        if (profile != null && row.profile != null && Number(row.profile) !== profile) return false;
+         const rate = row.day_rate ?? row.unit_rate;
+         return rate != null && row.standing_charge != null;
+       });
+@@ -114,17 +139,19 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id
+     cheapest_annual_cost: cheapest.annual_cost,
+     max_saving: round2(dearest.annual_cost - cheapest.annual_cost),
+     best_commission: cheapest.total_commission,
+-  } : { utility: u, eac: kwh, offers: 0 };
++    dist_id: distId,
++    profile: profile,
++  } : { utility: u, eac: kwh, offers: 0, dist_id: distId, profile: profile };
+ 
+   return { summary, offers };
+ }
+ 
+-// POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id? }
++// POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id?, meter_number?, topline? }
+ r.post("/", (req, res) => {
+-  const { utility, eac, term, uplift, current_supplier_id } = req.body || {};
++  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline } = req.body || {};
+   if (!utility) return res.status(400).json({ error: "utility is required" });
+   if (!eac || Number(eac) <= 0) return res.status(400).json({ error: "eac (annual consumption) is required" });
+-  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id }) });
++  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline }) });
+ });
+ 
+ // GET /api/comparison/tariffs?utility=ELECTRICITY  — inspect the raw tariff book
+diff --git a/amsl-backend/src/routes/disclaimer.js b/amsl-backend/src/routes/disclaimer.js
+new file mode 100644
+index 0000000..cb4c49e
+--- /dev/null
++++ b/amsl-backend/src/routes/disclaimer.js
+@@ -0,0 +1,28 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++
++// V1.7-13: a single admin-editable disclaimer, shown everywhere a quote/price is
++// presented to a customer. Stored in app_settings (same key-value table branding.js
++// uses) rather than a dedicated table, since it's one free-text value.
++const DEFAULT_TEXT =
++  "This quote is valid until 5:30pm today; after that, prices may change and are subject to availability. " +
++  "All contracts are subject to credit approval from the supplier. Unit rates are quoted in pence per kWh. " +
++  "Prices exclude Climate Change Levy and VAT. This quote is based on estimated annual consumption — your actual future usage may differ.";
++
++r.get("/", (_req, res) => {
++  const row = db.prepare("SELECT value FROM app_settings WHERE key='quote_disclaimer'").get();
++  res.json({ data: { text: row ? row.value : DEFAULT_TEXT } });
++});
++
++r.put("/", (req, res) => {
++  const text = String(req.body?.text || "").trim();
++  if (!text) return res.status(400).json({ error: "Disclaimer text cannot be empty" });
++  db.prepare(
++    "INSERT INTO app_settings (key,value) VALUES ('quote_disclaimer',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
++  ).run(text);
++  res.json({ data: { text } });
++});
++
++export default r;
+diff --git a/amsl-backend/src/routes/modules.js b/amsl-backend/src/routes/modules.js
+index e9a4332..f67a34d 100644
+--- a/amsl-backend/src/routes/modules.js
++++ b/amsl-backend/src/routes/modules.js
+@@ -1,6 +1,7 @@
+ import { Router } from "express";
+ import { db } from "../db.js";
+ import { crudRouter } from "../crud.js";
++import { compare } from "./comparison.js";
+ 
+ /* ---- Agencies (with agent counts, like the UI) ---- */
+ export const agencies = crudRouter({
+@@ -39,7 +40,8 @@ export const suppliers = crudRouter({
+             "restricted_business_types", "about",
+             "sme_email", "sme_mobile", "sme_landline", "sme_password", "sme_threshold", "corporate_login_email",
+             "mm_name", "mm_email", "mm_password", "mm_mobile", "mm_landline", "mm_threshold",
+-            "ind_name", "ind_email", "ind_password", "ind_mobile", "ind_landline", "ind_threshold"],
++            "ind_name", "ind_email", "ind_password", "ind_mobile", "ind_landline", "ind_threshold",
++            "contract_agent_id"],
+   searchColumns: ["name", "supplier_role"],
+   listSql: `SELECT id, name, logo, status, supplier_role, tpi_role, fuel_mix,
+                    max_broker_comm_electric, max_broker_comm_gas, sme_threshold, mm_threshold, ind_threshold,
+@@ -76,9 +78,10 @@ export const products = (() => {
+   r.post("/:id/price-matrix", (req, res) => {
+     const b = req.body;
+     const info = db.prepare(
+-      `INSERT INTO price_matrix (product_id,min_consumption,max_consumption,term_months,unit_rate,standing_charge,commission)
+-       VALUES (?,?,?,?,?,?,?)`
+-    ).run(req.params.id, b.min_consumption, b.max_consumption, b.term_months, b.unit_rate, b.standing_charge, b.commission);
++      `INSERT INTO price_matrix (product_id,min_consumption,max_consumption,term_months,unit_rate,standing_charge,commission,dist_id,profile,meter_type)
++       VALUES (?,?,?,?,?,?,?,?,?,?)`
++    ).run(req.params.id, b.min_consumption, b.max_consumption, b.term_months, b.unit_rate, b.standing_charge, b.commission,
++      b.dist_id ?? null, b.profile ?? null, b.meter_type ?? null);
+     res.status(201).json({ data: db.prepare("SELECT * FROM price_matrix WHERE id = ?").get(info.lastInsertRowid) });
+   });
+   // Bulk import for real supplier flat files (thousands of rows in one request/transaction —
+@@ -247,11 +250,57 @@ export const quotes = crudRouter({
+   table: "quotes",
+   columns: ["quote_no","business_id","business_name","agent_id","utility","meter_number","eac","start_date",
+             "supplier_id","term_months","unit_rate","standing_charge","annual_cost","commission","status",
+-            "bespoke","meter_point","meter_details","distribution_charge","transmission_charge","product_name","acq_renewal","business_type"],
++            "bespoke","meter_point","meter_details","distribution_charge","transmission_charge","product_name",
++            "acq_renewal","business_type","topline","uplift"],
+   searchColumns: ["quote_no","business_name","meter_number"],
+   listSql: `SELECT q.*, a.name AS broker, s.name AS supplier_name
+             FROM quotes q LEFT JOIN agents a ON a.id = q.agent_id
+             LEFT JOIN suppliers s ON s.id = q.supplier_id`,
++  // V1.7-11: every quote starts with one Price History row (the price it was created at),
++  // valid until a refresh supersedes it.
++  onCreate: (row) => {
++    db.prepare(`INSERT INTO quote_price_history
++      (quote_id, unit_rate, standing_charge, annual_cost, commission, term_months, supplier_id, valid, source)
++      VALUES (?,?,?,?,?,?,?,1,'created')`)
++      .run(row.id, row.unit_rate, row.standing_charge, row.annual_cost, row.commission, row.term_months, row.supplier_id);
++  },
++});
++
++/* ---- Quote Price History (V1.7-11) ---- */
++quotes.get("/:id/price-history", (req, res) => {
++  const rows = db.prepare(`SELECT * FROM quote_price_history WHERE quote_id=? ORDER BY created_at DESC, id DESC`).all(req.params.id);
++  res.json({ data: rows });
++});
++
++// Re-price a quote against the current market and record the outcome in Price History.
++// Bespoke quotes are hand-priced (not sourced from a supplier price book) and have
++// nothing to refresh against, so they're excluded.
++quotes.post("/:id/refresh-price", (req, res) => {
++  const q = db.prepare("SELECT * FROM quotes WHERE id=?").get(req.params.id);
++  if (!q) return res.status(404).json({ error: "quote not found" });
++  if (Number(q.bespoke)) return res.status(400).json({ error: "Bespoke quotes are priced manually and can't be refreshed against the market." });
++  if (!q.supplier_id || !q.eac) return res.status(400).json({ error: "This quote is missing the utility/consumption/supplier needed to re-price it." });
++
++  const result = compare({
++    utility: q.utility, eac: q.eac, term: q.term_months, uplift: q.uplift ?? 1.0,
++    meter_number: q.meter_number, topline: q.topline,
++  });
++  const match = result.offers.find((o) => String(o.supplier_id) === String(q.supplier_id) && Number(o.term_months) === Number(q.term_months));
++  if (!match) {
++    return res.status(404).json({ error: "No current rate found for this supplier/term — the price book may have changed or been withdrawn since this quote was created." });
++  }
++
++  const changed = Number(match.unit_rate) !== Number(q.unit_rate) || Number(match.standing_charge) !== Number(q.standing_charge);
++  if (changed) {
++    db.prepare("UPDATE quote_price_history SET valid=0 WHERE quote_id=? AND valid=1").run(q.id);
++    db.prepare(`INSERT INTO quote_price_history
++      (quote_id, unit_rate, standing_charge, annual_cost, commission, term_months, supplier_id, valid, source)
++      VALUES (?,?,?,?,?,?,?,1,'refresh')`)
++      .run(q.id, match.unit_rate, match.standing_charge, match.annual_cost, match.total_commission, match.term_months, match.supplier_id);
++    db.prepare("UPDATE quotes SET unit_rate=?, standing_charge=?, annual_cost=?, commission=? WHERE id=?")
++      .run(match.unit_rate, match.standing_charge, match.annual_cost, match.total_commission, q.id);
++  }
++  res.json({ data: { changed, quote: db.prepare("SELECT * FROM quotes WHERE id=?").get(q.id) } });
+ });
+ 
+ /* ---- Contracts (with supplier/agency/agent names + filters) ---- */
+@@ -269,10 +318,11 @@ export const contracts = (() => {
+               "title","first_name","last_name","address_line1","address_line2","town","postcode","telephone","mobile","email",
+               "billing_same","billing_title","billing_first_name","billing_last_name","billing_address1","billing_address2",
+               "billing_town","billing_postcode","billing_telephone","billing_mobile","billing_email",
++              "site_same","site_address1","site_address2","site_town","site_postcode",
+               "meter_serial","current_read","requested_start",
+               "product_name","tariff_name","acq_renewal","tariff_type","supplier_start","tariff_end","supplier_end","fixed_price_term",
+               "standing_charge","day_rate","night_rate","ewe_rate","kva_charge","broker_commission",
+-              "payment_method","payment_amount","billing_period","tolerance_pct"],
++              "payment_method","payment_amount","billing_period","tolerance_pct","topline","supplier_agent_id"],
+     searchColumns: ["contract_no","business_name","meter_mpan_mpr"],
+     listSql: base,
+   });
+diff --git a/amsl-backend/src/routes/pipeline.js b/amsl-backend/src/routes/pipeline.js
+index 7aa3918..190767b 100644
+--- a/amsl-backend/src/routes/pipeline.js
++++ b/amsl-backend/src/routes/pipeline.js
+@@ -169,18 +169,18 @@ r.post("/:id/meters", (req, res) => {
+   const b = req.body || {};
+   if (!b.utility) return res.status(400).json({ error: "utility (ELEC|GAS) is required" });
+   const info = db.prepare(`INSERT INTO meters
+-    (business_id, site_id, utility, mpan_mprn, eac, status, name, current_supplier_id, transferring_supplier_id, segment, contract_start, contract_end)
+-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
++    (business_id, site_id, utility, mpan_mprn, eac, status, name, current_supplier_id, transferring_supplier_id, segment, contract_start, contract_end, topline)
++    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+     .run(req.params.id, b.site_id || null, b.utility, b.mpan_mprn || null, b.eac || null, b.status || "C",
+       b.name || null, b.current_supplier_id || null, b.transferring_supplier_id || null, b.segment || "SME",
+-      b.contract_start || null, b.contract_end || null);
++      b.contract_start || null, b.contract_end || null, b.topline || null);
+   res.status(201).json({ data: one("SELECT * FROM meters WHERE id=?", info.lastInsertRowid) });
+ });
+ r.put("/meters/:meterId", (req, res) => {
+   const cur = one("SELECT * FROM meters WHERE id=?", req.params.meterId);
+   if (!cur) return res.status(404).json({ error: "meter not found" });
+   const b = req.body || {};
+-  const cols = ["site_id", "mpan_mprn", "eac", "status", "name", "current_supplier_id", "transferring_supplier_id", "segment", "contract_start", "contract_end"];
++  const cols = ["site_id", "mpan_mprn", "eac", "status", "name", "current_supplier_id", "transferring_supplier_id", "segment", "contract_start", "contract_end", "topline"];
+   const merged = Object.fromEntries(cols.map((c) => [c, b[c] !== undefined ? b[c] : cur[c]]));
+   db.prepare(`UPDATE meters SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`).run(...cols.map((c) => merged[c]), req.params.meterId);
+   res.json({ data: one("SELECT * FROM meters WHERE id=?", req.params.meterId) });
+@@ -242,6 +242,33 @@ r.post("/:id/comments", (req, res) => {
+   res.status(201).json({ data: one("SELECT * FROM customer_comments WHERE id=?", info.lastInsertRowid) });
+ });
+ 
++/* ---- Contract dates (V1.7-04/07 fix): the ONLY place these can be recorded.
++   Without this, contract_start/contract_end are never set outside demo seed data, so the
++   Under-Registration→Live and Live→Up-for-Renewal automations below can never actually
++   fire from real usage — this closes that gap. ---- */
++r.post("/:id/contract-dates", (req, res) => {
++  const { contract_start, contract_end } = req.body || {};
++  if (contract_start === undefined && contract_end === undefined) {
++    return res.status(400).json({ error: "Provide contract_start and/or contract_end" });
++  }
++  const cur = one("SELECT contract_start, contract_end FROM businesses WHERE id=?", req.params.id);
++  if (!cur) return res.status(404).json({ error: "not found" });
++  const cols = [];
++  const vals = [];
++  if (contract_start !== undefined) { cols.push("contract_start"); vals.push(contract_start || null); }
++  if (contract_end !== undefined) { cols.push("contract_end"); vals.push(contract_end || null); }
++  db.prepare(`UPDATE businesses SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`).run(...vals, req.params.id);
++  const note = [
++    contract_start !== undefined && contract_start !== cur.contract_start ? `Contract start set to ${contract_start || "—"}` : null,
++    contract_end !== undefined && contract_end !== cur.contract_end ? `Contract end set to ${contract_end || "—"}` : null,
++  ].filter(Boolean).join("; ");
++  if (note) {
++    db.prepare("INSERT INTO stage_history (business_id,from_stage,to_stage,note,changed_by) VALUES (?,?,?,?,?)")
++      .run(req.params.id, null, "contract-dates", note, req.body.by || "You");
++  }
++  res.json({ data: one("SELECT id, contract_start, contract_end FROM businesses WHERE id=?", req.params.id) });
++});
++
+ /* ---- Disposition (V1.6-06): record the outcome of a contact attempt ---- */
+ r.post("/:id/disposition", (req, res) => {
+   const d = (req.body.disposition || "").trim();
+diff --git a/amsl-backend/src/server.js b/amsl-backend/src/server.js
+index 004bd02..91a8fc7 100644
+--- a/amsl-backend/src/server.js
++++ b/amsl-backend/src/server.js
+@@ -10,6 +10,7 @@ import pipeline from "./routes/pipeline.js";
+ import uplift from "./routes/uplift.js";
+ import permissions from "./routes/permissions.js";
+ import branding from "./routes/branding.js";
++import disclaimer from "./routes/disclaimer.js";
+ import platform from "./routes/platform.js";
+ import commission from "./routes/commission.js";
+ import billValidation from "./routes/billValidation.js";
+@@ -28,6 +29,16 @@ if (db.prepare("SELECT COUNT(*) c FROM agencies").get().c === 0) {
+ }
+ seedPipeline();
+ runAutomations();
++// V1.7-04/07 promotions (Under Registration→Live on contract start, Live→Up for Renewal
++// within 30 days of contract end) are date-driven, not event-driven — running them only
++// once at boot means a date that arrives while the server is already up would be missed
++// until the next restart. Re-run hourly so these actually happen the day they're due.
++setInterval(() => {
++  try {
++    const r = runAutomations();
++    if (r.toLive || r.toRenewal) console.log(`[automations] ${r.toLive} → Live, ${r.toRenewal} → Up for Renewal`);
++  } catch (e) { console.error("[automations] failed:", e.message); }
++}, 60 * 60 * 1000);
+ seedUpliftCaps();
+ seedPermissions();
+ seedPlatform();
+@@ -68,6 +79,7 @@ api.use("/pipeline", pipeline);
+ api.use("/uplift-caps", uplift);
+ api.use("/permissions", permissions);
+ api.use("/branding", branding);
++api.use("/disclaimer", disclaimer);
+ api.use("/platform", platform);
+ api.use("/commission", commission);
+ api.use("/bill-validation", billValidation);
+diff --git a/amsl-frontend/src/api.js b/amsl-frontend/src/api.js
+index 5b4e482..c218eeb 100644
+--- a/amsl-frontend/src/api.js
++++ b/amsl-frontend/src/api.js
+@@ -67,6 +67,9 @@ export const api = {
+   pipelineMove: (id, stage, note) => request(`/pipeline/${id}/stage`, { method: "POST", body: { stage, note } }),
+   pipelineComment: (id, body) => request(`/pipeline/${id}/comments`, { method: "POST", body: { body } }),
+   pipelineDisposition: (id, disposition, note) => request(`/pipeline/${id}/disposition`, { method: "POST", body: { disposition, note } }),
++  pipelineContractDates: (id, body) => request(`/pipeline/${id}/contract-dates`, { method: "POST", body }),
++  quotePriceHistory: (id) => request(`/quotes/${id}/price-history`),
++  quoteRefreshPrice: (id) => request(`/quotes/${id}/refresh-price`, { method: "POST" }),
+   pipelineCallback: (id, due_at, reason) => request(`/pipeline/${id}/callback`, { method: "POST", body: { due_at, reason } }),
+   pipelineRunAutomations: () => request(`/pipeline/automations/run`, { method: "POST" }),
+   pipelineNotifications: () => request(`/pipeline/notifications`),
+@@ -81,6 +84,8 @@ export const api = {
+   dailyReminders: () => request(`/pipeline/reminders/daily`),
+   branding: () => request(`/branding`),
+   brandingSet: (b) => request(`/branding`, { method: "PUT", body: b }),
++  disclaimer: () => request(`/disclaimer`),
++  disclaimerSet: (text) => request(`/disclaimer`, { method: "PUT", body: { text } }),
+   tutorials: () => request(`/platform/tutorials`),
+   tutorialAdd: (t) => request(`/platform/tutorials`, { method: "POST", body: t }),
+   tutorialDelete: (id) => request(`/platform/tutorials/${id}`, { method: "DELETE" }),
+diff --git a/amsl-frontend/src/components/Layout.jsx b/amsl-frontend/src/components/Layout.jsx
+index 87f7543..95be699 100644
+--- a/amsl-frontend/src/components/Layout.jsx
++++ b/amsl-frontend/src/components/Layout.jsx
+@@ -88,10 +88,17 @@ export default function Layout() {
+   const doLogout = () => { logout(); nav("/login", { replace: true }); };
+   const [allowed, setAllowed] = useState(null); // null = still loading -> show all
+   const [openGroup, setOpenGroup] = useState(null);
++  const [brand, setBrand] = useState(null);
+   const railRef = useRef(null);
+   useEffect(() => {
+     api.permissionsEffective(user?.role || "").then((r) => setAllowed(r.data)).catch(() => setAllowed(null));
+-    api.branding().then((r) => { if (r.data?.primary_color) document.documentElement.style.setProperty("--brand", r.data.primary_color); }).catch(() => {});
++    // V1.7-10: apply the full branding config (not just colour) so a logo/name set in
++    // Settings → Branding actually shows up here, instead of the hardcoded "AB" mark.
++    api.branding().then((r) => {
++      if (r.data?.primary_color) document.documentElement.style.setProperty("--brand", r.data.primary_color);
++      setBrand(r.data || null);
++      if (r.data?.brand_name) document.title = r.data.brand_name;
++    }).catch(() => {});
+   }, [user?.role]);
+   const NAV_ADMIN = [...NAV, { to: "/permissions", icon: ShieldCheck, label: "Permissions" }];
+ 
+@@ -114,7 +121,11 @@ export default function Layout() {
+   return (
+     <div className="app">
+       <aside className="rail" ref={railRef}>
+-        <div className="logo">AB</div>
++        <div className="logo">
++          {brand?.logo_url
++            ? <img src={brand.logo_url} alt={brand.brand_name || "logo"} style={{ width: "100%", height: "100%", objectFit: "contain", borderRadius: "inherit" }} onError={(e) => { e.target.style.display = "none"; e.target.parentElement.textContent = (brand.brand_name || "AB").slice(0, 2).toUpperCase(); }} />
++            : (brand?.brand_name || "AB").slice(0, 2).toUpperCase()}
++        </div>
+         {visibleNav.map((n) => {
+           if (n.group) {
+             const Icon = n.icon;
+diff --git a/amsl-frontend/src/components/ListPage.jsx b/amsl-frontend/src/components/ListPage.jsx
+index 5ac5c21..a9f5979 100644
+--- a/amsl-frontend/src/components/ListPage.jsx
++++ b/amsl-frontend/src/components/ListPage.jsx
+@@ -29,12 +29,12 @@ export default function ListPage({ title, desc, resource, columns, searchable =
+           <>
+             <div className="table-wrap">
+               <table className="tbl">
+-                <thead><tr>{columns.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
++                <thead><tr>{columns.map((c) => <th key={c.key} className={c.className}>{c.label}</th>)}</tr></thead>
+                 <tbody>
+                   {data.map((row) => (
+                     <tr key={row.id}>
+                       {columns.map((c) => (
+-                        <td key={c.key} className={c.className}>{c.render ? c.render(row) : (row[c.key] ?? "—")}</td>
++                        <td key={c.key} className={c.className}>{c.render ? c.render(row, reload) : (row[c.key] ?? "—")}</td>
+                       ))}
+                     </tr>
+                   ))}
+diff --git a/amsl-frontend/src/pages/ContractDetail.jsx b/amsl-frontend/src/pages/ContractDetail.jsx
+index 623ca5a..699057f 100644
+--- a/amsl-frontend/src/pages/ContractDetail.jsx
++++ b/amsl-frontend/src/pages/ContractDetail.jsx
+@@ -21,14 +21,15 @@ function downloadContract(c) {
+     "AMSL BROKER — CONTRACT", "".padEnd(44, "="), "",
+     `Contract No:   ${c.contract_no}`, `Business:      ${c.business_name}`,
+     `Supplier:      ${c.supplier_name || "—"}`, `Utility:       ${c.utility || "—"}`,
+-    `MPAN/MPRN:     ${c.meter_mpan_mpr || "—"}`, `Term:          ${c.term_months || "—"} months`,
++    `MPAN/MPRN:     ${c.meter_mpan_mpr || "—"}`, `Topline:       ${c.topline || "—"}`, `Term:          ${c.term_months || "—"} months`,
++    c.supplier_agent_id ? `Supplier Agent ID: ${c.supplier_agent_id}` : null,
+     `Consumption:   ${c.consumption ? Number(c.consumption).toLocaleString() + " kWh/yr" : "—"}`,
+     `Product:       ${c.product_name || "—"}`, `Standing Chg:  ${c.standing_charge ?? "—"}p/day`,
+     `Day Rate:      ${c.day_rate ?? "—"}p/kWh`, `Payment:       ${c.payment_method || "—"} (${c.billing_period || "—"})`,
+     `Signatory:     ${[c.title, c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}`,
+     `Email:         ${c.email || "—"}`, `Status:        ${c.status || "—"}`, "",
+     `Generated:     ${new Date().toLocaleString("en-GB")}`,
+-  ];
++  ].filter(Boolean);
+   const blob = new Blob([L.join("\n")], { type: "text/plain" });
+   const url = URL.createObjectURL(blob); const a = document.createElement("a");
+   a.href = url; a.download = `Contract-${c.contract_no}.txt`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+@@ -75,12 +76,13 @@ export default function ContractDetail() {
+         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "start" }}>
+           <Card title="Overview">
+             <Row k="Supplier" v={c.supplier_name} /><Row k="Utility" v={c.utility} />
+-            <Row k="MPAN / MPRN" v={c.meter_mpan_mpr} /><Row k="Term" v={c.term_months ? `${c.term_months} months` : "—"} />
++            <Row k="MPAN / MPRN" v={c.meter_mpan_mpr} /><Row k="Topline" v={c.topline} /><Row k="Term" v={c.term_months ? `${c.term_months} months` : "—"} />
+             <Row k="Agency" v={c.agency_name} /><Row k="Broker" v={c.agent_name} /><Row k="Created On" v={date(c.created_at)} />
++            {c.supplier_agent_id && <Row k="Supplier Agent ID" v={c.supplier_agent_id} />}
+           </Card>
+           <Card title="Meter Details">
+             <Row k="Meter Serial Number" v={c.meter_serial} /><Row k="Estimated Consumption" v={c.consumption ? `${Number(c.consumption).toLocaleString()} kWh` : "—"} />
+-            <Row k="Last Reading" v={c.current_read} /><Row k="Site Address" v={[c.address_line1, c.town, c.postcode].filter(Boolean).join(", ")} />
++            <Row k="Last Reading" v={c.current_read} /><Row k="Site Address" v={c.site_same ? [c.address_line1, c.town, c.postcode].filter(Boolean).join(", ") : [c.site_address1, c.site_town, c.site_postcode].filter(Boolean).join(", ")} />
+           </Card>
+           <Card title="Business & Contact Details">
+             <Row k="Business Name" v={c.business_name} /><Row k="Company Reg No" v={c.company_reg} />
+diff --git a/amsl-frontend/src/pages/GenerateContract.jsx b/amsl-frontend/src/pages/GenerateContract.jsx
+index d88779f..3d41c43 100644
+--- a/amsl-frontend/src/pages/GenerateContract.jsx
++++ b/amsl-frontend/src/pages/GenerateContract.jsx
+@@ -25,12 +25,28 @@ export default function GenerateContract() {
+     telephone: "", mobile: "", email: "",
+     billing_same: true, billing_title: "", billing_first_name: "", billing_last_name: "", billing_address1: "",
+     billing_address2: "", billing_town: "", billing_postcode: "", billing_telephone: "", billing_mobile: "", billing_email: "",
+-    supplier_id: "", utility: "Electricity", meter_mpan_mpr: "", meter_serial: "", consumption: "", current_read: "", requested_start: "",
++    site_same: true, site_address1: "", site_address2: "", site_town: "", site_postcode: "",
++    supplier_id: "", utility: "Electricity", meter_mpan_mpr: "", topline: "", meter_serial: "", consumption: "", current_read: "", requested_start: "",
+     product_name: "", tariff_name: "", acq_renewal: "Acquisition", tariff_type: "", supplier_start: "", tariff_end: "", supplier_end: "",
+     term_months: "", fixed_price_term: "", standing_charge: "", day_rate: "", night_rate: "", ewe_rate: "", kva_charge: "", broker_commission: "",
+-    payment_method: "", payment_amount: "", billing_period: "Monthly",
++    payment_method: "", payment_amount: "", billing_period: "Monthly", supplier_agent_id: "",
++  });
++  const set = (k) => (e) => setF((p) => {
++    const val = e.target.type === "checkbox" ? e.target.checked : e.target.value;
++    const next = { ...p, [k]: val };
++    // Bug fix (V1.7-12): ticking "Site Address same as Business Address" — or editing the
++    // business address while it's ticked — must actually copy the business address across,
++    // not just leave the site fields blank.
++    if (k === "site_same" && val) {
++      next.site_address1 = p.address_line1; next.site_address2 = p.address_line2;
++      next.site_town = p.town; next.site_postcode = p.postcode;
++    }
++    if (p.site_same && ["address_line1", "address_line2", "town", "postcode"].includes(k)) {
++      const map = { address_line1: "site_address1", address_line2: "site_address2", town: "site_town", postcode: "site_postcode" };
++      next[map[k]] = val;
++    }
++    return next;
+   });
+-  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
+ 
+   useEffect(() => {
+     if (!quoteId) { setLoading(false); return; }
+@@ -40,10 +56,17 @@ export default function GenerateContract() {
+         ...p,
+         business_id: q.business_id || "", business_name: q.business_name || "", business_type: q.business_type || "",
+         acq_renewal: q.acq_renewal || "Acquisition", supplier_id: q.supplier_id || "", utility: q.utility || "Electricity",
+-        meter_mpan_mpr: q.meter_number || q.meter_point || "", consumption: q.eac || "", requested_start: q.start_date || "",
++        meter_mpan_mpr: q.meter_number || q.meter_point || "", topline: q.topline || "", consumption: q.eac || "", requested_start: q.start_date || "",
+         product_name: q.product_name || "", term_months: q.term_months || "", standing_charge: q.standing_charge ?? "",
+         day_rate: q.unit_rate ?? "", broker_commission: q.commission ?? "",
+       }));
++      // V1.7-14: pull the chosen supplier's Agent ID so it's automatically published on
++      // this contract — nothing for the agent generating it to remember to fill in.
++      if (q.supplier_id) {
++        api.get(`/suppliers/${q.supplier_id}`)
++          .then((sr) => setF((p) => ({ ...p, supplier_agent_id: sr.data?.contract_agent_id || "" })))
++          .catch(() => {});
++      }
+       setLoading(false);
+     }).catch((e) => { setErr(e.message); setLoading(false); });
+   }, [quoteId]);
+@@ -57,6 +80,7 @@ export default function GenerateContract() {
+     try {
+       const payload = { ...f, quote_id: quoteId ? Number(quoteId) : null, contract_no: "CN-" + Date.now().toString().slice(-6),
+         business_id: f.business_id || null, supplier_id: f.supplier_id || null, billing_same: f.billing_same ? 1 : 0,
++        site_same: f.site_same ? 1 : 0,
+         consumption: Number(f.consumption) || null, commission_value: Number(f.broker_commission) || 0,
+         status: "Contract Sent to Client" };
+       numKeys.forEach((k) => { payload[k] = f[k] === "" ? null : Number(f[k]); });
+@@ -80,6 +104,11 @@ export default function GenerateContract() {
+ 
+       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+         <Section title="Supply Details">
++          {f.supplier_agent_id && (
++            <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--muted,#64748B)", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, padding: "8px 10px" }}>
++              Supplier Agent ID <strong>{f.supplier_agent_id}</strong> will be published on this contract automatically.
++            </div>
++          )}
+           <Field label="Company Name *"><input value={f.business_name} onChange={set("business_name")} /></Field>
+           <Field label="Company Registration"><input value={f.company_reg} onChange={set("company_reg")} /></Field>
+           <Field label="Business Structure"><select value={f.business_structure} onChange={set("business_structure")}><option value="">Select Structure</option>{STRUCTURES.map((x) => <option key={x}>{x}</option>)}</select></Field>
+@@ -119,12 +148,29 @@ export default function GenerateContract() {
+ 
+         <Section title="Meter Details">
+           <Field label="MPAN / MPRN *"><input value={f.meter_mpan_mpr} onChange={set("meter_mpan_mpr")} /></Field>
++          {f.utility === "Electricity" && (
++            <Field label="Topline"><input value={f.topline} onChange={set("topline")} placeholder="8-digit header above the MPAN barcode" /></Field>
++          )}
+           <Field label="Meter Serial Number"><input value={f.meter_serial} onChange={set("meter_serial")} /></Field>
+           <Field label="Estimated Annual Consumption (kWh) *"><input type="number" value={f.consumption} onChange={set("consumption")} /></Field>
+           <Field label="Current Meter Reading"><input value={f.current_read} onChange={set("current_read")} /></Field>
+           <Field label="Requested Start Date *"><input type="date" value={f.requested_start} onChange={set("requested_start")} /></Field>
+         </Section>
+ 
++        <Card title="Site Address">
++          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginBottom: f.site_same ? 0 : 12 }}>
++            <input type="checkbox" checked={f.site_same} onChange={set("site_same")} style={{ width: 16, height: 16, accentColor: "var(--brand,#0E7C7B)" }} /> Site Address same as Business Address
++          </label>
++          {!f.site_same && (
++            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
++              <Field label="Site Address Line 1"><input value={f.site_address1} onChange={set("site_address1")} /></Field>
++              <Field label="Site Address Line 2"><input value={f.site_address2} onChange={set("site_address2")} /></Field>
++              <Field label="Site Town / City"><input value={f.site_town} onChange={set("site_town")} /></Field>
++              <Field label="Site Postcode"><input value={f.site_postcode} onChange={set("site_postcode")} /></Field>
++            </div>
++          )}
++        </Card>
++
+         <Section title="Product & Contract Details">
+           <Field label="Product Name *"><input value={f.product_name} onChange={set("product_name")} /></Field>
+           <Field label="Tariff Name"><input value={f.tariff_name} onChange={set("tariff_name")} /></Field>
+diff --git a/amsl-frontend/src/pages/Login.jsx b/amsl-frontend/src/pages/Login.jsx
+index 97735e5..e325f92 100644
+--- a/amsl-frontend/src/pages/Login.jsx
++++ b/amsl-frontend/src/pages/Login.jsx
+@@ -1,7 +1,8 @@
+-import { useState } from "react";
++import { useState, useEffect } from "react";
+ import { useNavigate, useLocation } from "react-router-dom";
+ import { LogIn } from "lucide-react";
+ import { useAuth } from "../components/AuthContext.jsx";
++import { api } from "../api.js";
+ 
+ export default function Login() {
+   const { login } = useAuth();
+@@ -11,6 +12,8 @@ export default function Login() {
+   const [password, setPassword] = useState("admin123");
+   const [err, setErr] = useState(null);
+   const [busy, setBusy] = useState(false);
++  const [brand, setBrand] = useState(null);
++  useEffect(() => { api.branding().then((r) => setBrand(r.data)).catch(() => {}); }, []);
+ 
+   const submit = async (e) => {
+     e?.preventDefault();
+@@ -25,8 +28,12 @@ export default function Login() {
+     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(120deg,#eef2ff,#f1f5f9)" }}>
+       <form onSubmit={submit} className="card" style={{ width: 380, padding: 28 }}>
+         <div style={{ textAlign: "center", marginBottom: 18 }}>
+-          <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--grad)", color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, margin: "0 auto 12px" }}>AB</div>
+-          <h2 style={{ fontSize: 20 }}>AMSL Broker</h2>
++          <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--grad)", color: "#fff", display: "grid", placeItems: "center", fontWeight: 800, margin: "0 auto 12px", overflow: "hidden" }}>
++            {brand?.logo_url
++              ? <img src={brand.logo_url} alt={brand.brand_name || "logo"} style={{ width: "100%", height: "100%", objectFit: "contain" }} onError={(e) => { e.target.style.display = "none"; }} />
++              : (brand?.brand_name || "AB").slice(0, 2).toUpperCase()}
++          </div>
++          <h2 style={{ fontSize: 20 }}>{brand?.brand_name || "AMSL Broker"}</h2>
+           <div style={{ color: "var(--slate-400)", fontSize: 13, marginTop: 2 }}>Sign in to the broker portal</div>
+         </div>
+ 
+diff --git a/amsl-frontend/src/pages/NewQuote.jsx b/amsl-frontend/src/pages/NewQuote.jsx
+index f87fa5a..47066c9 100644
+--- a/amsl-frontend/src/pages/NewQuote.jsx
++++ b/amsl-frontend/src/pages/NewQuote.jsx
+@@ -9,7 +9,7 @@ const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFrac
+ export default function NewQuote() {
+   const nav = useNavigate();
+   const [businesses, setBusinesses] = useState([]);
+-  const [form, setForm] = useState({ utility: "Electricity", business_id: "", business_name: "", site_id: "", meter_id: "", meter_number: "", postcode: "", eac: "30000", term: "", uplift: "1.0", start_date: "", current_supplier_id: "", business_type: "" });
++  const [form, setForm] = useState({ utility: "Electricity", business_id: "", business_name: "", site_id: "", meter_id: "", meter_number: "", topline: "", postcode: "", eac: "30000", term: "", uplift: "1.0", start_date: "", current_supplier_id: "", business_type: "" });
+   const [sites, setSites] = useState([]);
+   const [meters, setMeters] = useState([]);
+   const [bespoke, setBespoke] = useState(false);
+@@ -23,6 +23,12 @@ export default function NewQuote() {
+   const [saved, setSaved] = useState(null);
+   const [cap, setCap] = useState(null);
+   const [breakdown, setBreakdown] = useState(null); // offer shown in the "Show More" cost breakdown modal
++  const [disclaimer, setDisclaimer] = useState(
++    "This quote is valid until 5:30pm today; after that, prices may change and are subject to availability. " +
++    "All contracts are subject to credit approval from the supplier. Unit rates are quoted in pence per kWh. " +
++    "Prices exclude Climate Change Levy and VAT. This quote is based on estimated annual consumption — your actual future usage may differ."
++  );
++  useEffect(() => { api.disclaimer().then((r) => setDisclaimer(r.data.text)).catch(() => {}); }, []);
+   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+ 
+   useEffect(() => {
+@@ -54,8 +60,14 @@ export default function NewQuote() {
+   const onMeterChange = (e) => {
+     const meterId = e.target.value;
+     const m = meters.find((x) => String(x.id) === meterId);
+-    setForm((f) => ({ ...f, meter_id: meterId, meter_number: m?.mpan_mprn || f.meter_number, eac: m?.eac ? String(m.eac) : f.eac }));
++    setForm((f) => ({ ...f, meter_id: meterId, meter_number: m?.mpan_mprn || f.meter_number, topline: m?.topline || f.topline, eac: m?.eac ? String(m.eac) : f.eac }));
+   };
++  // First 2 digits of the MPAN = Distributor ID; first 2 digits of the Topline = Profile
++  // Class. These are how a real price matrix (Dist ID / Profile columns) gets filtered
++  // down to the rates that actually apply to this meter.
++  const first2 = (v) => { const d = String(v || "").replace(/\D/g, ""); return d.length >= 2 ? d.slice(0, 2) : null; };
++  const distId = first2(form.meter_number);
++  const profileClass = first2(form.topline);
+   // If the person switches Electricity<->Gas after already picking a site, refresh the meter list for that utility.
+   useEffect(() => {
+     if (!form.business_id || !form.site_id) return;
+@@ -70,7 +82,11 @@ export default function NewQuote() {
+     try {
+       const chosen = businesses.find((b) => String(b.id) === String(form.business_id));
+       const unit = Number(bf.unit_rate) || 0, sc = Number(bf.standing_charge) || 0, eac = Number(form.eac) || 0;
+-      const annual = (unit * eac) / 100 + (sc * 365) / 100;
++      const dist = Number(bf.distribution_charge) || 0, trans = Number(bf.transmission_charge) || 0;
++      // Bug fix (V1.7-16): Distribution and Transmission are p/day charges, same as Standing
++      // Charge — they were being collected on this form but never actually added into the
++      // annual cost total.
++      const annual = (unit * eac) / 100 + (sc * 365) / 100 + (dist * 365) / 100 + (trans * 365) / 100;
+       const q = await api.post("/quotes", {
+         quote_no: "QT-" + Date.now().toString().slice(-6),
+         business_id: form.business_id || null,
+@@ -108,6 +124,8 @@ export default function NewQuote() {
+         utility: form.utility, eac: Number(form.eac),
+         uplift: form.uplift ? Number(form.uplift) : 1.0,
+         current_supplier_id: form.current_supplier_id || undefined,
++        meter_number: form.meter_number || undefined,
++        topline: form.topline || undefined,
+       });
+       setResult(data);
+     } catch (e) { setErr(e.message); }
+@@ -122,11 +140,12 @@ export default function NewQuote() {
+         quote_no: "QT-" + Date.now().toString().slice(-6),
+         business_id: form.business_id || null,
+         business_name: chosen ? chosen.business_name : (form.business_name || "Unassigned Business"),
+-        utility: form.utility, meter_number: form.meter_number,
++        utility: form.utility, meter_number: form.meter_number, topline: form.topline,
+         eac: Number(form.eac), start_date: form.start_date,
+         supplier_id: o.supplier_id, term_months: o.term_months,
+         unit_rate: o.unit_rate, standing_charge: o.standing_charge,
+         annual_cost: o.annual_cost, commission: o.total_commission,
++        uplift: o.uplift,
+         status: "Quoted",
+       });
+       setSaved({ quote_no: q.data.quote_no, supplier: o.supplier });
+@@ -181,6 +200,11 @@ export default function NewQuote() {
+             </Field>
+           )}
+           <Field label={meterLabel}><input value={form.meter_number} onChange={set("meter_number")} placeholder={`${meterLabel} (auto-filled if a meter is selected above)`} /></Field>
++          {form.utility === "Electricity" && (
++            <Field label="Topline">
++              <input value={form.topline} onChange={set("topline")} placeholder="8-digit header above the MPAN barcode" />
++            </Field>
++          )}
+           <Field label="Postcode"><input value={form.postcode} onChange={set("postcode")} placeholder="Supply postcode" /></Field>
+           <Field label="Consumption kWh/yr (EAC) *"><input type="number" value={form.eac} onChange={set("eac")} placeholder="30000" /></Field>
+           <Field label="Current Supplier">
+@@ -206,6 +230,9 @@ export default function NewQuote() {
+         <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
+           Contract term and broker uplift are applied as filters once prices come back below — no need to pick them up front.
+           Acquisition vs Renewal is worked out automatically per offer from the Current Supplier you select here.
++          {form.utility === "Electricity" && (distId || profileClass) && (
++            <> · Matrix filter: {distId && <>Distributor ID <b>{distId}</b></>}{distId && profileClass && ", "}{profileClass && <>Profile Class <b>{profileClass}</b></>}</>
++          )}
+         </div>
+         {bespoke && (
+           <div style={{ marginTop: 8, paddingTop: 14, borderTop: "1px solid var(--line,#EEF1F4)" }}>
+@@ -222,8 +249,8 @@ export default function NewQuote() {
+               <Field label="Product Name"><input value={bf.product_name} onChange={setB("product_name")} placeholder="e.g. Fixed 24m Bespoke" /></Field>
+               <Field label="Unit Rate (p/kWh)"><input type="number" step="0.01" value={bf.unit_rate} onChange={setB("unit_rate")} /></Field>
+               <Field label="Standing Charge (p/day)"><input type="number" step="0.01" value={bf.standing_charge} onChange={setB("standing_charge")} /></Field>
+-              <Field label="Distribution Charge (p/kWh)"><input type="number" step="0.01" value={bf.distribution_charge} onChange={setB("distribution_charge")} /></Field>
+-              <Field label="Transmission Charge (p/kWh)"><input type="number" step="0.01" value={bf.transmission_charge} onChange={setB("transmission_charge")} /></Field>
++              <Field label="Distribution Charge (p/day)"><input type="number" step="0.01" value={bf.distribution_charge} onChange={setB("distribution_charge")} /></Field>
++              <Field label="Transmission Charge (p/day)"><input type="number" step="0.01" value={bf.transmission_charge} onChange={setB("transmission_charge")} /></Field>
+               <Field label="Term (months)">
+                 <select value={bf.term} onChange={setB("term")}>
+                   <option value="12">12</option><option value="24">24</option><option value="36">36</option>
+@@ -324,10 +351,8 @@ export default function NewQuote() {
+               Unit rate shown includes your {form.uplift || 1}p/kWh broker uplift. Costs are estimates for {Number(form.eac).toLocaleString()} kWh/yr.
+             </div>
+             <div style={{ marginTop: 12, padding: "10px 12px", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, fontSize: 11, lineHeight: 1.5, color: "var(--muted,#64748B)" }}>
+-              <strong>Quote disclaimer:</strong> This quote is valid until 5:30pm today; after that, prices may change and are subject to availability.
+-              All contracts are subject to credit approval from the supplier. Unit rates are quoted in pence per kWh.
+-              Prices exclude Climate Change Levy and VAT. This quote is based on estimated annual consumption — your actual future usage may differ.
+-              The amounts shown are calculated using estimated consumption splits, which may not match the consumption splits you provided for this quote.
++              <strong>Quote disclaimer:</strong> {disclaimer}
++              {" "}The amounts shown are calculated using estimated consumption splits, which may not match the consumption splits you provided for this quote.
+             </div>
+           </Card>
+         </>
+diff --git a/amsl-frontend/src/pages/Pipeline.jsx b/amsl-frontend/src/pages/Pipeline.jsx
+index ca75f8d..7befba5 100644
+--- a/amsl-frontend/src/pages/Pipeline.jsx
++++ b/amsl-frontend/src/pages/Pipeline.jsx
+@@ -137,6 +137,14 @@ function DetailsPanel({ id, onClose, onChanged }) {
+   const addComment = async () => { if (comment.trim()) { await api.pipelineComment(id, comment.trim()); setComment(""); load(); onChanged?.(); } };
+   const saveDisp = async () => { if (disp) { await api.pipelineDisposition(id, disp); setDisp(""); load(); } };
+   const schedule = async () => { if (cbDate) { await api.pipelineCallback(id, cbDate.replace("T", " "), cbReason); setCbDate(""); load(); } };
++  const [cStart, setCStart] = useState("");
++  const [cEnd, setCEnd] = useState("");
++  useEffect(() => { if (data) { setCStart(data.contract_start || ""); setCEnd(data.contract_end || ""); } }, [data]);
++  const saveDates = async () => {
++    await api.pipelineContractDates(id, { contract_start: cStart || null, contract_end: cEnd || null });
++    await api.pipelineRunAutomations(); // pick up an immediate Live/Renewal move rather than waiting for the hourly sweep
++    load(); onChanged?.();
++  };
+   const DISPOSITIONS = ["Spoke - interested", "Spoke - not interested", "No answer", "Left voicemail", "Wrong number", "Requested callback", "Do not contact"];
+ 
+   const rn = data ? renewal(data.contract_end) : null;
+@@ -184,6 +192,21 @@ function DetailsPanel({ id, onClose, onChanged }) {
+ 
+           {tab === "actions" && (
+             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
++              <div>
++                <div className="lab" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted,#94A3B8)", marginBottom: 4 }}>Contract dates</div>
++                <div className="sub" style={{ fontSize: 11, marginBottom: 6 }}>Drives automatic Live and Up-for-Renewal moves — set these once the contract is signed.</div>
++                <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
++                  <div style={{ flex: 1 }}>
++                    <div className="sub" style={{ fontSize: 10.5, marginBottom: 2 }}>Start date</div>
++                    <input type="date" value={cStart} onChange={(e) => setCStart(e.target.value)} style={{ width: "100%", padding: "7px 9px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} />
++                  </div>
++                  <div style={{ flex: 1 }}>
++                    <div className="sub" style={{ fontSize: 10.5, marginBottom: 2 }}>End date</div>
++                    <input type="date" value={cEnd} onChange={(e) => setCEnd(e.target.value)} style={{ width: "100%", padding: "7px 9px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} />
++                  </div>
++                </div>
++                <button className="btn primary sm" disabled={cStart === (data.contract_start || "") && cEnd === (data.contract_end || "")} onClick={saveDates}>Save dates</button>
++              </div>
+               <div>
+                 <div className="lab" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--muted,#94A3B8)", marginBottom: 4 }}>Log disposition</div>
+                 <div style={{ display: "flex", gap: 6 }}>
+diff --git a/amsl-frontend/src/pages/Products.jsx b/amsl-frontend/src/pages/Products.jsx
+index e322783..0fd9a39 100644
+--- a/amsl-frontend/src/pages/Products.jsx
++++ b/amsl-frontend/src/pages/Products.jsx
+@@ -398,17 +398,32 @@ function PriceMatrix({ product, onClose }) {
+         </>
+       )}
+ 
+-      {showMapping && mapping && (
+-        <HeaderMappingModal mapping={mapping} setMapping={setMapping} rowCount={dataRows?.length || 0}
+-          onCancel={() => setShowMapping(false)} onConfirm={confirmMapping} />
+-      )}
++        {showMapping && mapping && (
++          <HeaderMappingModal mapping={mapping} setMapping={setMapping} rowCount={dataRows?.length || 0} dataRows={dataRows}
++            onCancel={() => setShowMapping(false)} onConfirm={confirmMapping} />
++        )}
+     </Modal>
+   );
+ }
+ 
+-function HeaderMappingModal({ mapping, setMapping, rowCount, onCancel, onConfirm }) {
++function HeaderMappingModal({ mapping, setMapping, rowCount, dataRows, onCancel, onConfirm }) {
+   const setRow = (i, patch) => setMapping(mapping.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
+   const preMapped = mapping.filter((m) => HEADER_GUESS[norm(m.header)]).length;
++  // V1.7-15: a quick, real sample of this column's actual values — up to 3 distinct,
++  // non-blank examples pulled straight from the uploaded file — so the person mapping a
++  // header can see what's actually in it rather than guessing from the header name alone.
++  const extractFor = (colIdx) => {
++    if (!dataRows?.length) return "—";
++    const seen = [];
++    for (const row of dataRows) {
++      const v = row[colIdx];
++      if (v == null || v === "") continue;
++      const s = v instanceof Date ? v.toISOString().slice(0, 10) : String(v);
++      if (!seen.includes(s)) seen.push(s);
++      if (seen.length >= 3) break;
++    }
++    return seen.length ? seen.join(", ") : "—";
++  };
+   return (
+     <Modal title="CSV Header Mapping" onClose={onCancel} wide
+       footer={<>
+@@ -421,7 +436,7 @@ function HeaderMappingModal({ mapping, setMapping, rowCount, onCancel, onConfirm
+       </div>
+       <div className="table-wrap" style={{ maxHeight: 420, overflow: "auto" }}>
+         <table className="tbl">
+-          <thead><tr><th>CSV Header</th><th>Category</th><th>Attribute</th><th>Calculation</th></tr></thead>
++          <thead><tr><th>CSV Header</th><th>Extract</th><th>Category</th><th>Attribute</th><th>Calculation</th></tr></thead>
+           <tbody>
+             {mapping.map((m, i) => {
+               const attrs = Object.keys(CATEGORY_TREE[m.category] || {});
+@@ -429,6 +444,7 @@ function HeaderMappingModal({ mapping, setMapping, rowCount, onCancel, onConfirm
+               return (
+                 <tr key={i}>
+                   <td style={{ fontWeight: 600, fontSize: 12 }}>{m.header}</td>
++                  <td style={{ fontSize: 11.5, color: "var(--slate-500,#64748B)", fontFamily: "monospace", whiteSpace: "nowrap" }} title={extractFor(i)}>{extractFor(i)}</td>
+                   <td>
+                     <select value={m.category} onChange={(e) => setRow(i, { category: e.target.value, attribute: "" })} style={{ fontSize: 12 }}>
+                       {Object.keys(CATEGORY_TREE).map((c) => <option key={c}>{c}</option>)}
+diff --git a/amsl-frontend/src/pages/QuoteDetail.jsx b/amsl-frontend/src/pages/QuoteDetail.jsx
+index 3d19d42..34f9fae 100644
+--- a/amsl-frontend/src/pages/QuoteDetail.jsx
++++ b/amsl-frontend/src/pages/QuoteDetail.jsx
+@@ -1,8 +1,8 @@
+ import { useState, useEffect } from "react";
+ import { useParams, useNavigate, Link } from "react-router-dom";
+-import { ArrowLeft, Download, FileSignature, Mail } from "lucide-react";
++import { ArrowLeft, Download, FileSignature, Mail, RefreshCw, History } from "lucide-react";
+ import { api } from "../api.js";
+-import { Card, Badge, Spinner, ErrorBanner } from "../components/ui.jsx";
++import { Card, Badge, Spinner, ErrorBanner, Modal } from "../components/ui.jsx";
+ 
+ const money = (n) => n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { minimumFractionDigits: 2 });
+ const p2 = (v) => (v == null || v === "" ? "—" : `${Number(v).toFixed(2)}p`);
+@@ -15,7 +15,10 @@ function Row({ k, v }) {
+   );
+ }
+ 
+-function downloadReport(q) {
++// V1.7-13: pulls the admin-editable disclaimer at download time.
++async function downloadReport(q) {
++  let disclaimerText = "This quote is valid until 5:30pm today; prices may change and are subject to availability. All contracts are subject to credit approval. Rates in pence/kWh, excl. CCL & VAT.";
++  try { disclaimerText = (await api.disclaimer()).data.text; } catch { /* fall back to default above */ }
+   const L = [
+     "AMSL BROKER — QUOTE RESULT", "".padEnd(40, "="), "",
+     `Quote ID:      ${q.quote_no}${Number(q.bespoke) ? "  (BESPOKE)" : ""}`,
+@@ -27,11 +30,12 @@ function downloadReport(q) {
+     `Term:          ${q.term_months ? q.term_months + " months" : "—"}`,
+     `Unit Rate:     ${q.unit_rate != null ? q.unit_rate + "p/kWh" : "—"}`,
+     `Standing Chg:  ${q.standing_charge != null ? q.standing_charge + "p/day" : "—"}`,
+-    q.distribution_charge != null ? `Distribution:  ${q.distribution_charge}p/kWh` : null,
+-    q.transmission_charge != null ? `Transmission:  ${q.transmission_charge}p/kWh` : null,
++    q.distribution_charge != null ? `Distribution:  ${q.distribution_charge}p/day` : null,
++    q.transmission_charge != null ? `Transmission:  ${q.transmission_charge}p/day` : null,
+     `Annual Cost:   ${money(q.annual_cost)}`,
+     `Commission:    ${money(q.commission)}`,
+     `Status:        ${q.status || "—"}`, "",
++    disclaimerText, "",
+     `Generated:     ${new Date().toLocaleString("en-GB")}`,
+   ].filter(Boolean);
+   const blob = new Blob([L.join("\n")], { type: "text/plain" });
+@@ -44,8 +48,24 @@ export default function QuoteDetail() {
+   const nav = useNavigate();
+   const [q, setQ] = useState(null);
+   const [err, setErr] = useState(null);
++  const [refreshing, setRefreshing] = useState(false);
++  const [refreshMsg, setRefreshMsg] = useState(null);
++  const [history, setHistory] = useState(null);
++
++  const load = () => api.get(`/quotes/${id}`).then((r) => setQ(r.data)).catch((e) => setErr(e.message));
++  useEffect(() => { load(); }, [id]); // eslint-disable-line
++
++  const refreshPrice = async () => {
++    setRefreshing(true); setRefreshMsg(null);
++    try {
++      const { data } = await api.quoteRefreshPrice(id);
++      setRefreshMsg(data.changed ? "Price updated to the current market rate." : "Already showing the current market rate.");
++      load();
++    } catch (e) { setRefreshMsg(e.message); }
++    setRefreshing(false);
++  };
++  const openHistory = () => api.quotePriceHistory(id).then((r) => setHistory(r.data)).catch(() => setHistory([]));
+ 
+-  useEffect(() => { api.get(`/quotes/${id}`).then((r) => setQ(r.data)).catch((e) => setErr(e.message)); }, [id]);
+   if (err) return <ErrorBanner error={err} />;
+   if (!q) return <Spinner />;
+ 
+@@ -62,25 +82,28 @@ export default function QuoteDetail() {
+           </div>
+         </div>
+         <div style={{ display: "flex", gap: 8 }}>
++          {!bespoke && <button className="btn" disabled={refreshing} onClick={refreshPrice}><RefreshCw size={14} className={refreshing ? "spin" : ""} /> {refreshing ? "Refreshing…" : "Refresh Price"}</button>}
++          {!bespoke && <button className="btn" onClick={openHistory}><History size={14} /> Price History</button>}
+           <button className="btn" onClick={() => downloadReport(q)}><Download size={14} /> Download Report</button>
+           <button className="btn" onClick={() => alert("Send Email — emails the quote to the customer (wire to SMTP).")}><Mail size={14} /> Send Email</button>
+           <Link className="btn primary" to={`/contracts/generate/${q.id}`}><FileSignature size={14} /> Generate Contract</Link>
+         </div>
+       </div>
++      {refreshMsg && <div className="sub" style={{ marginBottom: 10, fontSize: 12 }}>{refreshMsg}</div>}
+ 
+       <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 16, alignItems: "start" }}>
+         <Card title="Market Supplier Details">
+           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0 12px", borderBottom: "2px solid var(--line,#EEF1F4)", marginBottom: 6 }}>
+             <div><div style={{ fontWeight: 800, fontSize: 16 }}>{q.supplier_name || "—"}</div><div className="sub" style={{ fontSize: 12 }}>{q.product_name || "Market rate"}</div></div>
+-            <div style={{ textAlign: "right" }}><div className="sub" style={{ fontSize: 11 }}>Annual Cost</div><div style={{ fontWeight: 800, fontSize: 20, color: "var(--brand,#0E7C7B)" }}>{money(q.annual_cost)}</div></div>
++            <div style={{ textAlign: "right" }}><div className="sub" style={{ fontSize: 11 }}>Annual Cost {!bespoke && <Badge tone="green">Best Price</Badge>}</div><div style={{ fontWeight: 800, fontSize: 20, color: "var(--brand,#0E7C7B)" }}>{money(q.annual_cost)}</div></div>
+           </div>
+           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 24px" }}>
+             <Row k="Term" v={q.term_months ? `${q.term_months} months` : "—"} />
+             <Row k="Unit / Day Rate" v={p2(q.unit_rate)} />
+             <Row k="Standing Charge" v={p2(q.standing_charge)} />
+             <Row k="Commission" v={money(q.commission)} />
+-            {bespoke && <Row k="Distribution Charge" v={p2(q.distribution_charge)} />}
+-            {bespoke && <Row k="Transmission Charge" v={p2(q.transmission_charge)} />}
++            {bespoke && <Row k="Distribution Charge (p/day)" v={p2(q.distribution_charge)} />}
++            {bespoke && <Row k="Transmission Charge (p/day)" v={p2(q.transmission_charge)} />}
+           </div>
+         </Card>
+ 
+@@ -96,6 +119,24 @@ export default function QuoteDetail() {
+           </Card>
+         </div>
+       </div>
++
++      {history && (
++        <Modal title={`Price History — ${q.quote_no}`} onClose={() => setHistory(null)} footer={<button className="btn" onClick={() => setHistory(null)}>Close</button>}>
++          {history.length === 0 ? <div className="sub">No price history recorded.</div> : (
++            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
++              {history.map((h) => (
++                <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderRadius: 8, background: h.valid ? "#ecfdf5" : "#F8FAFC", border: `1px solid ${h.valid ? "#a7f3d0" : "var(--line,#E7EBF0)"}` }}>
++                  <div>
++                    <div style={{ fontWeight: 700, fontSize: 13 }}>{h.unit_rate}p/kWh · {h.standing_charge}p/day <span className="sub" style={{ fontWeight: 400 }}>({h.term_months}m)</span></div>
++                    <div className="sub" style={{ fontSize: 11 }}>{money(h.annual_cost)}/yr · {h.source === "refresh" ? "Refreshed" : "Created"} {new Date(h.created_at).toLocaleString("en-GB")}</div>
++                  </div>
++                  <Badge tone={h.valid ? "green" : "rose"}>{h.valid ? "Best Price" : "Invalid Price"}</Badge>
++                </div>
++              ))}
++            </div>
++          )}
++        </Modal>
++      )}
+     </>
+   );
+ }
+diff --git a/amsl-frontend/src/pages/Quotes.jsx b/amsl-frontend/src/pages/Quotes.jsx
+index 88a3b20..0a7f424 100644
+--- a/amsl-frontend/src/pages/Quotes.jsx
++++ b/amsl-frontend/src/pages/Quotes.jsx
+@@ -1,13 +1,19 @@
++import { useState } from "react";
+ import { useNavigate } from "react-router-dom";
+-import { Plus, Download, FileSignature, Eye } from "lucide-react";
++import { Plus, Download, FileSignature, Eye, RefreshCw, History } from "lucide-react";
+ import { Link } from "react-router-dom";
+ import ListPage from "../components/ListPage.jsx";
+-import { Badge } from "../components/ui.jsx";
++import { Badge, Modal, Spinner } from "../components/ui.jsx";
++import { api } from "../api.js";
++
+ const tone = (s) => s.includes("Accepted") ? "green" : s.includes("Reject") ? "rose" : s.includes("Quoted") ? "indigo" : "slate";
+ const money = (n) => n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { minimumFractionDigits: 2 });
+ 
+-// V1.6-10: download a quote breakdown (client-side)
+-function downloadBreakdown(r) {
++// V1.7-13: pulls the admin-editable disclaimer at download time so every export always
++// reflects whatever is currently set in Settings, not a baked-in copy.
++async function downloadBreakdown(r) {
++  let disclaimerText = "This quote is valid until 5:30pm today; prices may change and are subject to availability. All contracts are subject to credit approval. Rates in pence/kWh, excl. CCL & VAT.";
++  try { disclaimerText = (await api.disclaimer()).data.text; } catch { /* fall back to default above */ }
+   const L = [
+     "AMSL BROKER — QUOTE BREAKDOWN", "".padEnd(40, "="), "",
+     `Quote ID:      ${r.quote_no}${Number(r.bespoke) ? "  (BESPOKE)" : ""}`,
+@@ -20,13 +26,12 @@ function downloadBreakdown(r) {
+     `Term:          ${r.term_months ? r.term_months + " months" : "—"}`,
+     `Unit Rate:     ${r.unit_rate != null ? r.unit_rate + "p/kWh" : "—"}`,
+     `Standing Chg:  ${r.standing_charge != null ? r.standing_charge + "p/day" : "—"}`,
+-    r.distribution_charge != null ? `Distribution:  ${r.distribution_charge}p/kWh` : null,
+-    r.transmission_charge != null ? `Transmission:  ${r.transmission_charge}p/kWh` : null,
++    r.distribution_charge != null ? `Distribution:  ${r.distribution_charge}p/day` : null,
++    r.transmission_charge != null ? `Transmission:  ${r.transmission_charge}p/day` : null,
+     `Annual Cost:   ${money(r.annual_cost)}`,
+     `Commission:    ${money(r.commission)}`,
+     `Status:        ${r.status || "—"}`, "",
+-    "This quote is valid until 5:30pm today; prices may change and are subject to availability.",
+-    "All contracts are subject to credit approval. Rates in pence/kWh, excl. CCL & VAT.",
++    disclaimerText,
+     `Generated:     ${new Date().toLocaleString("en-GB")}`,
+   ].filter((x) => x != null);
+   const blob = new Blob([L.join("\n")], { type: "text/plain" });
+@@ -34,36 +39,99 @@ function downloadBreakdown(r) {
+   a.href = url; a.download = `Quote-${r.quote_no}.txt`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+ }
+ 
++// V1.7-11: re-price against the current market; refuses (with a message) for bespoke quotes
++// or when the supplier/term no longer has a rate — surfaced as an "Invalid Price" toast.
++function RefreshPriceButton({ r, reload }) {
++  const [busy, setBusy] = useState(false);
++  const [msg, setMsg] = useState(null);
++  const refresh = async () => {
++    setBusy(true); setMsg(null);
++    try {
++      const { data } = await api.quoteRefreshPrice(r.id);
++      setMsg(data.changed ? "Price updated" : "Already current");
++      reload?.();
++    } catch (e) { setMsg(e.message); }
++    setBusy(false);
++    setTimeout(() => setMsg(null), 4000);
++  };
++  if (Number(r.bespoke)) return null;
++  return (
++    <span style={{ position: "relative", display: "inline-block" }}>
++      <button className="btn ghost sm" title="Refresh price" disabled={busy} onClick={refresh} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
++        <RefreshCw size={13} className={busy ? "spin" : ""} /> {busy ? "…" : "Refresh"}
++      </button>
++      {msg && <span className="sub" style={{ position: "absolute", top: "100%", left: 0, whiteSpace: "nowrap", fontSize: 10.5, marginTop: 2 }}>{msg}</span>}
++    </span>
++  );
++}
++
++function PriceHistoryModal({ quote, onClose }) {
++  const [rows, setRows] = useState(null);
++  useState(() => { api.quotePriceHistory(quote.id).then((r) => setRows(r.data)).catch(() => setRows([])); }, []);
++  return (
++    <Modal title={`Price History — ${quote.quote_no}`} onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
++      {!rows ? <Spinner /> : rows.length === 0 ? <div className="sub">No price history recorded.</div> : (
++        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
++          {rows.map((h) => (
++            <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderRadius: 8, background: h.valid ? "#ecfdf5" : "#F8FAFC", border: `1px solid ${h.valid ? "#a7f3d0" : "var(--line,#E7EBF0)"}` }}>
++              <div>
++                <div style={{ fontWeight: 700, fontSize: 13 }}>{h.unit_rate}p/kWh · {h.standing_charge}p/day <span className="sub" style={{ fontWeight: 400 }}>({h.term_months}m)</span></div>
++                <div className="sub" style={{ fontSize: 11 }}>{money(h.annual_cost)}/yr · {h.source === "refresh" ? "Refreshed" : "Created"} {new Date(h.created_at).toLocaleString("en-GB")}</div>
++              </div>
++              <Badge tone={h.valid ? "green" : "rose"}>{h.valid ? "Best Price" : "Invalid Price"}</Badge>
++            </div>
++          ))}
++        </div>
++      )}
++    </Modal>
++  );
++}
++
+ export default function Quotes() {
+   const nav = useNavigate();
+-  return <ListPage title="Quote History" resource="quotes"
+-    toolbar={<button className="btn primary" onClick={() => nav("/quotes/new")}><Plus size={15} /> New Quote</button>}
+-    columns={[
+-      { key: "quote_no", label: "Quote ID", render: (r) => (
+-        <span className="name">{r.quote_no}{Number(r.bespoke) ? <span style={{ display: "block", marginTop: 2, fontSize: 10, fontWeight: 700, color: "#0E7C7B", background: "#E1F1F0", borderRadius: 5, padding: "1px 5px", width: "fit-content" }}>BESPOKE</span> : null}</span>
+-      ) },
+-      { key: "business_name", label: "Business" },
+-      { key: "product_name", label: "Product", render: (r) => r.product_name || "—" },
+-      { key: "utility", label: "Utility" },
+-      { key: "supplier_name", label: "Supplier", render: (r) => r.supplier_name || "—" },
+-      { key: "meter_number", label: "Meter", render: (r) => <span className="mono">{r.meter_number}</span> },
+-      { key: "annual_cost", label: "Annual Cost", render: (r) => <span className="mono">{money(r.annual_cost)}</span> },
+-      { key: "commission", label: "Commission", render: (r) => r.commission != null ? <span style={{ color: "var(--indigo)", fontWeight: 700 }}>{money(r.commission)}</span> : "—" },
+-      { key: "status", label: "Status", render: (r) => <Badge tone={tone(r.status)}>{r.status}</Badge> },
+-      { key: "download", label: "Breakdown", render: (r) => (
+-        <button className="btn ghost sm" title="Download quote breakdown" onClick={() => downloadBreakdown(r)} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+-          <Download size={14} /> PDF
+-        </button>
+-      ) },
+-      { key: "view", label: "", render: (r) => (
+-        <Link className="btn ghost sm" to={`/quotes/${r.id}`} title="View quote results" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+-          <Eye size={14} /> View
+-        </Link>
+-      ) },
+-      { key: "generate", label: "Contract", render: (r) => (
+-        <Link className="btn ghost sm" to={`/contracts/generate/${r.id}`} title="Generate contract from this quote" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+-          <FileSignature size={14} /> Generate
+-        </Link>
+-      ) },
+-    ]} />;
++  const [historyFor, setHistoryFor] = useState(null);
++  return <>
++    <ListPage title="Quoted" resource="quotes"
++      toolbar={<button className="btn primary" onClick={() => nav("/quotes/new")}><Plus size={15} /> New Quote</button>}
++      columns={[
++        { key: "quote_no", label: "Quote ID", render: (r) => (
++          <span className="name">{r.quote_no}{Number(r.bespoke) ? <span style={{ display: "block", marginTop: 2, fontSize: 10, fontWeight: 700, color: "#0E7C7B", background: "#E1F1F0", borderRadius: 5, padding: "1px 5px", width: "fit-content" }}>BESPOKE</span> : null}</span>
++        ) },
++        { key: "business_name", label: "Business" },
++        { key: "product_name", label: "Product", className: "frozen-col", render: (r) => r.product_name || "—" },
++        { key: "utility", label: "Utility" },
++        { key: "supplier_name", label: "Supplier", render: (r) => r.supplier_name || "—" },
++        { key: "meter_number", label: "Meter", render: (r) => <span className="mono">{r.meter_number}</span> },
++        { key: "annual_cost", label: "Annual Cost", render: (r) => (
++          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
++            <span className="mono">{money(r.annual_cost)}</span>
++            {!Number(r.bespoke) && <Badge tone="green">Best Price</Badge>}
++          </span>
++        ) },
++        { key: "commission", label: "Commission", render: (r) => r.commission != null ? <span style={{ color: "var(--indigo)", fontWeight: 700 }}>{money(r.commission)}</span> : "—" },
++        { key: "status", label: "Status", render: (r) => <Badge tone={tone(r.status)}>{r.status}</Badge> },
++        { key: "refresh", label: "", render: (r, reload) => <RefreshPriceButton r={r} reload={reload} /> },
++        { key: "history", label: "", render: (r) => (
++          <button className="btn ghost sm" title="Price history" onClick={() => setHistoryFor(r)} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
++            <History size={14} /> History
++          </button>
++        ) },
++        { key: "download", label: "Breakdown", render: (r) => (
++          <button className="btn ghost sm" title="Download quote breakdown" onClick={() => downloadBreakdown(r)} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
++            <Download size={14} /> PDF
++          </button>
++        ) },
++        { key: "view", label: "", render: (r) => (
++          <Link className="btn ghost sm" to={`/quotes/${r.id}`} title="View quote results" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
++            <Eye size={14} /> View
++          </Link>
++        ) },
++        { key: "generate", label: "Contract", render: (r) => (
++          <Link className="btn ghost sm" to={`/contracts/generate/${r.id}`} title="Generate contract from this quote" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
++            <FileSignature size={14} /> Generate
++          </Link>
++        ) },
++      ]} />
++    {historyFor && <PriceHistoryModal quote={historyFor} onClose={() => setHistoryFor(null)} />}
++  </>;
+ }
+diff --git a/amsl-frontend/src/pages/Settings.jsx b/amsl-frontend/src/pages/Settings.jsx
+index 252abeb..4dedaf2 100644
+--- a/amsl-frontend/src/pages/Settings.jsx
++++ b/amsl-frontend/src/pages/Settings.jsx
+@@ -3,6 +3,37 @@ import { Plus, Pencil, Trash2, Layers, Settings as SettingsIcon } from "lucide-r
+ import { api } from "../api.js";
+ import { Card, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
+ 
++function DisclaimerCard() {
++  const [text, setText] = useState(null);
++  const [saving, setSaving] = useState(false);
++  const [saved, setSaved] = useState(false);
++  const [err, setErr] = useState(null);
++  useEffect(() => { api.disclaimer().then((r) => setText(r.data.text)).catch((e) => setErr(e.message)); }, []);
++  const save = async () => {
++    setSaving(true); setErr(null);
++    try { await api.disclaimerSet(text); setSaved(true); setTimeout(() => setSaved(false), 2500); }
++    catch (e) { setErr(e.message); }
++    setSaving(false);
++  };
++  return (
++    <Card title="Quote Disclaimer">
++      <p className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
++        Shown on every quote and quote download across the portal. Changing it here updates it everywhere at once.
++      </p>
++      {err && <ErrorBanner error={err} />}
++      {text === null ? <Spinner /> : (
++        <>
++          <textarea value={text} onChange={(e) => { setText(e.target.value); setSaved(false); }} rows={4}
++            style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)", fontSize: 13, fontFamily: "inherit", resize: "vertical" }} />
++          <div style={{ marginTop: 10 }}>
++            <button className="btn primary sm" onClick={save} disabled={saving || !text.trim()}>{saving ? "Saving…" : saved ? "Saved ✓" : "Save disclaimer"}</button>
++          </div>
++        </>
++      )}
++    </Card>
++  );
++}
++
+ export default function Settings() {
+   const [cfg, setCfg] = useState(null);
+   const [err, setErr] = useState(null);
+@@ -53,6 +84,8 @@ export default function Settings() {
+ 
+       {err && <ErrorBanner error={err} />}
+ 
++      <div style={{ marginBottom: 16 }}><DisclaimerCard /></div>
++
+       <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, alignItems: "start" }}>
+         <Card title="Categories" className="settings-cat-card">
+           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+diff --git a/amsl-frontend/src/pages/SupplierDetail.jsx b/amsl-frontend/src/pages/SupplierDetail.jsx
+index c7c7f73..def60d5 100644
+--- a/amsl-frontend/src/pages/SupplierDetail.jsx
++++ b/amsl-frontend/src/pages/SupplierDetail.jsx
+@@ -62,6 +62,7 @@ export default function SupplierDetail() {
+             <Card title="Overview">
+               <Row k="Supplier Role" v={s.supplier_role} /><Row k="TPI Role" v={s.tpi_role} />
+               <Row k="Fuel Mix" v={s.fuel_mix} /><Row k="Status" v={s.status} />
++              <Row k="Agent ID" v={s.contract_agent_id} />
+               <Row k="Max Broker Comm — Elec" v={s.max_broker_comm_electric != null ? `${s.max_broker_comm_electric}p` : null} />
+               <Row k="Max Broker Comm — Gas" v={s.max_broker_comm_gas != null ? `${s.max_broker_comm_gas}p` : null} />
+             </Card>
+@@ -158,6 +159,7 @@ function EditSupplier({ supplier: sp, onClose, onSaved }) {
+     ind_name: sp.ind_name || "", ind_email: sp.ind_email || "", ind_password: "", ind_mobile: sp.ind_mobile || "", ind_landline: sp.ind_landline || "", ind_threshold: sp.ind_threshold ?? "",
+     contract_condition: sp.contract_condition || "", credit_check: sp.credit_check || "", commission_payment: sp.commission_payment || "", customer_billing: sp.customer_billing || "",
+     supplier_contact: sp.supplier_contact || "", supplier_address: sp.supplier_address || "", restricted_business_types: sp.restricted_business_types || "", about: sp.about || "",
++    contract_agent_id: sp.contract_agent_id || "",
+   });
+   const [err, setErr] = useState(null);
+   const [saving, setSaving] = useState(false);
+@@ -190,6 +192,7 @@ function EditSupplier({ supplier: sp, onClose, onSaved }) {
+         <Field label="Max Broker Comm — Elec (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_electric} onChange={set("max_broker_comm_electric")} /></Field>
+         <Field label="Max Broker Comm — Gas (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_gas} onChange={set("max_broker_comm_gas")} /></Field>
+         <Field label="Supplier Status"><select value={f.status} onChange={set("status")}><option>Active</option><option>Inactive</option></select></Field>
++        <Field label="Agent ID"><input value={f.contract_agent_id} onChange={set("contract_agent_id")} placeholder="This supplier's Agent ID for us" /></Field>
+       </Section>
+       <Section title="SME TPI Contact">
+         <Field label="SME Email"><input type="email" value={f.sme_email} onChange={set("sme_email")} /></Field>
+diff --git a/amsl-frontend/src/pages/Suppliers.jsx b/amsl-frontend/src/pages/Suppliers.jsx
+index 51896ff..d726fda 100644
+--- a/amsl-frontend/src/pages/Suppliers.jsx
++++ b/amsl-frontend/src/pages/Suppliers.jsx
+@@ -84,7 +84,7 @@ function AddSupplier({ onClose, onSaved }) {
+     mm_name: "", mm_email: "", mm_password: "", mm_mobile: "", mm_landline: "", mm_threshold: "",
+     ind_name: "", ind_email: "", ind_password: "", ind_mobile: "", ind_landline: "", ind_threshold: "",
+     contract_condition: "", credit_check: "", commission_payment: "", customer_billing: "",
+-    supplier_contact: "", supplier_address: "", restricted_business_types: "", about: "",
++    supplier_contact: "", supplier_address: "", restricted_business_types: "", about: "", contract_agent_id: "",
+   });
+   const [err, setErr] = useState(null);
+   const [saving, setSaving] = useState(false);
+@@ -117,6 +117,7 @@ function AddSupplier({ onClose, onSaved }) {
+         <Field label="Max Broker Comm — Elec (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_electric} onChange={set("max_broker_comm_electric")} /></Field>
+         <Field label="Max Broker Comm — Gas (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_gas} onChange={set("max_broker_comm_gas")} /></Field>
+         <Field label="Supplier Status"><select value={f.status} onChange={set("status")}><option>Active</option><option>Inactive</option></select></Field>
++        <Field label="Agent ID"><input value={f.contract_agent_id} onChange={set("contract_agent_id")} placeholder="This supplier's Agent ID for us" /></Field>
+       </Section>
+       <Section title="SME TPI Contact">
+         <Field label="SME Email"><input type="email" value={f.sme_email} onChange={set("sme_email")} /></Field>
+@@ -154,7 +155,7 @@ function AddSupplier({ onClose, onSaved }) {
+       </Section>
+       <Field label="Supplier Address"><textarea value={f.supplier_address} onChange={set("supplier_address")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
+       <Field label="About Supplier"><textarea value={f.about} onChange={set("about")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
+-      <p className="sub" style={{ fontSize: 11, marginTop: 4 }}>Logo upload is available on the supplier record after creation.</p>
++      <p className="sub" style={{ fontSize: 11, marginTop: 4 }}>Logo upload is available on the supplier record after creation. Agent ID is published automatically on every contract generated for this supplier.</p>
+     </Modal>
+   );
+ }
+diff --git a/amsl-frontend/src/styles.css b/amsl-frontend/src/styles.css
+index 153f10c..2afcf27 100644
+--- a/amsl-frontend/src/styles.css
++++ b/amsl-frontend/src/styles.css
+@@ -161,6 +161,12 @@ table.tbl tr:hover td { background: var(--slate-50); }
+ table.tbl td .name { font-weight: 600; color: var(--slate-700); }
+ .mono { font-variant-numeric: tabular-nums; color: var(--slate-500); font-size: 12px; }
+ 
++/* Frozen column — stays visible while the table scrolls horizontally underneath it.
++   Needs an explicit background (matching .card's white) since sticky cells sit above
++   the cells scrolling past behind them. */
++table.tbl th.frozen-col, table.tbl td.frozen-col { position: sticky; left: 0; z-index: 1; background: #fff; box-shadow: 1px 0 0 var(--slate-200); }
++table.tbl tr:hover td.frozen-col { background: var(--slate-50); }
++
+ .pager { display: flex; align-items: center; justify-content: space-between; padding: 12px 4px 0; color: var(--slate-400); font-size: 12px; }
+ .pager .btns { display: flex; gap: 6px; }
+ 
+@@ -197,5 +203,6 @@ table.tbl td .name { font-weight: 600; color: var(--slate-700); }
+ .state { padding: 48px 20px; text-align: center; color: var(--slate-400); }
+ .spinner { width: 22px; height: 22px; border: 3px solid var(--slate-200); border-top-color: var(--indigo); border-radius: 50%; animation: spin 0.7s linear infinite; margin: 0 auto 10px; }
+ @keyframes spin { to { transform: rotate(360deg); } }
++.spin { display: inline-block; animation: spin 0.8s linear infinite; }
+ .error-banner { background: #fff1f2; border: 1px solid #fecdd3; color: #be123c; border-radius: 12px; padding: 12px 14px; font-size: 13px; }
+ .footer-note { text-align: center; color: var(--slate-400); font-size: 11px; padding-bottom: 8px; }

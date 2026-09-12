@@ -84,7 +84,7 @@ function AddSupplier({ onClose, onSaved }) {
     mm_name: "", mm_email: "", mm_password: "", mm_mobile: "", mm_landline: "", mm_threshold: "",
     ind_name: "", ind_email: "", ind_password: "", ind_mobile: "", ind_landline: "", ind_threshold: "",
     contract_condition: "", credit_check: "", commission_payment: "", customer_billing: "",
-    supplier_contact: "", supplier_address: "", restricted_business_types: "", about: "",
+    supplier_contact: "", supplier_address: "", restricted_business_types: "", about: "", contract_agent_id: "",
   });
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -117,6 +117,7 @@ function AddSupplier({ onClose, onSaved }) {
         <Field label="Max Broker Comm — Elec (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_electric} onChange={set("max_broker_comm_electric")} /></Field>
         <Field label="Max Broker Comm — Gas (p/kWh)"><input type="number" step="0.01" value={f.max_broker_comm_gas} onChange={set("max_broker_comm_gas")} /></Field>
         <Field label="Supplier Status"><select value={f.status} onChange={set("status")}><option>Active</option><option>Inactive</option></select></Field>
+        <Field label="Agent ID"><input value={f.contract_agent_id} onChange={set("contract_agent_id")} placeholder="This supplier's Agent ID for us" /></Field>
       </Section>
       <Section title="SME TPI Contact">
         <Field label="SME Email"><input type="email" value={f.sme_email} onChange={set("sme_email")} /></Field>
@@ -154,7 +155,7 @@ function AddSupplier({ onClose, onSaved }) {
       </Section>
       <Field label="Supplier Address"><textarea value={f.supplier_address} onChange={set("supplier_address")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
       <Field label="About Supplier"><textarea value={f.about} onChange={set("about")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
-      <p className="sub" style={{ fontSize: 11, marginTop: 4 }}>Logo upload is available on the supplier record after creation.</p>
+      <p className="sub" style={{ fontSize: 11, marginTop: 4 }}>Logo upload is available on the supplier record after creation. Agent ID is published automatically on every contract generated for this supplier.</p>
     </Modal>
   );
 }

@@ -161,6 +161,12 @@ table.tbl tr:hover td { background: var(--slate-50); }
 table.tbl td .name { font-weight: 600; color: var(--slate-700); }
 .mono { font-variant-numeric: tabular-nums; color: var(--slate-500); font-size: 12px; }
 
+/* Frozen column — stays visible while the table scrolls horizontally underneath it.
+   Needs an explicit background (matching .card's white) since sticky cells sit above
+   the cells scrolling past behind them. */
+table.tbl th.frozen-col, table.tbl td.frozen-col { position: sticky; left: 0; z-index: 1; background: #fff; box-shadow: 1px 0 0 var(--slate-200); }
+table.tbl tr:hover td.frozen-col { background: var(--slate-50); }
+
 .pager { display: flex; align-items: center; justify-content: space-between; padding: 12px 4px 0; color: var(--slate-400); font-size: 12px; }
 .pager .btns { display: flex; gap: 6px; }
 
@@ -197,5 +203,6 @@ table.tbl td .name { font-weight: 600; color: var(--slate-700); }
 .state { padding: 48px 20px; text-align: center; color: var(--slate-400); }
 .spinner { width: 22px; height: 22px; border: 3px solid var(--slate-200); border-top-color: var(--indigo); border-radius: 50%; animation: spin 0.7s linear infinite; margin: 0 auto 10px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spin { display: inline-block; animation: spin 0.8s linear infinite; }
 .error-banner { background: #fff1f2; border: 1px solid #fecdd3; color: #be123c; border-radius: 12px; padding: 12px 14px; font-size: 13px; }
 .footer-note { text-align: center; color: var(--slate-400); font-size: 11px; padding-bottom: 8px; }

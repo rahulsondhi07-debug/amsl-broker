@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { db } from "../db.js";
 import { crudRouter } from "../crud.js";
+import { compare } from "./comparison.js";
 
 /* ---- Agencies (with agent counts, like the UI) ---- */
 export const agencies = crudRouter({
@@ -39,7 +40,8 @@ export const suppliers = crudRouter({
             "restricted_business_types", "about",
             "sme_email", "sme_mobile", "sme_landline", "sme_password", "sme_threshold", "corporate_login_email",
             "mm_name", "mm_email", "mm_password", "mm_mobile", "mm_landline", "mm_threshold",
-            "ind_name", "ind_email", "ind_password", "ind_mobile", "ind_landline", "ind_threshold"],
+            "ind_name", "ind_email", "ind_password", "ind_mobile", "ind_landline", "ind_threshold",
+            "contract_agent_id"],
   searchColumns: ["name", "supplier_role"],
   listSql: `SELECT id, name, logo, status, supplier_role, tpi_role, fuel_mix,
                    max_broker_comm_electric, max_broker_comm_gas, sme_threshold, mm_threshold, ind_threshold,
@@ -76,9 +78,10 @@ export const products = (() => {
   r.post("/:id/price-matrix", (req, res) => {
     const b = req.body;
     const info = db.prepare(
-      `INSERT INTO price_matrix (product_id,min_consumption,max_consumption,term_months,unit_rate,standing_charge,commission)
-       VALUES (?,?,?,?,?,?,?)`
-    ).run(req.params.id, b.min_consumption, b.max_consumption, b.term_months, b.unit_rate, b.standing_charge, b.commission);
+      `INSERT INTO price_matrix (product_id,min_consumption,max_consumption,term_months,unit_rate,standing_charge,commission,dist_id,profile,meter_type)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    ).run(req.params.id, b.min_consumption, b.max_consumption, b.term_months, b.unit_rate, b.standing_charge, b.commission,
+      b.dist_id ?? null, b.profile ?? null, b.meter_type ?? null);
     res.status(201).json({ data: db.prepare("SELECT * FROM price_matrix WHERE id = ?").get(info.lastInsertRowid) });
   });
   // Bulk import for real supplier flat files (thousands of rows in one request/transaction —
@@ -247,11 +250,57 @@ export const quotes = crudRouter({
   table: "quotes",
   columns: ["quote_no","business_id","business_name","agent_id","utility","meter_number","eac","start_date",
             "supplier_id","term_months","unit_rate","standing_charge","annual_cost","commission","status",
-            "bespoke","meter_point","meter_details","distribution_charge","transmission_charge","product_name","acq_renewal","business_type"],
+            "bespoke","meter_point","meter_details","distribution_charge","transmission_charge","product_name",
+            "acq_renewal","business_type","topline","uplift"],
   searchColumns: ["quote_no","business_name","meter_number"],
   listSql: `SELECT q.*, a.name AS broker, s.name AS supplier_name
             FROM quotes q LEFT JOIN agents a ON a.id = q.agent_id
             LEFT JOIN suppliers s ON s.id = q.supplier_id`,
+  // V1.7-11: every quote starts with one Price History row (the price it was created at),
+  // valid until a refresh supersedes it.
+  onCreate: (row) => {
+    db.prepare(`INSERT INTO quote_price_history
+      (quote_id, unit_rate, standing_charge, annual_cost, commission, term_months, supplier_id, valid, source)
+      VALUES (?,?,?,?,?,?,?,1,'created')`)
+      .run(row.id, row.unit_rate, row.standing_charge, row.annual_cost, row.commission, row.term_months, row.supplier_id);
+  },
+});
+
+/* ---- Quote Price History (V1.7-11) ---- */
+quotes.get("/:id/price-history", (req, res) => {
+  const rows = db.prepare(`SELECT * FROM quote_price_history WHERE quote_id=? ORDER BY created_at DESC, id DESC`).all(req.params.id);
+  res.json({ data: rows });
+});
+
+// Re-price a quote against the current market and record the outcome in Price History.
+// Bespoke quotes are hand-priced (not sourced from a supplier price book) and have
+// nothing to refresh against, so they're excluded.
+quotes.post("/:id/refresh-price", (req, res) => {
+  const q = db.prepare("SELECT * FROM quotes WHERE id=?").get(req.params.id);
+  if (!q) return res.status(404).json({ error: "quote not found" });
+  if (Number(q.bespoke)) return res.status(400).json({ error: "Bespoke quotes are priced manually and can't be refreshed against the market." });
+  if (!q.supplier_id || !q.eac) return res.status(400).json({ error: "This quote is missing the utility/consumption/supplier needed to re-price it." });
+
+  const result = compare({
+    utility: q.utility, eac: q.eac, term: q.term_months, uplift: q.uplift ?? 1.0,
+    meter_number: q.meter_number, topline: q.topline,
+  });
+  const match = result.offers.find((o) => String(o.supplier_id) === String(q.supplier_id) && Number(o.term_months) === Number(q.term_months));
+  if (!match) {
+    return res.status(404).json({ error: "No current rate found for this supplier/term — the price book may have changed or been withdrawn since this quote was created." });
+  }
+
+  const changed = Number(match.unit_rate) !== Number(q.unit_rate) || Number(match.standing_charge) !== Number(q.standing_charge);
+  if (changed) {
+    db.prepare("UPDATE quote_price_history SET valid=0 WHERE quote_id=? AND valid=1").run(q.id);
+    db.prepare(`INSERT INTO quote_price_history
+      (quote_id, unit_rate, standing_charge, annual_cost, commission, term_months, supplier_id, valid, source)
+      VALUES (?,?,?,?,?,?,?,1,'refresh')`)
+      .run(q.id, match.unit_rate, match.standing_charge, match.annual_cost, match.total_commission, match.term_months, match.supplier_id);
+    db.prepare("UPDATE quotes SET unit_rate=?, standing_charge=?, annual_cost=?, commission=? WHERE id=?")
+      .run(match.unit_rate, match.standing_charge, match.annual_cost, match.total_commission, q.id);
+  }
+  res.json({ data: { changed, quote: db.prepare("SELECT * FROM quotes WHERE id=?").get(q.id) } });
 });
 
 /* ---- Contracts (with supplier/agency/agent names + filters) ---- */
@@ -269,10 +318,11 @@ export const contracts = (() => {
               "title","first_name","last_name","address_line1","address_line2","town","postcode","telephone","mobile","email",
               "billing_same","billing_title","billing_first_name","billing_last_name","billing_address1","billing_address2",
               "billing_town","billing_postcode","billing_telephone","billing_mobile","billing_email",
+              "site_same","site_address1","site_address2","site_town","site_postcode",
               "meter_serial","current_read","requested_start",
               "product_name","tariff_name","acq_renewal","tariff_type","supplier_start","tariff_end","supplier_end","fixed_price_term",
               "standing_charge","day_rate","night_rate","ewe_rate","kva_charge","broker_commission",
-              "payment_method","payment_amount","billing_period","tolerance_pct"],
+              "payment_method","payment_amount","billing_period","tolerance_pct","topline","supplier_agent_id"],
     searchColumns: ["contract_no","business_name","meter_mpan_mpr"],
     listSql: base,
   });
