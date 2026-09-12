@@ -70,6 +70,32 @@ export function Field({ label, children }) {
   );
 }
 
+// Shared "set / reset password" prompt for agents — used from the Agents list, an agent's
+// own detail page, and the Authorized Agents table on Agency Detail. Calls onSave(password)
+// and lets the caller decide the actual API call (agents store password_hash, never the
+// plain value, so callers should PUT { password } and let the backend hash it).
+export function SetPasswordModal({ title = "Set Password", onClose, onSave }) {
+  const [pw, setPw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    if (pw.length < 6) return setErr("Password must be at least 6 characters");
+    if (pw !== confirm) return setErr("Passwords don't match");
+    setSaving(true); setErr(null);
+    try { await onSave(pw); onClose(); }
+    catch (e) { setErr(e.message); setSaving(false); }
+  };
+  return (
+    <Modal title={title} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Password"}</button></>}>
+      {err && <ErrorBanner error={err} />}
+      <Field label="New Password"><input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus /></Field>
+      <Field label="Confirm Password"><input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} /></Field>
+    </Modal>
+  );
+}
+
 /* data hook: fetches a list resource with page/limit/search */
 export function useList(resource, { limit = 10, deps = [] } = {}) {
   const [state, setState] = useState({ data: [], meta: {}, loading: true, error: null });

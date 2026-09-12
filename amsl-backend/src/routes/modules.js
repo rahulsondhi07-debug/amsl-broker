@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "../db.js";
 import { crudRouter } from "../crud.js";
 import { compare } from "./comparison.js";
+import { hashPassword } from "./auth.js";
 
 /* ---- Agencies (with agent counts, like the UI) ---- */
 export const agencies = crudRouter({
@@ -13,22 +14,41 @@ export const agencies = crudRouter({
 });
 
 /* ---- Agents (never expose password_hash) ---- */
-export const agents = crudRouter({
+const AGENTS_SAFE_SELECT = `SELECT ag.id, ag.name, ag.agency_id, a.name AS agency_name, ag.email, ag.role, ag.status,
+                   ag.aircall_enabled, ag.first_name, ag.last_name, ag.trading_name, ag.principal_name,
+                   ag.business_structure, ag.trading_account_no, ag.vat_number, ag.agency_split, ag.agent_split,
+                   ag.telephone, ag.mobile, ag.office_website, ag.address_line1, ag.address_line2, ag.city,
+                   ag.county, ag.postcode, ag.bank_name, ag.account_name, ag.sort_code, ag.account_no,
+                   ag.training_status, ag.notes, ag.created_at, (ag.password_hash IS NOT NULL) AS has_password
+            FROM agents ag LEFT JOIN agencies a ON a.id = ag.agency_id`;
+
+const agentsBase = crudRouter({
   table: "agents",
   columns: ["name", "agency_id", "email", "role", "status", "aircall_enabled",
             "first_name", "last_name", "trading_name", "principal_name", "business_structure",
             "trading_account_no", "vat_number", "agency_split", "agent_split", "telephone", "mobile",
             "office_website", "address_line1", "address_line2", "city", "county", "postcode",
-            "bank_name", "account_name", "sort_code", "account_no", "training_status", "notes"],
+            "bank_name", "account_name", "sort_code", "account_no", "training_status", "notes",
+            "password_hash"],
   searchColumns: ["name", "email"],
-  listSql: `SELECT ag.id, ag.name, ag.agency_id, a.name AS agency_name, ag.email, ag.role, ag.status,
-                   ag.aircall_enabled, ag.first_name, ag.last_name, ag.trading_name, ag.principal_name,
-                   ag.business_structure, ag.trading_account_no, ag.vat_number, ag.agency_split, ag.agent_split,
-                   ag.telephone, ag.mobile, ag.office_website, ag.address_line1, ag.address_line2, ag.city,
-                   ag.county, ag.postcode, ag.bank_name, ag.account_name, ag.sort_code, ag.account_no,
-                   ag.training_status, ag.notes, ag.created_at
-            FROM agents ag LEFT JOIN agencies a ON a.id = ag.agency_id`,
+  listSql: AGENTS_SAFE_SELECT,
+  detailSql: AGENTS_SAFE_SELECT,
 });
+
+// Bug fix: "Add Agent" and any password reset send a plain `password` field, but the
+// agents table only ever stores `password_hash` — without this, the password was silently
+// dropped on create (not in the writable column list above), meaning a newly created agent
+// had no password at all and could never log in. This hashes it before it reaches the
+// generic CRUD handlers, on both create and update (password reset).
+export const agents = Router();
+agents.use((req, res, next) => {
+  if (req.body && typeof req.body.password === "string" && req.body.password) {
+    req.body.password_hash = hashPassword(req.body.password);
+  }
+  delete req.body?.password;
+  next();
+});
+agents.use(agentsBase);
 
 /* ---- Suppliers ---- */
 export const suppliers = crudRouter({

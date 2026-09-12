@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Plus } from "lucide-react";
+import { useParams, useNavigate, Link } from "react-router-dom";
+import { ArrowLeft, Plus, Eye, KeyRound, Trash2 } from "lucide-react";
 import { api } from "../api.js";
-import { Card, Badge, Spinner, ErrorBanner, initials } from "../components/ui.jsx";
+import { Card, Badge, Spinner, ErrorBanner, initials, SetPasswordModal } from "../components/ui.jsx";
 
 function Row({ k, v }) {
   return (
@@ -18,11 +18,25 @@ export default function AgencyDetail() {
   const [a, setA] = useState(null);
   const [agents, setAgents] = useState([]);
   const [err, setErr] = useState(null);
+  const [pwFor, setPwFor] = useState(null); // agent row currently setting a password for
+
+  const loadAgents = () => api.list("agents", { limit: 500 }).then((r) => setAgents(r.data.filter((x) => String(x.agency_id) === String(id)))).catch(() => {});
 
   useEffect(() => {
     api.get(`/agencies/${id}`).then((r) => setA(r.data)).catch((e) => setErr(e.message));
-    api.list("agents", { limit: 500 }).then((r) => setAgents(r.data.filter((x) => String(x.agency_id) === String(id)))).catch(() => {});
-  }, [id]);
+    loadAgents();
+  }, [id]); // eslint-disable-line
+
+  const toggleAgentStatus = async (ag) => {
+    const next = ag.status === "Active" ? "Inactive" : "Active";
+    await api.put(`/agents/${ag.id}`, { status: next });
+    loadAgents();
+  };
+  const deleteAgent = async (ag) => {
+    if (!confirm(`Remove agent "${ag.name}" from this agency? This can't be undone.`)) return;
+    try { await api.delete(`/agents/${ag.id}`); loadAgents(); }
+    catch (e) { alert(e.message); }
+  };
 
   if (err) return <ErrorBanner error={err} />;
   if (!a) return <Spinner />;
@@ -57,14 +71,26 @@ export default function AgencyDetail() {
         <Card title={`Authorized Agents (${agents.length})`} right={<button className="btn ghost sm" onClick={() => nav("/agents")}><Plus size={13} /> Add Agent</button>}>
           {agents.length === 0 ? <div className="sub">No agents in this agency yet.</div> : (
             <table className="tbl">
-              <thead><tr><th>Agent</th><th>Email</th><th>Role</th><th>Status</th></tr></thead>
+              <thead><tr><th>Agent</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 {agents.map((ag) => (
                   <tr key={ag.id}>
                     <td style={{ fontWeight: 600 }}>{ag.name}</td>
                     <td className="mono" style={{ fontSize: 12 }}>{ag.email}</td>
                     <td><Badge tone={ag.role === "Super User" ? "green" : "slate"}>{ag.role}</Badge></td>
-                    <td><Badge tone="green">{ag.status}</Badge></td>
+                    <td>
+                      <label style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }} title="Click to toggle status">
+                        <input type="checkbox" checked={ag.status === "Active"} onChange={() => toggleAgentStatus(ag)} style={{ display: "none" }} />
+                        <span style={{ width: 34, height: 18, borderRadius: 999, position: "relative", transition: "background .15s", background: ag.status === "Active" ? "var(--indigo,#4F46E5)" : "#CBD5E1" }}>
+                          <span style={{ position: "absolute", top: 2, left: ag.status === "Active" ? 18 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+                        </span>
+                      </label>
+                    </td>
+                    <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <Link className="btn ghost sm" to={`/agents/${ag.id}`} title="View agent"><Eye size={13} /></Link>
+                      <button className="btn ghost sm" title="Set password" onClick={() => setPwFor(ag)}><KeyRound size={13} /></button>
+                      <button className="btn ghost sm" title="Delete agent" onClick={() => deleteAgent(ag)}><Trash2 size={13} /></button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -72,6 +98,11 @@ export default function AgencyDetail() {
           )}
         </Card>
       </div>
+
+      {pwFor && (
+        <SetPasswordModal title={`Set Password — ${pwFor.name}`} onClose={() => setPwFor(null)}
+          onSave={(password) => api.put(`/agents/${pwFor.id}`, { password })} />
+      )}
     </>
   );
 }

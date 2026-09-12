@@ -3,7 +3,8 @@ import crypto from "crypto";
 import { db } from "../db.js";
 
 const r = Router();
-const hash = (pw) => crypto.createHash("sha256").update(pw).digest("hex");
+export const hashPassword = (pw) => crypto.createHash("sha256").update(pw).digest("hex");
+const hash = hashPassword;
 
 // Demo login: validates email + password against the agents table.
 // NOTE: returns a stub token only. Swap sha256 for bcrypt and issue a real JWT

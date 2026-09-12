@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
-import { Plus, Eye } from "lucide-react";
+import { Plus, Eye, KeyRound, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
-import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field, initials } from "../components/ui.jsx";
+import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field, initials, SetPasswordModal } from "../components/ui.jsx";
 
 const STRUCTURES = ["Charity", "Government Funded", "LLP", "LTD", "Non-profit Making", "Partnership", "PLC", "Property Manager", "Private Limited Company", "Religious Institute", "Sole Trader", "Trust"];
 const TRAINING = ["Industry Trained", "GDPR Compliant", "System Trained"];
@@ -10,6 +10,19 @@ const TRAINING = ["Industry Trained", "GDPR Compliant", "System Trained"];
 export default function Agents() {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList("agents", { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
+  const [pwFor, setPwFor] = useState(null);
+
+  const toggleStatus = async (r) => {
+    const next = r.status === "Active" ? "Inactive" : "Active";
+    await api.put(`/agents/${r.id}`, { status: next });
+    reload();
+  };
+  const del = async (r) => {
+    if (!confirm(`Delete agent "${r.name}"? This can't be undone.`)) return;
+    try { await api.delete(`/agents/${r.id}`); reload(); }
+    catch (e) { alert(e.message); }
+  };
+
   return (
     <>
       <div className="page-head">
@@ -33,8 +46,19 @@ export default function Agents() {
                     <td><Badge tone={r.role === "Admin" ? "indigo" : r.role === "Super User" ? "green" : "slate"}>{r.role}</Badge></td>
                     <td className="mono" style={{ fontSize: 12 }}>{r.agent_split != null ? `${r.agent_split}%` : "—"}</td>
                     <td>{r.aircall_enabled ? <Badge tone="green">On</Badge> : <Badge tone="slate">Off</Badge>}</td>
-                    <td><Badge tone="green">{r.status}</Badge></td>
-                    <td><Link className="btn ghost sm" to={`/agents/${r.id}`} title="View agent"><Eye size={14} /> View</Link></td>
+                    <td>
+                      <label style={{ display: "inline-flex", alignItems: "center", cursor: "pointer" }} title="Click to toggle status">
+                        <input type="checkbox" checked={r.status === "Active"} onChange={() => toggleStatus(r)} style={{ display: "none" }} />
+                        <span style={{ width: 34, height: 18, borderRadius: 999, position: "relative", transition: "background .15s", background: r.status === "Active" ? "var(--indigo,#4F46E5)" : "#CBD5E1" }}>
+                          <span style={{ position: "absolute", top: 2, left: r.status === "Active" ? 18 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .15s" }} />
+                        </span>
+                      </label>
+                    </td>
+                    <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <Link className="btn ghost sm" to={`/agents/${r.id}`} title="View agent"><Eye size={14} /></Link>
+                      <button className="btn ghost sm" title="Set password" onClick={() => setPwFor(r)}><KeyRound size={13} /></button>
+                      <button className="btn ghost sm" title="Delete agent" onClick={() => del(r)}><Trash2 size={13} /></button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -44,6 +68,10 @@ export default function Agents() {
         {meta && meta.pages > 1 && <Pager meta={meta} page={page} setPage={setPage} />}
       </Card>
       {showAdd && <AddAgent onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); reload(); }} />}
+      {pwFor && (
+        <SetPasswordModal title={`Set Password — ${pwFor.name}`} onClose={() => setPwFor(null)}
+          onSave={(password) => api.put(`/agents/${pwFor.id}`, { password }).then(reload)} />
+      )}
     </>
   );
 }
