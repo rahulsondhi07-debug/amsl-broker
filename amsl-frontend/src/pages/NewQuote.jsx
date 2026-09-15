@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Zap, Flame, Search, Trophy, Check } from "lucide-react";
+import { ArrowLeft, Zap, Flame, Search, Trophy, Check, Leaf } from "lucide-react";
 import { api } from "../api.js";
 import { Card, Field, ErrorBanner, Badge, Spinner, Modal } from "../components/ui.jsx";
 
 const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Same list as the Products "Payment Method" dropdown, kept in sync.
+const PAY_METHODS = ["Cash/Cheque/Bacs", "Fixed DD", "Quarterly DD", "Variable DD", "Monthly DD", "DD and Non DD", "Monthly Fixed DD", "Quarterly Fixed DD"];
 
 export default function NewQuote() {
   const nav = useNavigate();
@@ -13,6 +15,30 @@ export default function NewQuote() {
   const [sites, setSites] = useState([]);
   const [meters, setMeters] = useState([]);
   const [bespoke, setBespoke] = useState(false);
+  // Three pricing routes: fixed market comparison, hand-keyed bespoke, or a flexible
+  // (non-fixed) purchasing enquiry. `bespoke` is derived so the existing bespoke logic
+  // below keeps working unchanged.
+  const [mode, setMode] = useState("market");
+  useEffect(() => { setBespoke(mode === "bespoke"); }, [mode]);
+  const [ff, setFfState] = useState({
+    annual_volume: "", sites_count: "", contract_start: "", contract_length: "",
+    purchasing_strategy: "", basket_type: "", tranche_count: "", index_reference: "",
+    risk_appetite: "", volume_tolerance: "", management_fee: "", target_supplier_id: "", notes: "",
+  });
+  const setFf = (k) => (e) => setFfState((p) => ({ ...p, [k]: e.target.value }));
+  const [fuelFilter, setFuelFilter] = useState("");      // "" | Green | Brown | Mix
+  const [paymentFilter, setPaymentFilter] = useState(""); // "" or one of PAY_METHODS
+  const [nightPct, setNightPct] = useState("");           // % of consumption on the night rate
+  const [flexCfg, setFlexCfg] = useState({});
+  useEffect(() => {
+    api.configLookups().then((cfg) => {
+      const pick = {};
+      for (const c of ["Flex Purchasing Strategy", "Flex Basket Type", "Flex Index Reference"]) {
+        pick[c] = (cfg.data[c] || []).map((x) => x.value);
+      }
+      setFlexCfg(pick);
+    }).catch(() => {});
+  }, []);
   const [bf, setBf] = useState({ meter_point: "", meter_details: "", supplier_id: "", product_name: "", unit_rate: "", standing_charge: "", distribution_charge: "", transmission_charge: "", term: "24" });
   const [suppliers, setSuppliers] = useState([]);
   const setB = (k) => (e) => setBf({ ...bf, [k]: e.target.value });
@@ -75,6 +101,31 @@ export default function NewQuote() {
     api.pipelineMeters(form.business_id, utilKey).then((r) => setMeters(r.data.filter((m) => String(m.site_id) === form.site_id))).catch(() => setMeters([]));
   }, [form.utility]); // eslint-disable-line
 
+  const saveFlex = async () => {
+    if (!ff.annual_volume || Number(ff.annual_volume) <= 0) return setErr("Annual volume (kWh) is required for a flex request");
+    setSaving("flex"); setErr(null);
+    const chosen = businesses.find((b) => String(b.id) === String(form.business_id));
+    const num = (v) => (v === "" || v == null ? null : Number(v));
+    try {
+      const { data } = await api.flexCreate({
+        business_id: form.business_id || null,
+        business_name: chosen?.business_name || form.business_name || null,
+        utility: form.utility, meter_number: form.meter_number || null,
+        annual_volume: Number(ff.annual_volume), sites_count: num(ff.sites_count),
+        contract_start: ff.contract_start || form.start_date || null,
+        contract_length: num(ff.contract_length),
+        basket_type: ff.basket_type || null, purchasing_strategy: ff.purchasing_strategy || null,
+        tranche_count: num(ff.tranche_count), index_reference: ff.index_reference || null,
+        risk_appetite: ff.risk_appetite || null, volume_tolerance: ff.volume_tolerance || null,
+        management_fee: num(ff.management_fee),
+        target_supplier_id: ff.target_supplier_id || null,
+        status: "Requested", notes: ff.notes || null,
+      });
+      setSaved({ quote_no: data.ref, supplier: data.target_supplier_name || "supplier to be sourced" });
+    } catch (e) { setErr(e.message); }
+    setSaving(null);
+  };
+
   const saveBespoke = async () => {
     if (!bf.meter_point) return setErr("Enter the meter point (MPAN/MPRN) for the bespoke quote");
     if (!bf.supplier_id) return setErr("Select a supplier for the bespoke quote");
@@ -126,6 +177,7 @@ export default function NewQuote() {
         current_supplier_id: form.current_supplier_id || undefined,
         meter_number: form.meter_number || undefined,
         topline: form.topline || undefined,
+        night_pct: nightPct === "" ? undefined : Number(nightPct),
       });
       setResult(data);
     } catch (e) { setErr(e.message); }
@@ -166,8 +218,9 @@ export default function NewQuote() {
       <Card title="Quote Parameters" right={<button className="btn ghost sm" onClick={() => nav("/tariffs")}>Manage tariffs →</button>}>
         {err && <ErrorBanner error={err} />}
         <div className="toggle" style={{ marginBottom: 14 }}>
-          <button className={!bespoke ? "active" : ""} onClick={() => setBespoke(false)}>Market Comparison</button>
-          <button className={bespoke ? "active" : ""} onClick={() => setBespoke(true)}>Bespoke Pricing</button>
+          <button className={mode === "market" ? "active" : ""} onClick={() => setMode("market")}>Market Comparison</button>
+          <button className={mode === "bespoke" ? "active" : ""} onClick={() => setMode("bespoke")}>Bespoke Pricing</button>
+          <button className={mode === "flex" ? "active" : ""} onClick={() => setMode("flex")}>Flex Request</button>
         </div>
         <div className="grid cols-3" style={{ gap: 14 }}>
           <Field label="Utility *">
@@ -259,10 +312,67 @@ export default function NewQuote() {
             </div>
           </div>
         )}
+        {mode === "flex" && (
+          <div style={{ marginTop: 8, paddingTop: 14, borderTop: "1px solid var(--line,#EEF1F4)" }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Flexible Purchasing Request</div>
+            <div className="sub" style={{ fontSize: 11.5, marginBottom: 10 }}>
+              Flex contracts aren't priced from a matrix — volume is bought in tranches against the wholesale market.
+              This logs the customer's requirements as an enquiry to take to suppliers/trading desks.
+            </div>
+            <div className="grid cols-3" style={{ gap: 14 }}>
+              <Field label="Annual Volume (kWh) *"><input type="number" value={ff.annual_volume} onChange={setFf("annual_volume")} placeholder="e.g. 5000000" /></Field>
+              <Field label="Number of Sites"><input type="number" value={ff.sites_count} onChange={setFf("sites_count")} /></Field>
+              <Field label="Contract Start"><input type="date" value={ff.contract_start} onChange={setFf("contract_start")} /></Field>
+              <Field label="Contract Length (months)">
+                <select value={ff.contract_length} onChange={setFf("contract_length")}>
+                  <option value="">—</option><option value="12">12</option><option value="24">24</option>
+                  <option value="36">36</option><option value="48">48</option><option value="60">60</option>
+                </select>
+              </Field>
+              <Field label="Purchasing Strategy">
+                <select value={ff.purchasing_strategy} onChange={setFf("purchasing_strategy")}>
+                  <option value="">Select…</option>
+                  {(flexCfg["Flex Purchasing Strategy"] || []).map((v) => <option key={v}>{v}</option>)}
+                </select>
+              </Field>
+              <Field label="Basket Type">
+                <select value={ff.basket_type} onChange={setFf("basket_type")}>
+                  <option value="">Select…</option>
+                  {(flexCfg["Flex Basket Type"] || []).map((v) => <option key={v}>{v}</option>)}
+                </select>
+              </Field>
+              <Field label="Number of Tranches"><input type="number" value={ff.tranche_count} onChange={setFf("tranche_count")} placeholder="e.g. 8" /></Field>
+              <Field label="Index Reference">
+                <select value={ff.index_reference} onChange={setFf("index_reference")}>
+                  <option value="">Select…</option>
+                  {(flexCfg["Flex Index Reference"] || []).map((v) => <option key={v}>{v}</option>)}
+                </select>
+              </Field>
+              <Field label="Risk Appetite">
+                <select value={ff.risk_appetite} onChange={setFf("risk_appetite")}>
+                  <option value="">Select…</option><option>Low</option><option>Medium</option><option>High</option>
+                </select>
+              </Field>
+              <Field label="Volume Tolerance"><input value={ff.volume_tolerance} onChange={setFf("volume_tolerance")} placeholder="e.g. +/- 20%" /></Field>
+              <Field label="Management Fee (p/kWh)"><input type="number" step="0.01" value={ff.management_fee} onChange={setFf("management_fee")} /></Field>
+              <Field label="Target Supplier">
+                <select value={ff.target_supplier_id} onChange={setFf("target_supplier_id")}>
+                  <option value="">Any / to be sourced</option>
+                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <Field label="Notes"><textarea value={ff.notes} onChange={setFf("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
+          </div>
+        )}
         <div style={{ marginTop: 16 }}>
-          {bespoke ? (
+          {mode === "bespoke" ? (
             <button className="btn primary" onClick={saveBespoke} disabled={saving === "bespoke"}>
               <Search size={15} /> {saving === "bespoke" ? "Saving…" : "Save Bespoke Quote"}
+            </button>
+          ) : mode === "flex" ? (
+            <button className="btn primary" onClick={saveFlex} disabled={saving === "flex"}>
+              <Search size={15} /> {saving === "flex" ? "Saving…" : "Submit Flex Request"}
             </button>
           ) : (
             <button className="btn primary" onClick={runCompare} disabled={loading}>
@@ -308,6 +418,24 @@ export default function NewQuote() {
                   <option value="36">36 months</option>
                 </select>
               </Field>
+              <Field label="Energy Source">
+                <select value={fuelFilter} onChange={(e) => setFuelFilter(e.target.value)}>
+                  <option value="">All sources</option>
+                  <option value="Green">Green (renewable)</option>
+                  <option value="Brown">Brown (non-renewable)</option>
+                  <option value="Mix">Mix</option>
+                </select>
+              </Field>
+              <Field label="Payment Method">
+                <select value={paymentFilter} onChange={(e) => setPaymentFilter(e.target.value)}>
+                  <option value="">All payment methods</option>
+                  {PAY_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </Field>
+              <Field label="Night Usage (%)">
+                <input type="number" min="0" max="100" value={nightPct} placeholder="e.g. 40"
+                  onChange={(e) => setNightPct(e.target.value)} onBlur={runCompare} style={{ width: 120 }} />
+              </Field>
               <Field label="Broker Uplift (p/kWh)">
                 <input type="number" step="0.1" value={form.uplift} onChange={(e) => setForm({ ...form, uplift: e.target.value })} onBlur={runCompare} style={{ width: 120 }} />
               </Field>
@@ -317,12 +445,16 @@ export default function NewQuote() {
               <table className="tbl">
                 <thead>
                   <tr>
-                    <th>Rank</th><th>Supplier</th><th>Deal</th><th>Term</th><th>Unit Rate</th><th>Standing Charge</th>
+                    <th>Rank</th><th>Supplier</th><th>Deal</th><th>Term</th><th>Source</th><th>Payment</th><th>Unit Rate</th><th>Standing Charge</th>
                     <th>Annual Cost</th><th>Monthly</th><th>Your Commission</th><th></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.offers.filter((o) => !form.term || String(o.term_months) === String(form.term)).map((o) => {
+                  {result.offers
+                    .filter((o) => !form.term || String(o.term_months) === String(form.term))
+                    .filter((o) => !fuelFilter || o.fuel_mix === fuelFilter)
+                    .filter((o) => !paymentFilter || o.payment_method === paymentFilter)
+                    .map((o) => {
                     const key = o.supplier_id + "-" + o.term_months;
                     return (
                       <tr key={key} style={o.best ? { background: "#f5f3ff" } : {}}>
@@ -330,7 +462,14 @@ export default function NewQuote() {
                         <td><span className="mini"><span className="ini sq">{o.utility === "GAS" ? <Flame size={14} /> : <Zap size={14} />}</span><span className="name">{o.supplier}</span></span></td>
                         <td><Badge tone={o.deal_type === "Renewal" ? "indigo" : "slate"}>{o.deal_type}</Badge></td>
                         <td>{o.term_months} m</td>
-                        <td className="mono">{o.unit_rate}p</td>
+                        <td>{o.fuel_mix ? <Badge tone={o.fuel_mix === "Green" ? "green" : o.fuel_mix === "Brown" ? "amber" : "slate"}>{o.fuel_mix === "Green" && <Leaf size={11} style={{ verticalAlign: "-1px", marginRight: 2 }} />}{o.fuel_mix}</Badge> : <span className="sub">—</span>}</td>
+                        <td style={{ fontSize: 12 }}>{o.payment_method || <span className="sub">—</span>}</td>
+                        <td className="mono">
+                          {o.unit_rate}p
+                          {o.dual_rate && o.night_rate != null && (
+                            <div className="sub" style={{ fontSize: 10.5 }}>night {o.night_rate}p · {o.night_split_pct}%</div>
+                          )}
+                        </td>
                         <td className="mono">{o.standing_charge}p/d</td>
                         <td className="name">{money(o.annual_cost)}</td>
                         <td className="mono">{money(o.monthly_cost)}</td>

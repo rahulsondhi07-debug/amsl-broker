@@ -211,6 +211,15 @@ export function migrate() {
   addCol("ALTER TABLE businesses ADD COLUMN stage_updated_at TEXT");
   addCol("ALTER TABLE businesses ADD COLUMN frozen           INTEGER DEFAULT 0");
   // Agency detail fields (match production Add Agency form)
+  // Default payout settings per agency, so a payout form can pre-fill rather than
+  // re-keying wallet details every time (and mis-typing a crypto address).
+  addCol("ALTER TABLE agencies ADD COLUMN payout_method       TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN bank_account_name   TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN bank_sort_code      TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN bank_account_no     TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN crypto_currency     TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN crypto_network      TEXT");
+  addCol("ALTER TABLE agencies ADD COLUMN wallet_address      TEXT");
   addCol("ALTER TABLE agencies ADD COLUMN email              TEXT");
   addCol("ALTER TABLE agencies ADD COLUMN phone              TEXT");
   addCol("ALTER TABLE agencies ADD COLUMN website            TEXT");
@@ -375,6 +384,23 @@ export function migrate() {
       changed_by  TEXT,
       changed_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- Other Services: non-energy services tracked per business (Water, Waste, Card
+    -- Payment) — each with its own provider and contract end date, plus an optional
+    -- uploaded bill (xlsx/csv/pdf) stored inline as base64 since there's no separate file
+    -- storage in this app. Deliberately its own table rather than overloading meters,
+    -- since these aren't metered utilities with an MPAN/MPRN or EAC.
+    CREATE TABLE IF NOT EXISTS other_services (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id   INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      service_type  TEXT NOT NULL,   -- 'Water' | 'Waste' | 'Card Payment'
+      provider      TEXT,
+      contract_end  TEXT,
+      notes         TEXT,
+      bill_filename TEXT,
+      bill_mime     TEXT,
+      bill_data     TEXT,            -- base64-encoded file content
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS callbacks (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
@@ -477,6 +503,38 @@ export function migrate() {
       amount     REAL NOT NULL,
       note       TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- Agency payouts: what AMSL owes each agency once the supplier has actually paid us.
+    -- Separate from commission_records (what the supplier owes AMSL) because the two sides
+    -- settle independently — a supplier can pay us before we pay the agency, and the
+    -- payout can go out by a completely different method.
+    -- Cryptocurrency payouts capture the extra detail a bank transfer doesn't need: which
+    -- coin, which network (getting this wrong loses the funds), the destination wallet, the
+    -- GBP/crypto rate used at the time, and the on-chain transaction hash as the receipt.
+    CREATE TABLE IF NOT EXISTS agency_payouts (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      agency_id         INTEGER REFERENCES agencies(id) ON DELETE SET NULL,
+      record_id         INTEGER REFERENCES commission_records(id) ON DELETE SET NULL,
+      contract_id       INTEGER,
+      supplier_id       INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      gross_amount      REAL NOT NULL DEFAULT 0,
+      vat_amount        REAL NOT NULL DEFAULT 0,
+      net_amount        REAL NOT NULL DEFAULT 0,
+      currency          TEXT NOT NULL DEFAULT 'GBP',
+      payment_method    TEXT NOT NULL DEFAULT 'BACS',  -- BACS | Faster Payments | Cheque | Cryptocurrency ...
+      supplier_paid_on  TEXT,      -- when the supplier settled with us (gates the payout)
+      paid_on           TEXT,      -- when we paid the agency
+      status            TEXT NOT NULL DEFAULT 'Awaiting Supplier', -- Awaiting Supplier | Ready to Pay | Paid | Failed | On Hold
+      reference         TEXT,
+      -- crypto-only fields
+      crypto_currency   TEXT,      -- BTC | ETH | USDT | USDC ...
+      crypto_network    TEXT,      -- Bitcoin | Ethereum (ERC-20) | Tron (TRC-20) | Polygon ...
+      wallet_address    TEXT,
+      crypto_amount     REAL,      -- amount sent in the coin's own units
+      exchange_rate     REAL,      -- GBP per 1 unit of the coin at time of payment
+      tx_hash           TEXT,      -- on-chain transaction hash (the receipt)
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS commission_statements (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -598,6 +656,97 @@ export function migrate() {
       msid                   TEXT NOT NULL,
       proportion_exempt_pct  REAL NOT NULL DEFAULT 100
     );
+    -- Flexible (flex) purchasing requests. Unlike a fixed-price quote, flex contracts
+    -- aren't priced from a matrix — the customer buys volume in tranches against the
+    -- wholesale market, so this is an enquiry routed to suppliers/trading desks rather
+    -- than an instantly-priced offer. Hence its own table rather than a row in quotes.
+    CREATE TABLE IF NOT EXISTS flex_requests (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      ref                 TEXT,
+      business_id         INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+      business_name       TEXT,
+      utility             TEXT NOT NULL,          -- Electricity | Gas
+      meter_number        TEXT,
+      annual_volume       REAL,                   -- total annual consumption, kWh
+      sites_count         INTEGER,
+      contract_start      TEXT,
+      contract_length     INTEGER,                -- months
+      basket_type         TEXT,                   -- Individual | Flexi Basket / Pooled
+      purchasing_strategy TEXT,                   -- Fully Flexible | Structured / Tranche | Risk Managed
+      tranche_count       INTEGER,
+      index_reference     TEXT,                   -- Day Ahead | Month Ahead | Season Ahead | Quarterly
+      risk_appetite       TEXT,                   -- Low | Medium | High
+      volume_tolerance    TEXT,                   -- e.g. '+/- 20%'
+      management_fee      REAL,                   -- p/kWh
+      target_supplier_id  INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      status              TEXT NOT NULL DEFAULT 'Requested', -- Requested | Sent to Supplier | Indicative Received | Won | Lost
+      notes               TEXT,
+      agent_id            INTEGER REFERENCES agents(id) ON DELETE SET NULL,
+      created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- On-site energy assets (battery storage, EV charge points, solar PV, CHP...).
+    -- Kept separate from meters: an asset sits behind a meter rather than being one, and
+    -- several assets can share a single MPAN. day_night_active flags whether the site is
+    -- on a dual-rate (day/night) tariff, which is what makes battery charge/discharge
+    -- arbitrage worthwhile — see the day/night pricing in comparison.js.
+    CREATE TABLE IF NOT EXISTS energy_assets (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id       INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      asset_type        TEXT NOT NULL,     -- Battery Storage | EV Charge Point | Solar PV | ...
+      manufacturer      TEXT,
+      model             TEXT,
+      capacity_kw       REAL,              -- rated power (kW) — charger speed / inverter size
+      capacity_kwh      REAL,              -- storage capacity (kWh) — batteries only
+      quantity          INTEGER DEFAULT 1, -- e.g. number of charge point sockets
+      install_date      TEXT,
+      ownership         TEXT,              -- Owned | Leased | PPA / Third Party
+      meter_id          INTEGER REFERENCES meters(id) ON DELETE SET NULL,
+      mpan              TEXT,
+      day_night_active  INTEGER NOT NULL DEFAULT 0,  -- 1 = on a dual-rate day/night tariff
+      charging_strategy TEXT,              -- Off-Peak Charging | Solar Self-Consumption | ...
+      export_capable    INTEGER NOT NULL DEFAULT 0,  -- can export/discharge back to grid
+      status            TEXT NOT NULL DEFAULT 'Active', -- Active | Planned | Decommissioned
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- REGO (Renewable Energy Guarantees of Origin) certificates.
+    -- rego_offers is the catalogue: what's currently available to buy, across the
+    -- different marketplaces/registries AMSL sources from. One REGO = 1 MWh of certified
+    -- renewable generation, so everything is priced and traded per MWh.
+    CREATE TABLE IF NOT EXISTS rego_offers (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      marketplace      TEXT NOT NULL,          -- e.g. 'Ofgem REGO Registry', 'STX Group'
+      technology       TEXT,                   -- Wind | Solar | Hydro | Biomass | Mixed
+      country          TEXT,                   -- generation country of origin
+      vintage_year     INTEGER,                -- compliance/generation year
+      price_per_mwh    REAL NOT NULL,          -- £ per certificate (1 REGO = 1 MWh)
+      volume_available REAL,                   -- MWh still purchasable on this offer
+      generator_name   TEXT,
+      status           TEXT NOT NULL DEFAULT 'Available',  -- Available | Sold Out | Withdrawn
+      notes            TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- A customer's actual purchase against an offer. offer_id is SET NULL on delete so
+    -- historical purchases survive an offer being removed from the catalogue; the
+    -- marketplace/technology/price are copied here so the record stays accurate even if
+    -- the original offer later changes price or is withdrawn.
+    CREATE TABLE IF NOT EXISTS rego_purchases (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id      INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      offer_id         INTEGER REFERENCES rego_offers(id) ON DELETE SET NULL,
+      marketplace      TEXT,
+      technology       TEXT,
+      country          TEXT,
+      vintage_year     INTEGER,
+      volume_mwh       REAL NOT NULL,
+      price_per_mwh    REAL NOT NULL,
+      total_cost       REAL NOT NULL,
+      purchase_date    TEXT NOT NULL DEFAULT (date('now')),
+      certificate_ref  TEXT,
+      status           TEXT NOT NULL DEFAULT 'Ordered',   -- Ordered | Issued | Retired | Cancelled
+      notes            TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
   setDef.run("brand_name", "AMSL Broker");
@@ -634,6 +783,39 @@ export function seedPlatform() {
     "Contract Method": ["E-Sign", "Wet Signature", "Verbal (Recorded)"],
     "Utility Mapping": ["Electricity", "Gas", "Water", "Dual Fuel"],
     "Ticket Status": ["Open", "In Progress", "Resolved", "Closed"],
+    // V1.7-extra: admin-manageable provider lists for the "Other Services" (Water/Waste/
+    // Card Payment) feature — same add/edit/delete UI as every other category here, so no
+    // separate admin screen was needed for these.
+    "Water Provider": ["Castle Water", "Water Plus", "Business Stream", "Everflow", "Wave", "Clear Business Water",
+                        "SES Business Water", "Yorkshire Water Business", "Affinity for Business", "Pennon Water Services"],
+    "Waste Provider": ["Biffa", "Veolia", "Suez", "Grundon", "Reconomy", "First Mile", "Bywaters", "FCC Environment", "Enva"],
+    "Card Payment Provider": ["Worldpay", "Dojo", "Takepayments", "Elavon", "Barclaycard Payments", "Handepay",
+                               "SumUp", "Square", "Zettle", "Advance Merchant Services"],
+    // REGO certificate sourcing — admin-manageable the same way as everything else here.
+    "REGO Marketplace": ["Ofgem REGO Registry", "STX Group", "ACT Commodities", "Vertis Environmental Finance",
+                          "Redshaw Advisors", "Nasdaq Clearing", "EEX", "Brainstorm / Green Trading", "Direct from Generator"],
+    "REGO Technology": ["Wind (Onshore)", "Wind (Offshore)", "Solar PV", "Hydro", "Biomass", "Landfill Gas", "Anaerobic Digestion", "Mixed Renewable"],
+    "REGO Status": ["Ordered", "Issued", "Retired", "Cancelled"],
+    // LPG — tracked alongside Water/Waste/Card Payment as a non-mains fuel source, since
+    // it has a supplier and contract end date but no MPAN/MPRN to meter against.
+    "LPG Provider": ["Calor Gas", "Flogas", "AvantiGas", "BP Gas Light", "Countrywide LPG",
+                      "Nexus Energy", "Prax LPG", "Certas Energy", "Autogas", "Independent / Other"],
+    // Flexible (non-fixed) purchasing — dropdowns for the Flex Request form.
+    "Flex Purchasing Strategy": ["Fully Flexible", "Structured / Tranche", "Risk Managed", "Peak / Off-Peak Split", "Click & Fix"],
+    "Flex Basket Type": ["Individual (standalone)", "Flexi Basket / Pooled", "Framework / Consortium"],
+    "Flex Index Reference": ["Day Ahead", "Within Day", "Month Ahead", "Quarter Ahead", "Season Ahead", "Annual (Calendar)"],
+    "Flex Request Status": ["Requested", "Sent to Supplier", "Indicative Received", "Won", "Lost"],
+    // On-site energy assets.
+    "Energy Asset Type": ["Battery Storage", "EV Charge Point", "Solar PV", "CHP", "Heat Pump",
+                           "Wind Turbine", "Voltage Optimisation", "Backup Generator"],
+    "Asset Ownership": ["Owned", "Leased", "PPA / Third Party", "Funded / Shared Saving"],
+    "Battery Charging Strategy": ["Off-Peak (Night Rate) Charging", "Solar Self-Consumption", "Peak Shaving",
+                                   "Triad / DUoS Avoidance", "Grid Services / Flexibility", "Backup Only"],
+    // Agency commission payouts.
+    "Agency Payout Method": ["BACS", "Faster Payments", "CHAPS", "Cheque", "Cryptocurrency"],
+    "Cryptocurrency": ["BTC (Bitcoin)", "ETH (Ethereum)", "USDT (Tether)", "USDC (USD Coin)", "SOL (Solana)", "XRP (Ripple)"],
+    "Crypto Network": ["Bitcoin", "Ethereum (ERC-20)", "Tron (TRC-20)", "Polygon", "Solana", "Binance Smart Chain (BEP-20)", "Lightning Network"],
+    "Agency Payout Status": ["Awaiting Supplier", "Ready to Pay", "Paid", "Failed", "On Hold"],
   };
   const ins = db.prepare("INSERT OR IGNORE INTO config_lookups (category,value) VALUES (?,?)");
   const before = db.prepare("SELECT COUNT(*) c FROM config_lookups").get().c;
@@ -647,6 +829,27 @@ export function seedPlatform() {
     ins.run("Getting started with AMSL Broker", "video", "Onboarding", "https://example.com/getting-started.mp4", "MP4");
     ins.run("Creating a quote & comparison", "video", "Quotes", "https://example.com/quotes.mp4", "MP4");
     ins.run("Module Walkthroughs (PDF)", "document", "Reference", "https://example.com/walkthroughs.pdf", "PDF");
+  }
+  // Sample REGO catalogue so the marketplace isn't empty on a fresh install. Prices are
+  // illustrative only — real REGO prices move with the market and should be maintained by
+  // an admin on the REGO Certificates screen.
+  if (db.prepare("SELECT COUNT(*) c FROM rego_offers").get().c === 0) {
+    const ro = db.prepare(`INSERT INTO rego_offers
+      (marketplace, technology, country, vintage_year, price_per_mwh, volume_available, generator_name, status)
+      VALUES (?,?,?,?,?,?,?, 'Available')`);
+    [
+      ["Ofgem REGO Registry", "Wind (Onshore)", "United Kingdom", 2026, 5.25, 12000, "Whitelee Wind Farm"],
+      ["Ofgem REGO Registry", "Wind (Offshore)", "United Kingdom", 2026, 6.10, 8000, "Hornsea Project One"],
+      ["Ofgem REGO Registry", "Solar PV", "United Kingdom", 2026, 5.80, 4500, "Shotwick Solar Park"],
+      ["STX Group", "Hydro", "United Kingdom", 2025, 4.40, 6000, "Cruachan Power Station"],
+      ["STX Group", "Mixed Renewable", "United Kingdom", 2026, 5.00, 20000, null],
+      ["ACT Commodities", "Biomass", "United Kingdom", 2025, 3.95, 9000, "Drax Power Station"],
+      ["ACT Commodities", "Wind (Onshore)", "United Kingdom", 2025, 4.75, 15000, null],
+      ["Vertis Environmental Finance", "Solar PV", "United Kingdom", 2026, 6.35, 2500, "Lyneham Solar Farm"],
+      ["Redshaw Advisors", "Anaerobic Digestion", "United Kingdom", 2026, 7.20, 1200, null],
+      ["Direct from Generator", "Wind (Onshore)", "United Kingdom", 2026, 4.90, 3000, "Pen y Cymoedd"],
+    ].forEach((v) => ro.run(...v));
+    console.log("Seeded 10 sample REGO offers.");
   }
   return { skipped: false };
 }

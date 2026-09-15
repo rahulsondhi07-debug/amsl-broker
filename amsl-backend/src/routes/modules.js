@@ -7,7 +7,8 @@ import { hashPassword } from "./auth.js";
 /* ---- Agencies (with agent counts, like the UI) ---- */
 export const agencies = crudRouter({
   table: "agencies",
-  columns: ["name", "logo", "status", "email", "phone", "website", "max_users", "company_reg_no", "business_structure", "vat_no", "address", "white_label"],
+  columns: ["name", "logo", "status", "email", "phone", "website", "max_users", "company_reg_no", "business_structure", "vat_no", "address", "white_label",
+            "payout_method", "bank_account_name", "bank_sort_code", "bank_account_no", "crypto_currency", "crypto_network", "wallet_address"],
   searchColumns: ["name", "email", "company_reg_no"],
   listSql: `SELECT a.*, (SELECT COUNT(*) FROM agents ag WHERE ag.agency_id = a.id) AS total_agents
             FROM agencies a`,

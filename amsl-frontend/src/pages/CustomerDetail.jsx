@@ -3,6 +3,8 @@ import { useParams, useNavigate, Link } from "react-router-dom";
 import { ArrowLeft, Pencil, Zap, Flame } from "lucide-react";
 import { api, JOURNEY_STAGES } from "../api.js";
 import { Card, Spinner, ErrorBanner, initials } from "../components/ui.jsx";
+import OtherServicesTab from "../components/OtherServicesTab.jsx";
+import EnergyAssetsTab from "../components/EnergyAssetsTab.jsx";
 
 const labelOf = (k) => JOURNEY_STAGES.find((s) => s.key === k)?.label || k;
 const p2 = (v) => (v == null || v === "" ? "—" : `${Number(v).toFixed(2)}p`);
@@ -90,6 +92,8 @@ export default function CustomerDetail() {
       <div className="toggle" style={{ marginBottom: 14 }}>
         <button className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
         <button className={tab === "utility" ? "active" : ""} onClick={() => setTab("utility")}>Utility on Site{meters.length ? ` (${meters.length})` : ""}</button>
+        <button className={tab === "services" ? "active" : ""} onClick={() => setTab("services")}>Other Services</button>
+        <button className={tab === "assets" ? "active" : ""} onClick={() => setTab("assets")}>Energy Assets</button>
         <button className={tab === "comments" ? "active" : ""} onClick={() => setTab("comments")}>Comments{data.comments?.length ? ` (${data.comments.length})` : ""}</button>
       </div>
 
@@ -119,6 +123,9 @@ export default function CustomerDetail() {
           )}
         </div>
       )}
+
+      {tab === "services" && <OtherServicesTab businessId={id} />}
+      {tab === "assets" && <EnergyAssetsTab businessId={id} />}
 
       {tab === "comments" && (
         <Card>

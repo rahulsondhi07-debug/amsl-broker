@@ -1,4 +1,5 @@
 const BASE = import.meta.env.VITE_API_URL || "/api";
+export const API_BASE = BASE; // exported so components can build direct download links (e.g. bill files)
 
 let token = null;
 try { token = localStorage.getItem("amsl_token"); } catch { /* ignore */ }
@@ -86,6 +87,30 @@ export const api = {
   brandingSet: (b) => request(`/branding`, { method: "PUT", body: b }),
   disclaimer: () => request(`/disclaimer`),
   disclaimerSet: (text) => request(`/disclaimer`, { method: "PUT", body: { text } }),
+  otherServicesList: (businessId) => request(`/other-services?business_id=${businessId}`),
+  otherServiceCreate: (body) => request(`/other-services`, { method: "POST", body }),
+  otherServiceUpdate: (id, body) => request(`/other-services/${id}`, { method: "PUT", body }),
+  otherServiceDelete: (id) => request(`/other-services/${id}`, { method: "DELETE" }),
+  regoOffers: (q = {}) => request(`/rego/offers?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
+  regoOfferCreate: (body) => request(`/rego/offers`, { method: "POST", body }),
+  regoOfferUpdate: (id, body) => request(`/rego/offers/${id}`, { method: "PUT", body }),
+  regoOfferDelete: (id) => request(`/rego/offers/${id}`, { method: "DELETE" }),
+  regoPurchases: (q = {}) => request(`/rego/purchases?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
+  regoPurchaseCreate: (body) => request(`/rego/purchases`, { method: "POST", body }),
+  regoPurchaseUpdate: (id, body) => request(`/rego/purchases/${id}`, { method: "PUT", body }),
+  regoPurchaseDelete: (id) => request(`/rego/purchases/${id}`, { method: "DELETE" }),
+  flexList: (q = {}) => request(`/flex?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
+  flexCreate: (body) => request(`/flex`, { method: "POST", body }),
+  flexUpdate: (id, body) => request(`/flex/${id}`, { method: "PUT", body }),
+  flexDelete: (id) => request(`/flex/${id}`, { method: "DELETE" }),
+  energyAssets: (businessId) => request(`/energy-assets?business_id=${businessId}`),
+  energyAssetCreate: (body) => request(`/energy-assets`, { method: "POST", body }),
+  energyAssetUpdate: (id, body) => request(`/energy-assets/${id}`, { method: "PUT", body }),
+  energyAssetDelete: (id) => request(`/energy-assets/${id}`, { method: "DELETE" }),
+  agencyPayouts: (q = {}) => request(`/agency-payouts?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
+  agencyPayoutCreate: (body) => request(`/agency-payouts`, { method: "POST", body }),
+  agencyPayoutUpdate: (id, body) => request(`/agency-payouts/${id}`, { method: "PUT", body }),
+  agencyPayoutDelete: (id) => request(`/agency-payouts/${id}`, { method: "DELETE" }),
   tutorials: () => request(`/platform/tutorials`),
   tutorialAdd: (t) => request(`/platform/tutorials`, { method: "POST", body: t }),
   tutorialDelete: (id) => request(`/platform/tutorials/${id}`, { method: "DELETE" }),

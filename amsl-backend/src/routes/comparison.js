@@ -43,13 +43,17 @@ const first2Digits = (v) => {
  * a dist_id/profile AND the caller supplied an MPAN/topline that disagrees with it — rows
  * without that data (e.g. older manually-entered rows) are never filtered out by this.
  */
-export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline }) {
+export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct }) {
   const u = String(utility || "").toUpperCase().startsWith("G") ? "GAS" : "ELECTRICITY";
   const kwh = Number(eac) || 0;
   const requested = Math.max(0, Number(uplift) || 0);
   const today = new Date().toISOString().slice(0, 10);
   const distId = first2Digits(meter_number);   // Distributor ID, from the MPAN
   const profile = first2Digits(topline);        // Profile Class, from the Topline
+  // Share of annual consumption used in the night / evening-weekend rate periods. Only
+  // has an effect when the matrix row actually carries a night (or eve/wknd) rate.
+  const nightPct = night_pct == null ? null : Number(night_pct);
+  const eveWkndPct = eve_wknd_pct == null ? null : Number(eve_wknd_pct);
 
   const dealTypeFor = (supplierId) =>
     current_supplier_id && String(supplierId) === String(current_supplier_id) ? "Renewal" : "Acquisition";
@@ -63,7 +67,7 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
   // window is set, today falls inside it. Pending/unreleased price books are filtered
   // out here, before pricing — they never reach the ranked offer list.
   const productSql = `
-    SELECT p.id, p.supplier_id, p.utility, p.acq_renewal, s.name AS supplier_name,
+    SELECT p.id, p.supplier_id, p.utility, p.acq_renewal, p.fuel_mix, p.payment_method, s.name AS supplier_name,
            s.max_broker_comm_electric AS cap_e, s.max_broker_comm_gas AS cap_g
     FROM products p JOIN suppliers s ON s.id = p.supplier_id
     WHERE COALESCE(p.price_book_status, p.status) = 'Released'
@@ -103,7 +107,24 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
         const customerUnit = round2(baseRate + appliedUplift);
         const termMonths = row.term_months || term || 12;
         const years = termMonths / 12;
-        const annualCost = round2((customerUnit * kwh + row.standing_charge * 365) / 100);
+
+        // Day/night (dual-rate) pricing. Previously every offer was costed on the day rate
+        // alone, so an Economy 7 style rate looked far more expensive than it really is and
+        // a battery charging overnight showed no benefit at all. When the matrix row has a
+        // night rate AND the caller supplied a night split, consumption is apportioned and
+        // each portion costed at its own rate.
+        const nightBase = row.night_rate != null ? row.night_rate : null;
+        const eveBase = row.eve_wknd_rate != null ? row.eve_wknd_rate : null;
+        const nightShare = nightBase != null ? Math.min(Math.max(nightPct ?? 0, 0), 100) / 100 : 0;
+        const eveShare = eveBase != null ? Math.min(Math.max(eveWkndPct ?? 0, 0), 100) / 100 : 0;
+        const dayShare = Math.max(0, 1 - nightShare - eveShare);
+
+        const nightUnit = nightBase != null ? round2(nightBase + appliedUplift) : null;
+        const eveUnit = eveBase != null ? round2(eveBase + appliedUplift) : null;
+        const energyCost = (customerUnit * kwh * dayShare)
+          + (nightUnit != null ? nightUnit * kwh * nightShare : 0)
+          + (eveUnit != null ? eveUnit * kwh * eveShare : 0);
+        const annualCost = round2((energyCost + row.standing_charge * 365) / 100);
         const annualCommission = round2((appliedUplift * kwh) / 100);
         const totalCommission = round2(annualCommission * years);
         offers.push({
@@ -115,9 +136,17 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
           base_unit_rate: baseRate,
           uplift: round2(appliedUplift),
           unit_rate: customerUnit,
+          night_rate: nightUnit,
+          eve_wknd_rate: eveUnit,
+          // true when this offer was actually costed across more than one rate period
+          dual_rate: nightShare > 0 || eveShare > 0,
+          day_split_pct: round2(dayShare * 100),
+          night_split_pct: round2(nightShare * 100),
           standing_charge: row.standing_charge,
           annual_cost: annualCost,
           monthly_cost: round2(annualCost / 12),
+          fuel_mix: p.fuel_mix || null,   // "Green" | "Brown" | "Mix" — set on the product
+          payment_method: p.payment_method || null, // e.g. "Fixed DD", "Cash/Cheque/Bacs" — set on the product
           annual_commission: annualCommission,
           total_commission: totalCommission,
           source: "matrix",
@@ -148,10 +177,10 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
 
 // POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id?, meter_number?, topline? }
 r.post("/", (req, res) => {
-  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline } = req.body || {};
+  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct } = req.body || {};
   if (!utility) return res.status(400).json({ error: "utility is required" });
   if (!eac || Number(eac) <= 0) return res.status(400).json({ error: "eac (annual consumption) is required" });
-  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline }) });
+  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct }) });
 });
 
 // GET /api/comparison/tariffs?utility=ELECTRICITY  — inspect the raw tariff book

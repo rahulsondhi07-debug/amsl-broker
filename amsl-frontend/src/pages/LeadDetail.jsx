@@ -3,13 +3,15 @@ import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Plus, Pencil, Trash2, Zap, Flame } from "lucide-react";
 import { api } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, initials, Modal, Field } from "../components/ui.jsx";
+import OtherServicesTab from "../components/OtherServicesTab.jsx";
+import EnergyAssetsTab from "../components/EnergyAssetsTab.jsx";
 
 const SEGMENTS = ["SME", "Corporate", "Domestic"];
 const STATUSES = [{ v: "C", l: "Current" }, { v: "S", l: "Switching" }, { v: "D", l: "Dropped" }];
 
 const TABS = [
   ["user", "User Detail"], ["site", "Site Address"], ["elec", "Electric Meter Detail"],
-  ["gas", "Gas Meter Detail"], ["quote", "Quote"], ["callback", "Callback"], ["notes", "Notes"],
+  ["gas", "Gas Meter Detail"], ["services", "Other Services"], ["assets", "Energy Assets"], ["quote", "Quote"], ["callback", "Callback"], ["notes", "Notes"],
 ];
 
 export default function LeadDetail() {
@@ -66,6 +68,8 @@ export default function LeadDetail() {
       {tab === "site" && <SiteTab businessId={id} />}
       {tab === "elec" && <MeterTab businessId={id} utility="ELEC" icon={<Zap size={14} />} suppliers={refs.suppliers} />}
       {tab === "gas" && <MeterTab businessId={id} utility="GAS" icon={<Flame size={14} />} suppliers={refs.suppliers} />}
+      {tab === "services" && <OtherServicesTab businessId={id} />}
+      {tab === "assets" && <EnergyAssetsTab businessId={id} />}
       {tab === "quote" && <QuoteTab businessId={id} />}
       {tab === "callback" && <CallbackTab businessId={id} />}
       {tab === "notes" && <NotesTab businessId={id} comments={detail.comments || []} onSaved={load} />}

@@ -24,6 +24,7 @@ import Settings from "./pages/Settings.jsx";
 import Commission from "./pages/Commission.jsx";
 import BillValidation from "./pages/BillValidation.jsx";
 import EiiCertificates from "./pages/EiiCertificates.jsx";
+import RegoCertificates from "./pages/RegoCertificates.jsx";
 import Quotes from "./pages/Quotes.jsx";
 import NewQuote from "./pages/NewQuote.jsx";
 import Contracts from "./pages/Contracts.jsx";
@@ -78,6 +79,7 @@ export default function App() {
               <Route path="commission" element={<Commission />} />
               <Route path="bill-validation" element={<BillValidation />} />
               <Route path="eii-certificates" element={<EiiCertificates />} />
+              <Route path="rego-certificates" element={<RegoCertificates />} />
               <Route path="contracts" element={<Contracts />} />
               <Route path="contracts/:id" element={<ContractDetail />} />
               <Route path="contracts/generate" element={<GenerateContract />} />

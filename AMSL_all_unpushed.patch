@@ -1,0 +1,2239 @@
+diff --git a/amsl-backend/src/db.js b/amsl-backend/src/db.js
+index 9692df2..7bc5192 100644
+--- a/amsl-backend/src/db.js
++++ b/amsl-backend/src/db.js
+@@ -211,6 +211,15 @@ export function migrate() {
+   addCol("ALTER TABLE businesses ADD COLUMN stage_updated_at TEXT");
+   addCol("ALTER TABLE businesses ADD COLUMN frozen           INTEGER DEFAULT 0");
+   // Agency detail fields (match production Add Agency form)
++  // Default payout settings per agency, so a payout form can pre-fill rather than
++  // re-keying wallet details every time (and mis-typing a crypto address).
++  addCol("ALTER TABLE agencies ADD COLUMN payout_method       TEXT");
++  addCol("ALTER TABLE agencies ADD COLUMN bank_account_name   TEXT");
++  addCol("ALTER TABLE agencies ADD COLUMN bank_sort_code      TEXT");
++  addCol("ALTER TABLE agencies ADD COLUMN bank_account_no     TEXT");
++  addCol("ALTER TABLE agencies ADD COLUMN crypto_currency     TEXT");
++  addCol("ALTER TABLE agencies ADD COLUMN crypto_network      TEXT");
++  addCol("ALTER TABLE agencies ADD COLUMN wallet_address      TEXT");
+   addCol("ALTER TABLE agencies ADD COLUMN email              TEXT");
+   addCol("ALTER TABLE agencies ADD COLUMN phone              TEXT");
+   addCol("ALTER TABLE agencies ADD COLUMN website            TEXT");
+@@ -375,6 +384,23 @@ export function migrate() {
+       changed_by  TEXT,
+       changed_at  TEXT NOT NULL DEFAULT (datetime('now'))
+     );
++    -- Other Services: non-energy services tracked per business (Water, Waste, Card
++    -- Payment) — each with its own provider and contract end date, plus an optional
++    -- uploaded bill (xlsx/csv/pdf) stored inline as base64 since there's no separate file
++    -- storage in this app. Deliberately its own table rather than overloading meters,
++    -- since these aren't metered utilities with an MPAN/MPRN or EAC.
++    CREATE TABLE IF NOT EXISTS other_services (
++      id            INTEGER PRIMARY KEY AUTOINCREMENT,
++      business_id   INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
++      service_type  TEXT NOT NULL,   -- 'Water' | 'Waste' | 'Card Payment'
++      provider      TEXT,
++      contract_end  TEXT,
++      notes         TEXT,
++      bill_filename TEXT,
++      bill_mime     TEXT,
++      bill_data     TEXT,            -- base64-encoded file content
++      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
++    );
+     CREATE TABLE IF NOT EXISTS callbacks (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+@@ -478,6 +504,38 @@ export function migrate() {
+       note       TEXT,
+       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+     );
++    -- Agency payouts: what AMSL owes each agency once the supplier has actually paid us.
++    -- Separate from commission_records (what the supplier owes AMSL) because the two sides
++    -- settle independently — a supplier can pay us before we pay the agency, and the
++    -- payout can go out by a completely different method.
++    -- Cryptocurrency payouts capture the extra detail a bank transfer doesn't need: which
++    -- coin, which network (getting this wrong loses the funds), the destination wallet, the
++    -- GBP/crypto rate used at the time, and the on-chain transaction hash as the receipt.
++    CREATE TABLE IF NOT EXISTS agency_payouts (
++      id                INTEGER PRIMARY KEY AUTOINCREMENT,
++      agency_id         INTEGER REFERENCES agencies(id) ON DELETE SET NULL,
++      record_id         INTEGER REFERENCES commission_records(id) ON DELETE SET NULL,
++      contract_id       INTEGER,
++      supplier_id       INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
++      gross_amount      REAL NOT NULL DEFAULT 0,
++      vat_amount        REAL NOT NULL DEFAULT 0,
++      net_amount        REAL NOT NULL DEFAULT 0,
++      currency          TEXT NOT NULL DEFAULT 'GBP',
++      payment_method    TEXT NOT NULL DEFAULT 'BACS',  -- BACS | Faster Payments | Cheque | Cryptocurrency ...
++      supplier_paid_on  TEXT,      -- when the supplier settled with us (gates the payout)
++      paid_on           TEXT,      -- when we paid the agency
++      status            TEXT NOT NULL DEFAULT 'Awaiting Supplier', -- Awaiting Supplier | Ready to Pay | Paid | Failed | On Hold
++      reference         TEXT,
++      -- crypto-only fields
++      crypto_currency   TEXT,      -- BTC | ETH | USDT | USDC ...
++      crypto_network    TEXT,      -- Bitcoin | Ethereum (ERC-20) | Tron (TRC-20) | Polygon ...
++      wallet_address    TEXT,
++      crypto_amount     REAL,      -- amount sent in the coin's own units
++      exchange_rate     REAL,      -- GBP per 1 unit of the coin at time of payment
++      tx_hash           TEXT,      -- on-chain transaction hash (the receipt)
++      notes             TEXT,
++      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
++    );
+     CREATE TABLE IF NOT EXISTS commission_statements (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       supplier_id INTEGER,
+@@ -598,6 +656,97 @@ export function migrate() {
+       msid                   TEXT NOT NULL,
+       proportion_exempt_pct  REAL NOT NULL DEFAULT 100
+     );
++    -- Flexible (flex) purchasing requests. Unlike a fixed-price quote, flex contracts
++    -- aren't priced from a matrix — the customer buys volume in tranches against the
++    -- wholesale market, so this is an enquiry routed to suppliers/trading desks rather
++    -- than an instantly-priced offer. Hence its own table rather than a row in quotes.
++    CREATE TABLE IF NOT EXISTS flex_requests (
++      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
++      ref                 TEXT,
++      business_id         INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
++      business_name       TEXT,
++      utility             TEXT NOT NULL,          -- Electricity | Gas
++      meter_number        TEXT,
++      annual_volume       REAL,                   -- total annual consumption, kWh
++      sites_count         INTEGER,
++      contract_start      TEXT,
++      contract_length     INTEGER,                -- months
++      basket_type         TEXT,                   -- Individual | Flexi Basket / Pooled
++      purchasing_strategy TEXT,                   -- Fully Flexible | Structured / Tranche | Risk Managed
++      tranche_count       INTEGER,
++      index_reference     TEXT,                   -- Day Ahead | Month Ahead | Season Ahead | Quarterly
++      risk_appetite       TEXT,                   -- Low | Medium | High
++      volume_tolerance    TEXT,                   -- e.g. '+/- 20%'
++      management_fee      REAL,                   -- p/kWh
++      target_supplier_id  INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
++      status              TEXT NOT NULL DEFAULT 'Requested', -- Requested | Sent to Supplier | Indicative Received | Won | Lost
++      notes               TEXT,
++      agent_id            INTEGER REFERENCES agents(id) ON DELETE SET NULL,
++      created_at          TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++    -- On-site energy assets (battery storage, EV charge points, solar PV, CHP...).
++    -- Kept separate from meters: an asset sits behind a meter rather than being one, and
++    -- several assets can share a single MPAN. day_night_active flags whether the site is
++    -- on a dual-rate (day/night) tariff, which is what makes battery charge/discharge
++    -- arbitrage worthwhile — see the day/night pricing in comparison.js.
++    CREATE TABLE IF NOT EXISTS energy_assets (
++      id                INTEGER PRIMARY KEY AUTOINCREMENT,
++      business_id       INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
++      asset_type        TEXT NOT NULL,     -- Battery Storage | EV Charge Point | Solar PV | ...
++      manufacturer      TEXT,
++      model             TEXT,
++      capacity_kw       REAL,              -- rated power (kW) — charger speed / inverter size
++      capacity_kwh      REAL,              -- storage capacity (kWh) — batteries only
++      quantity          INTEGER DEFAULT 1, -- e.g. number of charge point sockets
++      install_date      TEXT,
++      ownership         TEXT,              -- Owned | Leased | PPA / Third Party
++      meter_id          INTEGER REFERENCES meters(id) ON DELETE SET NULL,
++      mpan              TEXT,
++      day_night_active  INTEGER NOT NULL DEFAULT 0,  -- 1 = on a dual-rate day/night tariff
++      charging_strategy TEXT,              -- Off-Peak Charging | Solar Self-Consumption | ...
++      export_capable    INTEGER NOT NULL DEFAULT 0,  -- can export/discharge back to grid
++      status            TEXT NOT NULL DEFAULT 'Active', -- Active | Planned | Decommissioned
++      notes             TEXT,
++      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++    -- REGO (Renewable Energy Guarantees of Origin) certificates.
++    -- rego_offers is the catalogue: what's currently available to buy, across the
++    -- different marketplaces/registries AMSL sources from. One REGO = 1 MWh of certified
++    -- renewable generation, so everything is priced and traded per MWh.
++    CREATE TABLE IF NOT EXISTS rego_offers (
++      id               INTEGER PRIMARY KEY AUTOINCREMENT,
++      marketplace      TEXT NOT NULL,          -- e.g. 'Ofgem REGO Registry', 'STX Group'
++      technology       TEXT,                   -- Wind | Solar | Hydro | Biomass | Mixed
++      country          TEXT,                   -- generation country of origin
++      vintage_year     INTEGER,                -- compliance/generation year
++      price_per_mwh    REAL NOT NULL,          -- £ per certificate (1 REGO = 1 MWh)
++      volume_available REAL,                   -- MWh still purchasable on this offer
++      generator_name   TEXT,
++      status           TEXT NOT NULL DEFAULT 'Available',  -- Available | Sold Out | Withdrawn
++      notes            TEXT,
++      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++    -- A customer's actual purchase against an offer. offer_id is SET NULL on delete so
++    -- historical purchases survive an offer being removed from the catalogue; the
++    -- marketplace/technology/price are copied here so the record stays accurate even if
++    -- the original offer later changes price or is withdrawn.
++    CREATE TABLE IF NOT EXISTS rego_purchases (
++      id               INTEGER PRIMARY KEY AUTOINCREMENT,
++      business_id      INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
++      offer_id         INTEGER REFERENCES rego_offers(id) ON DELETE SET NULL,
++      marketplace      TEXT,
++      technology       TEXT,
++      country          TEXT,
++      vintage_year     INTEGER,
++      volume_mwh       REAL NOT NULL,
++      price_per_mwh    REAL NOT NULL,
++      total_cost       REAL NOT NULL,
++      purchase_date    TEXT NOT NULL DEFAULT (date('now')),
++      certificate_ref  TEXT,
++      status           TEXT NOT NULL DEFAULT 'Ordered',   -- Ordered | Issued | Retired | Cancelled
++      notes            TEXT,
++      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
++    );
+   `);
+   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
+   setDef.run("brand_name", "AMSL Broker");
+@@ -634,6 +783,39 @@ export function seedPlatform() {
+     "Contract Method": ["E-Sign", "Wet Signature", "Verbal (Recorded)"],
+     "Utility Mapping": ["Electricity", "Gas", "Water", "Dual Fuel"],
+     "Ticket Status": ["Open", "In Progress", "Resolved", "Closed"],
++    // V1.7-extra: admin-manageable provider lists for the "Other Services" (Water/Waste/
++    // Card Payment) feature — same add/edit/delete UI as every other category here, so no
++    // separate admin screen was needed for these.
++    "Water Provider": ["Castle Water", "Water Plus", "Business Stream", "Everflow", "Wave", "Clear Business Water",
++                        "SES Business Water", "Yorkshire Water Business", "Affinity for Business", "Pennon Water Services"],
++    "Waste Provider": ["Biffa", "Veolia", "Suez", "Grundon", "Reconomy", "First Mile", "Bywaters", "FCC Environment", "Enva"],
++    "Card Payment Provider": ["Worldpay", "Dojo", "Takepayments", "Elavon", "Barclaycard Payments", "Handepay",
++                               "SumUp", "Square", "Zettle", "Advance Merchant Services"],
++    // REGO certificate sourcing — admin-manageable the same way as everything else here.
++    "REGO Marketplace": ["Ofgem REGO Registry", "STX Group", "ACT Commodities", "Vertis Environmental Finance",
++                          "Redshaw Advisors", "Nasdaq Clearing", "EEX", "Brainstorm / Green Trading", "Direct from Generator"],
++    "REGO Technology": ["Wind (Onshore)", "Wind (Offshore)", "Solar PV", "Hydro", "Biomass", "Landfill Gas", "Anaerobic Digestion", "Mixed Renewable"],
++    "REGO Status": ["Ordered", "Issued", "Retired", "Cancelled"],
++    // LPG — tracked alongside Water/Waste/Card Payment as a non-mains fuel source, since
++    // it has a supplier and contract end date but no MPAN/MPRN to meter against.
++    "LPG Provider": ["Calor Gas", "Flogas", "AvantiGas", "BP Gas Light", "Countrywide LPG",
++                      "Nexus Energy", "Prax LPG", "Certas Energy", "Autogas", "Independent / Other"],
++    // Flexible (non-fixed) purchasing — dropdowns for the Flex Request form.
++    "Flex Purchasing Strategy": ["Fully Flexible", "Structured / Tranche", "Risk Managed", "Peak / Off-Peak Split", "Click & Fix"],
++    "Flex Basket Type": ["Individual (standalone)", "Flexi Basket / Pooled", "Framework / Consortium"],
++    "Flex Index Reference": ["Day Ahead", "Within Day", "Month Ahead", "Quarter Ahead", "Season Ahead", "Annual (Calendar)"],
++    "Flex Request Status": ["Requested", "Sent to Supplier", "Indicative Received", "Won", "Lost"],
++    // On-site energy assets.
++    "Energy Asset Type": ["Battery Storage", "EV Charge Point", "Solar PV", "CHP", "Heat Pump",
++                           "Wind Turbine", "Voltage Optimisation", "Backup Generator"],
++    "Asset Ownership": ["Owned", "Leased", "PPA / Third Party", "Funded / Shared Saving"],
++    "Battery Charging Strategy": ["Off-Peak (Night Rate) Charging", "Solar Self-Consumption", "Peak Shaving",
++                                   "Triad / DUoS Avoidance", "Grid Services / Flexibility", "Backup Only"],
++    // Agency commission payouts.
++    "Agency Payout Method": ["BACS", "Faster Payments", "CHAPS", "Cheque", "Cryptocurrency"],
++    "Cryptocurrency": ["BTC (Bitcoin)", "ETH (Ethereum)", "USDT (Tether)", "USDC (USD Coin)", "SOL (Solana)", "XRP (Ripple)"],
++    "Crypto Network": ["Bitcoin", "Ethereum (ERC-20)", "Tron (TRC-20)", "Polygon", "Solana", "Binance Smart Chain (BEP-20)", "Lightning Network"],
++    "Agency Payout Status": ["Awaiting Supplier", "Ready to Pay", "Paid", "Failed", "On Hold"],
+   };
+   const ins = db.prepare("INSERT OR IGNORE INTO config_lookups (category,value) VALUES (?,?)");
+   const before = db.prepare("SELECT COUNT(*) c FROM config_lookups").get().c;
+@@ -648,6 +830,27 @@ export function seedPlatform() {
+     ins.run("Creating a quote & comparison", "video", "Quotes", "https://example.com/quotes.mp4", "MP4");
+     ins.run("Module Walkthroughs (PDF)", "document", "Reference", "https://example.com/walkthroughs.pdf", "PDF");
+   }
++  // Sample REGO catalogue so the marketplace isn't empty on a fresh install. Prices are
++  // illustrative only — real REGO prices move with the market and should be maintained by
++  // an admin on the REGO Certificates screen.
++  if (db.prepare("SELECT COUNT(*) c FROM rego_offers").get().c === 0) {
++    const ro = db.prepare(`INSERT INTO rego_offers
++      (marketplace, technology, country, vintage_year, price_per_mwh, volume_available, generator_name, status)
++      VALUES (?,?,?,?,?,?,?, 'Available')`);
++    [
++      ["Ofgem REGO Registry", "Wind (Onshore)", "United Kingdom", 2026, 5.25, 12000, "Whitelee Wind Farm"],
++      ["Ofgem REGO Registry", "Wind (Offshore)", "United Kingdom", 2026, 6.10, 8000, "Hornsea Project One"],
++      ["Ofgem REGO Registry", "Solar PV", "United Kingdom", 2026, 5.80, 4500, "Shotwick Solar Park"],
++      ["STX Group", "Hydro", "United Kingdom", 2025, 4.40, 6000, "Cruachan Power Station"],
++      ["STX Group", "Mixed Renewable", "United Kingdom", 2026, 5.00, 20000, null],
++      ["ACT Commodities", "Biomass", "United Kingdom", 2025, 3.95, 9000, "Drax Power Station"],
++      ["ACT Commodities", "Wind (Onshore)", "United Kingdom", 2025, 4.75, 15000, null],
++      ["Vertis Environmental Finance", "Solar PV", "United Kingdom", 2026, 6.35, 2500, "Lyneham Solar Farm"],
++      ["Redshaw Advisors", "Anaerobic Digestion", "United Kingdom", 2026, 7.20, 1200, null],
++      ["Direct from Generator", "Wind (Onshore)", "United Kingdom", 2026, 4.90, 3000, "Pen y Cymoedd"],
++    ].forEach((v) => ro.run(...v));
++    console.log("Seeded 10 sample REGO offers.");
++  }
+   return { skipped: false };
+ }
+ 
+diff --git a/amsl-backend/src/routes/agencyPayouts.js b/amsl-backend/src/routes/agencyPayouts.js
+new file mode 100644
+index 0000000..fc11105
+--- /dev/null
++++ b/amsl-backend/src/routes/agencyPayouts.js
+@@ -0,0 +1,103 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++const round2 = (n) => Math.round(n * 100) / 100;
++
++const COLS = ["agency_id", "record_id", "contract_id", "supplier_id", "gross_amount", "vat_amount",
++              "net_amount", "currency", "payment_method", "supplier_paid_on", "paid_on", "status",
++              "reference", "crypto_currency", "crypto_network", "wallet_address", "crypto_amount",
++              "exchange_rate", "tx_hash", "notes"];
++
++const DETAIL = `SELECT p.*, ag.name AS agency_name, s.name AS supplier_name
++                FROM agency_payouts p
++                LEFT JOIN agencies ag ON ag.id = p.agency_id
++                LEFT JOIN suppliers s ON s.id = p.supplier_id`;
++
++const isCrypto = (m) => String(m || "").toLowerCase().includes("crypto");
++
++// A crypto payout is only meaningful with a destination and a network — sending on the
++// wrong chain loses the funds — so both are required before it can be marked Paid.
++function validate(body, existing = {}) {
++  const merged = { ...existing, ...body };
++  if (isCrypto(merged.payment_method)) {
++    if (!merged.wallet_address) return "A wallet address is required for a cryptocurrency payout";
++    if (!merged.crypto_network) return "A crypto network is required — sending on the wrong chain can lose the funds";
++    if (merged.status === "Paid" && !merged.tx_hash) return "Record the transaction hash before marking a crypto payout as Paid";
++  }
++  if (merged.status === "Paid" && !merged.supplier_paid_on) {
++    return "The supplier payment date must be recorded before paying the agency";
++  }
++  return null;
++}
++
++// GET /api/agency-payouts?agency_id=&status=&payment_method=
++r.get("/", (req, res) => {
++  const where = [];
++  const params = [];
++  for (const [q, col] of [["agency_id", "p.agency_id"], ["status", "p.status"], ["payment_method", "p.payment_method"], ["supplier_id", "p.supplier_id"]]) {
++    if (req.query[q]) { where.push(`${col} = ?`); params.push(req.query[q]); }
++  }
++  const sql = `${DETAIL} ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY p.created_at DESC, p.id DESC`;
++  res.json({ data: db.prepare(sql).all(...params) });
++});
++
++r.post("/", (req, res) => {
++  const b = req.body || {};
++  if (!b.agency_id) return res.status(400).json({ error: "agency_id is required" });
++  const gross = Number(b.gross_amount) || 0;
++  if (gross <= 0) return res.status(400).json({ error: "gross_amount must be greater than zero" });
++  const err = validate(b);
++  if (err) return res.status(400).json({ error: err });
++
++  const vat = b.vat_amount != null ? Number(b.vat_amount) : 0;
++  const net = b.net_amount != null ? Number(b.net_amount) : round2(gross - vat);
++  // Derive the coin amount from the GBP net and the rate, so the two can't drift apart.
++  const cryptoAmount = b.crypto_amount != null ? Number(b.crypto_amount)
++    : (isCrypto(b.payment_method) && Number(b.exchange_rate) > 0 ? round2(net / Number(b.exchange_rate) * 1e6) / 1e6 : null);
++
++  const body = { ...b, gross_amount: gross, vat_amount: vat, net_amount: net, crypto_amount: cryptoAmount };
++  const cols = COLS.filter((c) => body[c] !== undefined);
++  const info = db.prepare(`INSERT INTO agency_payouts (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`)
++    .run(...cols.map((c) => body[c]));
++  res.status(201).json({ data: db.prepare(`${DETAIL} WHERE p.id = ?`).get(info.lastInsertRowid) });
++});
++
++const upd = (req, res) => {
++  const existing = db.prepare("SELECT * FROM agency_payouts WHERE id=?").get(req.params.id);
++  if (!existing) return res.status(404).json({ error: "not found" });
++  const b = req.body || {};
++  const err = validate(b, existing);
++  if (err) return res.status(400).json({ error: err });
++
++  const body = { ...b };
++  // Keep net and the derived crypto amount consistent when the money fields change.
++  if (b.gross_amount !== undefined || b.vat_amount !== undefined) {
++    const gross = Number(b.gross_amount ?? existing.gross_amount) || 0;
++    const vat = Number(b.vat_amount ?? existing.vat_amount) || 0;
++    body.net_amount = b.net_amount != null ? Number(b.net_amount) : round2(gross - vat);
++  }
++  const rate = Number(b.exchange_rate ?? existing.exchange_rate);
++  const netForCrypto = Number(body.net_amount ?? existing.net_amount);
++  if (b.crypto_amount === undefined && isCrypto(b.payment_method ?? existing.payment_method) && rate > 0) {
++    body.crypto_amount = round2(netForCrypto / rate * 1e6) / 1e6;
++  }
++  // Stamp the payment date automatically the moment it's marked Paid.
++  if (b.status === "Paid" && !b.paid_on && !existing.paid_on) body.paid_on = new Date().toISOString().slice(0, 10);
++
++  const cols = COLS.filter((c) => body[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  db.prepare(`UPDATE agency_payouts SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => body[c]), req.params.id);
++  res.json({ data: db.prepare(`${DETAIL} WHERE p.id = ?`).get(req.params.id) });
++};
++r.put("/:id", upd);
++r.patch("/:id", upd);
++
++r.delete("/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM agency_payouts WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++export default r;
+diff --git a/amsl-backend/src/routes/comparison.js b/amsl-backend/src/routes/comparison.js
+index c8f6a13..d587002 100644
+--- a/amsl-backend/src/routes/comparison.js
++++ b/amsl-backend/src/routes/comparison.js
+@@ -43,13 +43,17 @@ const first2Digits = (v) => {
+  * a dist_id/profile AND the caller supplied an MPAN/topline that disagrees with it — rows
+  * without that data (e.g. older manually-entered rows) are never filtered out by this.
+  */
+-export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline }) {
++export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct }) {
+   const u = String(utility || "").toUpperCase().startsWith("G") ? "GAS" : "ELECTRICITY";
+   const kwh = Number(eac) || 0;
+   const requested = Math.max(0, Number(uplift) || 0);
+   const today = new Date().toISOString().slice(0, 10);
+   const distId = first2Digits(meter_number);   // Distributor ID, from the MPAN
+   const profile = first2Digits(topline);        // Profile Class, from the Topline
++  // Share of annual consumption used in the night / evening-weekend rate periods. Only
++  // has an effect when the matrix row actually carries a night (or eve/wknd) rate.
++  const nightPct = night_pct == null ? null : Number(night_pct);
++  const eveWkndPct = eve_wknd_pct == null ? null : Number(eve_wknd_pct);
+ 
+   const dealTypeFor = (supplierId) =>
+     current_supplier_id && String(supplierId) === String(current_supplier_id) ? "Renewal" : "Acquisition";
+@@ -63,7 +67,7 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
+   // window is set, today falls inside it. Pending/unreleased price books are filtered
+   // out here, before pricing — they never reach the ranked offer list.
+   const productSql = `
+-    SELECT p.id, p.supplier_id, p.utility, p.acq_renewal, s.name AS supplier_name,
++    SELECT p.id, p.supplier_id, p.utility, p.acq_renewal, p.fuel_mix, p.payment_method, s.name AS supplier_name,
+            s.max_broker_comm_electric AS cap_e, s.max_broker_comm_gas AS cap_g
+     FROM products p JOIN suppliers s ON s.id = p.supplier_id
+     WHERE COALESCE(p.price_book_status, p.status) = 'Released'
+@@ -103,7 +107,24 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
+         const customerUnit = round2(baseRate + appliedUplift);
+         const termMonths = row.term_months || term || 12;
+         const years = termMonths / 12;
+-        const annualCost = round2((customerUnit * kwh + row.standing_charge * 365) / 100);
++
++        // Day/night (dual-rate) pricing. Previously every offer was costed on the day rate
++        // alone, so an Economy 7 style rate looked far more expensive than it really is and
++        // a battery charging overnight showed no benefit at all. When the matrix row has a
++        // night rate AND the caller supplied a night split, consumption is apportioned and
++        // each portion costed at its own rate.
++        const nightBase = row.night_rate != null ? row.night_rate : null;
++        const eveBase = row.eve_wknd_rate != null ? row.eve_wknd_rate : null;
++        const nightShare = nightBase != null ? Math.min(Math.max(nightPct ?? 0, 0), 100) / 100 : 0;
++        const eveShare = eveBase != null ? Math.min(Math.max(eveWkndPct ?? 0, 0), 100) / 100 : 0;
++        const dayShare = Math.max(0, 1 - nightShare - eveShare);
++
++        const nightUnit = nightBase != null ? round2(nightBase + appliedUplift) : null;
++        const eveUnit = eveBase != null ? round2(eveBase + appliedUplift) : null;
++        const energyCost = (customerUnit * kwh * dayShare)
++          + (nightUnit != null ? nightUnit * kwh * nightShare : 0)
++          + (eveUnit != null ? eveUnit * kwh * eveShare : 0);
++        const annualCost = round2((energyCost + row.standing_charge * 365) / 100);
+         const annualCommission = round2((appliedUplift * kwh) / 100);
+         const totalCommission = round2(annualCommission * years);
+         offers.push({
+@@ -115,9 +136,17 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
+           base_unit_rate: baseRate,
+           uplift: round2(appliedUplift),
+           unit_rate: customerUnit,
++          night_rate: nightUnit,
++          eve_wknd_rate: eveUnit,
++          // true when this offer was actually costed across more than one rate period
++          dual_rate: nightShare > 0 || eveShare > 0,
++          day_split_pct: round2(dayShare * 100),
++          night_split_pct: round2(nightShare * 100),
+           standing_charge: row.standing_charge,
+           annual_cost: annualCost,
+           monthly_cost: round2(annualCost / 12),
++          fuel_mix: p.fuel_mix || null,   // "Green" | "Brown" | "Mix" — set on the product
++          payment_method: p.payment_method || null, // e.g. "Fixed DD", "Cash/Cheque/Bacs" — set on the product
+           annual_commission: annualCommission,
+           total_commission: totalCommission,
+           source: "matrix",
+@@ -148,10 +177,10 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
+ 
+ // POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id?, meter_number?, topline? }
+ r.post("/", (req, res) => {
+-  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline } = req.body || {};
++  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct } = req.body || {};
+   if (!utility) return res.status(400).json({ error: "utility is required" });
+   if (!eac || Number(eac) <= 0) return res.status(400).json({ error: "eac (annual consumption) is required" });
+-  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline }) });
++  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct }) });
+ });
+ 
+ // GET /api/comparison/tariffs?utility=ELECTRICITY  — inspect the raw tariff book
+diff --git a/amsl-backend/src/routes/energyAssets.js b/amsl-backend/src/routes/energyAssets.js
+new file mode 100644
+index 0000000..8e056ab
+--- /dev/null
++++ b/amsl-backend/src/routes/energyAssets.js
+@@ -0,0 +1,58 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++
++const COLS = ["business_id", "asset_type", "manufacturer", "model", "capacity_kw", "capacity_kwh",
++              "quantity", "install_date", "ownership", "meter_id", "mpan", "day_night_active",
++              "charging_strategy", "export_capable", "status", "notes"];
++
++const DETAIL = `SELECT a.*, m.mpan_mprn AS meter_mpan
++                FROM energy_assets a LEFT JOIN meters m ON m.id = a.meter_id`;
++
++// GET /api/energy-assets?business_id=123
++r.get("/", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.business_id) { where.push("a.business_id = ?"); params.push(req.query.business_id); }
++  if (req.query.asset_type) { where.push("a.asset_type = ?"); params.push(req.query.asset_type); }
++  if (req.query.status) { where.push("a.status = ?"); params.push(req.query.status); }
++  const sql = `${DETAIL} ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY a.asset_type, a.id DESC`;
++  res.json({ data: db.prepare(sql).all(...params) });
++});
++
++const bool = (v) => (v === true || v === 1 || v === "1" || v === "true" ? 1 : 0);
++
++r.post("/", (req, res) => {
++  const b = req.body || {};
++  if (!b.business_id) return res.status(400).json({ error: "business_id is required" });
++  if (!b.asset_type) return res.status(400).json({ error: "asset_type is required" });
++  const body = { ...b, day_night_active: bool(b.day_night_active), export_capable: bool(b.export_capable) };
++  const cols = COLS.filter((c) => body[c] !== undefined);
++  const info = db.prepare(`INSERT INTO energy_assets (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`)
++    .run(...cols.map((c) => body[c]));
++  res.status(201).json({ data: db.prepare(`${DETAIL} WHERE a.id = ?`).get(info.lastInsertRowid) });
++});
++
++const upd = (req, res) => {
++  const b = req.body || {};
++  const body = { ...b };
++  if (b.day_night_active !== undefined) body.day_night_active = bool(b.day_night_active);
++  if (b.export_capable !== undefined) body.export_capable = bool(b.export_capable);
++  const cols = COLS.filter((c) => body[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE energy_assets SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => body[c]), req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: db.prepare(`${DETAIL} WHERE a.id = ?`).get(req.params.id) });
++};
++r.put("/:id", upd);
++r.patch("/:id", upd);
++
++r.delete("/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM energy_assets WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++export default r;
+diff --git a/amsl-backend/src/routes/flex.js b/amsl-backend/src/routes/flex.js
+new file mode 100644
+index 0000000..ec3ad52
+--- /dev/null
++++ b/amsl-backend/src/routes/flex.js
+@@ -0,0 +1,66 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++
++const COLS = ["business_id", "business_name", "utility", "meter_number", "annual_volume", "sites_count",
++              "contract_start", "contract_length", "basket_type", "purchasing_strategy", "tranche_count",
++              "index_reference", "risk_appetite", "volume_tolerance", "management_fee",
++              "target_supplier_id", "status", "notes", "agent_id"];
++
++const DETAIL = `SELECT f.*, s.name AS target_supplier_name, a.name AS agent_name
++                FROM flex_requests f
++                LEFT JOIN suppliers s ON s.id = f.target_supplier_id
++                LEFT JOIN agents a ON a.id = f.agent_id`;
++
++// GET /api/flex?business_id=&status=&utility=
++r.get("/", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.business_id) { where.push("f.business_id = ?"); params.push(req.query.business_id); }
++  if (req.query.status) { where.push("f.status = ?"); params.push(req.query.status); }
++  if (req.query.utility) { where.push("f.utility = ?"); params.push(req.query.utility); }
++  const sql = `${DETAIL} ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY f.created_at DESC, f.id DESC`;
++  res.json({ data: db.prepare(sql).all(...params) });
++});
++
++r.get("/:id", (req, res) => {
++  const row = db.prepare(`${DETAIL} WHERE f.id = ?`).get(req.params.id);
++  if (!row) return res.status(404).json({ error: "not found" });
++  res.json({ data: row });
++});
++
++r.post("/", (req, res) => {
++  const b = req.body || {};
++  if (!b.utility) return res.status(400).json({ error: "utility is required" });
++  if (!b.annual_volume || Number(b.annual_volume) <= 0) {
++    return res.status(400).json({ error: "annual_volume (kWh/yr) is required — flex pricing is driven by volume" });
++  }
++  const cols = COLS.filter((c) => b[c] !== undefined);
++  const info = db.prepare(`INSERT INTO flex_requests (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`)
++    .run(...cols.map((c) => b[c]));
++  // Human-friendly reference, assigned after insert so it can include the row id.
++  const ref = `FLX-${String(info.lastInsertRowid).padStart(4, "0")}`;
++  db.prepare("UPDATE flex_requests SET ref=? WHERE id=?").run(ref, info.lastInsertRowid);
++  res.status(201).json({ data: db.prepare(`${DETAIL} WHERE f.id = ?`).get(info.lastInsertRowid) });
++});
++
++const upd = (req, res) => {
++  const b = req.body || {};
++  const cols = COLS.filter((c) => b[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE flex_requests SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => b[c]), req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: db.prepare(`${DETAIL} WHERE f.id = ?`).get(req.params.id) });
++};
++r.put("/:id", upd);
++r.patch("/:id", upd);
++
++r.delete("/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM flex_requests WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++export default r;
+diff --git a/amsl-backend/src/routes/modules.js b/amsl-backend/src/routes/modules.js
+index da53ece..e8095c3 100644
+--- a/amsl-backend/src/routes/modules.js
++++ b/amsl-backend/src/routes/modules.js
+@@ -7,7 +7,8 @@ import { hashPassword } from "./auth.js";
+ /* ---- Agencies (with agent counts, like the UI) ---- */
+ export const agencies = crudRouter({
+   table: "agencies",
+-  columns: ["name", "logo", "status", "email", "phone", "website", "max_users", "company_reg_no", "business_structure", "vat_no", "address", "white_label"],
++  columns: ["name", "logo", "status", "email", "phone", "website", "max_users", "company_reg_no", "business_structure", "vat_no", "address", "white_label",
++            "payout_method", "bank_account_name", "bank_sort_code", "bank_account_no", "crypto_currency", "crypto_network", "wallet_address"],
+   searchColumns: ["name", "email", "company_reg_no"],
+   listSql: `SELECT a.*, (SELECT COUNT(*) FROM agents ag WHERE ag.agency_id = a.id) AS total_agents
+             FROM agencies a`,
+diff --git a/amsl-backend/src/routes/otherServices.js b/amsl-backend/src/routes/otherServices.js
+new file mode 100644
+index 0000000..81d5bae
+--- /dev/null
++++ b/amsl-backend/src/routes/otherServices.js
+@@ -0,0 +1,70 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++
++// GET /api/other-services?business_id=123 — list a business's non-energy services.
++// Bill content is intentionally excluded from the list response (can be large); use the
++// dedicated download route below to fetch it.
++r.get("/", (req, res) => {
++  const businessId = req.query.business_id;
++  if (!businessId) return res.status(400).json({ error: "business_id is required" });
++  const rows = db.prepare(
++    `SELECT id, business_id, service_type, provider, contract_end, notes, bill_filename, bill_mime, created_at
++     FROM other_services WHERE business_id = ? ORDER BY created_at DESC`
++  ).all(businessId);
++  res.json({ data: rows });
++});
++
++r.post("/", (req, res) => {
++  const b = req.body || {};
++  if (!b.business_id) return res.status(400).json({ error: "business_id is required" });
++  if (!b.service_type) return res.status(400).json({ error: "service_type is required" });
++  const info = db.prepare(
++    `INSERT INTO other_services (business_id, service_type, provider, contract_end, notes, bill_filename, bill_mime, bill_data)
++     VALUES (?,?,?,?,?,?,?,?)`
++  ).run(b.business_id, b.service_type, b.provider || null, b.contract_end || null, b.notes || null,
++        b.bill_filename || null, b.bill_mime || null, b.bill_data || null);
++  const row = db.prepare(
++    `SELECT id, business_id, service_type, provider, contract_end, notes, bill_filename, bill_mime, created_at
++     FROM other_services WHERE id = ?`
++  ).get(info.lastInsertRowid);
++  res.status(201).json({ data: row });
++});
++
++const upd = (req, res) => {
++  const b = req.body || {};
++  const cols = [];
++  const vals = [];
++  for (const k of ["service_type", "provider", "contract_end", "notes", "bill_filename", "bill_mime", "bill_data"]) {
++    if (b[k] !== undefined) { cols.push(`${k}=?`); vals.push(b[k]); }
++  }
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE other_services SET ${cols.join(",")} WHERE id=?`).run(...vals, req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  const row = db.prepare(
++    `SELECT id, business_id, service_type, provider, contract_end, notes, bill_filename, bill_mime, created_at
++     FROM other_services WHERE id = ?`
++  ).get(req.params.id);
++  res.json({ data: row });
++};
++r.put("/:id", upd);
++r.patch("/:id", upd);
++
++r.delete("/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM other_services WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++// GET /api/other-services/:id/bill — download the uploaded bill file.
++r.get("/:id/bill", (req, res) => {
++  const row = db.prepare("SELECT bill_filename, bill_mime, bill_data FROM other_services WHERE id=?").get(req.params.id);
++  if (!row || !row.bill_data) return res.status(404).json({ error: "No bill uploaded for this service" });
++  const buf = Buffer.from(row.bill_data, "base64");
++  res.setHeader("Content-Type", row.bill_mime || "application/octet-stream");
++  res.setHeader("Content-Disposition", `attachment; filename="${(row.bill_filename || "bill").replace(/"/g, "")}"`);
++  res.send(buf);
++});
++
++export default r;
+diff --git a/amsl-backend/src/routes/rego.js b/amsl-backend/src/routes/rego.js
+new file mode 100644
+index 0000000..c9cb89d
+--- /dev/null
++++ b/amsl-backend/src/routes/rego.js
+@@ -0,0 +1,148 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++const round2 = (n) => Math.round(n * 100) / 100;
++
++/* ---------- Offers (the marketplace catalogue) ---------- */
++
++// GET /api/rego/offers?marketplace=&technology=&vintage_year=&max_price=&status=
++r.get("/offers", (req, res) => {
++  const where = [];
++  const params = [];
++  const q = req.query;
++  if (q.marketplace) { where.push("marketplace = ?"); params.push(q.marketplace); }
++  if (q.technology) { where.push("technology = ?"); params.push(q.technology); }
++  if (q.country) { where.push("country = ?"); params.push(q.country); }
++  if (q.vintage_year) { where.push("vintage_year = ?"); params.push(Number(q.vintage_year)); }
++  if (q.max_price) { where.push("price_per_mwh <= ?"); params.push(Number(q.max_price)); }
++  // Default to showing only what's actually purchasable; pass status=all to see everything.
++  if (q.status && q.status !== "all") { where.push("status = ?"); params.push(q.status); }
++  else if (!q.status) { where.push("status = 'Available'"); }
++  const sql = `SELECT * FROM rego_offers ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY price_per_mwh ASC, marketplace`;
++  res.json({ data: db.prepare(sql).all(...params) });
++});
++
++const OFFER_COLS = ["marketplace", "technology", "country", "vintage_year", "price_per_mwh",
++                    "volume_available", "generator_name", "status", "notes"];
++
++r.post("/offers", (req, res) => {
++  const b = req.body || {};
++  if (!b.marketplace) return res.status(400).json({ error: "marketplace is required" });
++  if (b.price_per_mwh == null || Number(b.price_per_mwh) < 0) return res.status(400).json({ error: "A valid price_per_mwh is required" });
++  const cols = OFFER_COLS.filter((c) => b[c] !== undefined);
++  const info = db.prepare(`INSERT INTO rego_offers (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`)
++    .run(...cols.map((c) => b[c]));
++  res.status(201).json({ data: db.prepare("SELECT * FROM rego_offers WHERE id=?").get(info.lastInsertRowid) });
++});
++
++const updOffer = (req, res) => {
++  const b = req.body || {};
++  const cols = OFFER_COLS.filter((c) => b[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE rego_offers SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => b[c]), req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: db.prepare("SELECT * FROM rego_offers WHERE id=?").get(req.params.id) });
++};
++r.put("/offers/:id", updOffer);
++r.patch("/offers/:id", updOffer);
++
++r.delete("/offers/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM rego_offers WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++/* ---------- Purchases ---------- */
++
++// GET /api/rego/purchases?business_id=123  (business_id optional — omit for all)
++r.get("/purchases", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.business_id) { where.push("p.business_id = ?"); params.push(req.query.business_id); }
++  if (req.query.status) { where.push("p.status = ?"); params.push(req.query.status); }
++  const sql = `SELECT p.*, b.business_name
++               FROM rego_purchases p LEFT JOIN businesses b ON b.id = p.business_id
++               ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
++               ORDER BY p.purchase_date DESC, p.id DESC`;
++  res.json({ data: db.prepare(sql).all(...params) });
++});
++
++// POST /api/rego/purchases — buy a volume of REGOs for a customer.
++// Decrements the offer's remaining volume in the same transaction so the catalogue can't
++// oversell, and copies the offer's details onto the purchase so the record stays accurate
++// even if the offer is later re-priced or withdrawn.
++r.post("/purchases", (req, res) => {
++  const b = req.body || {};
++  if (!b.business_id) return res.status(400).json({ error: "business_id is required" });
++  const volume = Number(b.volume_mwh);
++  if (!volume || volume <= 0) return res.status(400).json({ error: "volume_mwh must be greater than zero" });
++
++  const offer = b.offer_id ? db.prepare("SELECT * FROM rego_offers WHERE id=?").get(b.offer_id) : null;
++  if (b.offer_id && !offer) return res.status(404).json({ error: "offer not found" });
++  if (offer && offer.status !== "Available") return res.status(400).json({ error: `This offer is ${offer.status.toLowerCase()} and can no longer be purchased.` });
++  if (offer && offer.volume_available != null && volume > offer.volume_available) {
++    return res.status(400).json({ error: `Only ${offer.volume_available} MWh remains on this offer.` });
++  }
++
++  const price = b.price_per_mwh != null ? Number(b.price_per_mwh) : offer?.price_per_mwh;
++  if (price == null) return res.status(400).json({ error: "price_per_mwh is required when no offer is selected" });
++  const total = round2(price * volume);
++
++  const tx = db.transaction(() => {
++    const info = db.prepare(`INSERT INTO rego_purchases
++      (business_id, offer_id, marketplace, technology, country, vintage_year, volume_mwh, price_per_mwh, total_cost, purchase_date, certificate_ref, status, notes)
++      VALUES (?,?,?,?,?,?,?,?,?,COALESCE(?, date('now')),?,?,?)`)
++      .run(b.business_id, b.offer_id || null,
++        b.marketplace ?? offer?.marketplace ?? null,
++        b.technology ?? offer?.technology ?? null,
++        b.country ?? offer?.country ?? null,
++        b.vintage_year ?? offer?.vintage_year ?? null,
++        volume, price, total, b.purchase_date || null,
++        b.certificate_ref || null, b.status || "Ordered", b.notes || null);
++
++    if (offer && offer.volume_available != null) {
++      const remaining = round2(offer.volume_available - volume);
++      db.prepare("UPDATE rego_offers SET volume_available=?, status=? WHERE id=?")
++        .run(remaining, remaining <= 0 ? "Sold Out" : offer.status, offer.id);
++    }
++    return info.lastInsertRowid;
++  });
++
++  const id = tx();
++  res.status(201).json({ data: db.prepare("SELECT * FROM rego_purchases WHERE id=?").get(id) });
++});
++
++const updPurchase = (req, res) => {
++  const b = req.body || {};
++  const cols = ["certificate_ref", "status", "notes", "purchase_date"].filter((c) => b[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE rego_purchases SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => b[c]), req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: db.prepare("SELECT * FROM rego_purchases WHERE id=?").get(req.params.id) });
++};
++r.put("/purchases/:id", updPurchase);
++r.patch("/purchases/:id", updPurchase);
++
++// Cancelling a purchase returns its volume to the originating offer, so the catalogue
++// stays consistent rather than permanently losing that stock.
++r.delete("/purchases/:id", (req, res) => {
++  const p = db.prepare("SELECT * FROM rego_purchases WHERE id=?").get(req.params.id);
++  if (!p) return res.status(404).json({ error: "not found" });
++  const tx = db.transaction(() => {
++    db.prepare("DELETE FROM rego_purchases WHERE id=?").run(req.params.id);
++    if (p.offer_id) {
++      const offer = db.prepare("SELECT * FROM rego_offers WHERE id=?").get(p.offer_id);
++      if (offer && offer.volume_available != null) {
++        db.prepare("UPDATE rego_offers SET volume_available=?, status=? WHERE id=?")
++          .run(round2(offer.volume_available + p.volume_mwh), offer.status === "Sold Out" ? "Available" : offer.status, offer.id);
++      }
++    }
++  });
++  tx();
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++export default r;
+diff --git a/amsl-backend/src/server.js b/amsl-backend/src/server.js
+index 91a8fc7..043aa25 100644
+--- a/amsl-backend/src/server.js
++++ b/amsl-backend/src/server.js
+@@ -10,6 +10,11 @@ import pipeline from "./routes/pipeline.js";
+ import uplift from "./routes/uplift.js";
+ import permissions from "./routes/permissions.js";
+ import branding from "./routes/branding.js";
++import otherServices from "./routes/otherServices.js";
++import rego from "./routes/rego.js";
++import flex from "./routes/flex.js";
++import energyAssets from "./routes/energyAssets.js";
++import agencyPayouts from "./routes/agencyPayouts.js";
+ import disclaimer from "./routes/disclaimer.js";
+ import platform from "./routes/platform.js";
+ import commission from "./routes/commission.js";
+@@ -79,6 +84,11 @@ api.use("/pipeline", pipeline);
+ api.use("/uplift-caps", uplift);
+ api.use("/permissions", permissions);
+ api.use("/branding", branding);
++api.use("/other-services", otherServices);
++api.use("/rego", rego);
++api.use("/flex", flex);
++api.use("/energy-assets", energyAssets);
++api.use("/agency-payouts", agencyPayouts);
+ api.use("/disclaimer", disclaimer);
+ api.use("/platform", platform);
+ api.use("/commission", commission);
+diff --git a/amsl-frontend/src/App.jsx b/amsl-frontend/src/App.jsx
+index e85d503..c7a72b4 100644
+--- a/amsl-frontend/src/App.jsx
++++ b/amsl-frontend/src/App.jsx
+@@ -24,6 +24,7 @@ import Settings from "./pages/Settings.jsx";
+ import Commission from "./pages/Commission.jsx";
+ import BillValidation from "./pages/BillValidation.jsx";
+ import EiiCertificates from "./pages/EiiCertificates.jsx";
++import RegoCertificates from "./pages/RegoCertificates.jsx";
+ import Quotes from "./pages/Quotes.jsx";
+ import NewQuote from "./pages/NewQuote.jsx";
+ import Contracts from "./pages/Contracts.jsx";
+@@ -78,6 +79,7 @@ export default function App() {
+               <Route path="commission" element={<Commission />} />
+               <Route path="bill-validation" element={<BillValidation />} />
+               <Route path="eii-certificates" element={<EiiCertificates />} />
++              <Route path="rego-certificates" element={<RegoCertificates />} />
+               <Route path="contracts" element={<Contracts />} />
+               <Route path="contracts/:id" element={<ContractDetail />} />
+               <Route path="contracts/generate" element={<GenerateContract />} />
+diff --git a/amsl-frontend/src/api.js b/amsl-frontend/src/api.js
+index c218eeb..3a2e5d0 100644
+--- a/amsl-frontend/src/api.js
++++ b/amsl-frontend/src/api.js
+@@ -1,4 +1,5 @@
+ const BASE = import.meta.env.VITE_API_URL || "/api";
++export const API_BASE = BASE; // exported so components can build direct download links (e.g. bill files)
+ 
+ let token = null;
+ try { token = localStorage.getItem("amsl_token"); } catch { /* ignore */ }
+@@ -86,6 +87,30 @@ export const api = {
+   brandingSet: (b) => request(`/branding`, { method: "PUT", body: b }),
+   disclaimer: () => request(`/disclaimer`),
+   disclaimerSet: (text) => request(`/disclaimer`, { method: "PUT", body: { text } }),
++  otherServicesList: (businessId) => request(`/other-services?business_id=${businessId}`),
++  otherServiceCreate: (body) => request(`/other-services`, { method: "POST", body }),
++  otherServiceUpdate: (id, body) => request(`/other-services/${id}`, { method: "PUT", body }),
++  otherServiceDelete: (id) => request(`/other-services/${id}`, { method: "DELETE" }),
++  regoOffers: (q = {}) => request(`/rego/offers?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
++  regoOfferCreate: (body) => request(`/rego/offers`, { method: "POST", body }),
++  regoOfferUpdate: (id, body) => request(`/rego/offers/${id}`, { method: "PUT", body }),
++  regoOfferDelete: (id) => request(`/rego/offers/${id}`, { method: "DELETE" }),
++  regoPurchases: (q = {}) => request(`/rego/purchases?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
++  regoPurchaseCreate: (body) => request(`/rego/purchases`, { method: "POST", body }),
++  regoPurchaseUpdate: (id, body) => request(`/rego/purchases/${id}`, { method: "PUT", body }),
++  regoPurchaseDelete: (id) => request(`/rego/purchases/${id}`, { method: "DELETE" }),
++  flexList: (q = {}) => request(`/flex?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
++  flexCreate: (body) => request(`/flex`, { method: "POST", body }),
++  flexUpdate: (id, body) => request(`/flex/${id}`, { method: "PUT", body }),
++  flexDelete: (id) => request(`/flex/${id}`, { method: "DELETE" }),
++  energyAssets: (businessId) => request(`/energy-assets?business_id=${businessId}`),
++  energyAssetCreate: (body) => request(`/energy-assets`, { method: "POST", body }),
++  energyAssetUpdate: (id, body) => request(`/energy-assets/${id}`, { method: "PUT", body }),
++  energyAssetDelete: (id) => request(`/energy-assets/${id}`, { method: "DELETE" }),
++  agencyPayouts: (q = {}) => request(`/agency-payouts?${new URLSearchParams(Object.fromEntries(Object.entries(q).filter(([, v]) => v !== "" && v != null)))}`),
++  agencyPayoutCreate: (body) => request(`/agency-payouts`, { method: "POST", body }),
++  agencyPayoutUpdate: (id, body) => request(`/agency-payouts/${id}`, { method: "PUT", body }),
++  agencyPayoutDelete: (id) => request(`/agency-payouts/${id}`, { method: "DELETE" }),
+   tutorials: () => request(`/platform/tutorials`),
+   tutorialAdd: (t) => request(`/platform/tutorials`, { method: "POST", body: t }),
+   tutorialDelete: (id) => request(`/platform/tutorials/${id}`, { method: "DELETE" }),
+diff --git a/amsl-frontend/src/components/AgencyPayoutsTab.jsx b/amsl-frontend/src/components/AgencyPayoutsTab.jsx
+new file mode 100644
+index 0000000..95f91af
+--- /dev/null
++++ b/amsl-frontend/src/components/AgencyPayoutsTab.jsx
+@@ -0,0 +1,269 @@
++import { useState, useEffect, useCallback } from "react";
++import { Plus, Trash2, Bitcoin, Landmark, RotateCcw, Pencil } from "lucide-react";
++import { api } from "../api.js";
++import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "./ui.jsx";
++
++const money = (n, ccy = "GBP") =>
++  (ccy === "GBP" ? "£" : "") + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++const isCrypto = (m) => String(m || "").toLowerCase().includes("crypto");
++const TONE = { "Awaiting Supplier": "slate", "Ready to Pay": "amber", Paid: "green", Failed: "rose", "On Hold": "indigo" };
++const sel = { padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" };
++
++export default function AgencyPayoutsTab() {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [f, setF] = useState({ agency_id: "", status: "", payment_method: "" });
++  const [agencies, setAgencies] = useState([]);
++  const [cfg, setCfg] = useState({});
++  const [showAdd, setShowAdd] = useState(false);
++  const [editing, setEditing] = useState(null);
++
++  const load = useCallback(() => {
++    setRows(null);
++    api.agencyPayouts(f).then((r) => setRows(r.data)).catch((e) => setErr(e.message));
++  }, [f]);
++  useEffect(() => { load(); }, [load]);
++  useEffect(() => {
++    api.list("agencies", { limit: 300 }).then((r) => setAgencies(r.data)).catch(() => {});
++    api.configLookups().then((c) => setCfg({
++      methods: (c.data["Agency Payout Method"] || []).map((x) => x.value),
++      coins: (c.data["Cryptocurrency"] || []).map((x) => x.value),
++      networks: (c.data["Crypto Network"] || []).map((x) => x.value),
++      statuses: (c.data["Agency Payout Status"] || []).map((x) => x.value),
++    })).catch(() => {});
++  }, []);
++
++  const del = async (row) => {
++    if (!confirm(`Delete this payout to ${row.agency_name}?`)) return;
++    try { await api.agencyPayoutDelete(row.id); load(); } catch (e) { alert(e.message); }
++  };
++  const setStatus = async (row, status) => {
++    try { await api.agencyPayoutUpdate(row.id, { status }); load(); }
++    catch (e) { alert(e.message); load(); }
++  };
++
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++  const active = Object.values(f).some(Boolean);
++  const owed = rows?.filter((r) => r.status !== "Paid").reduce((s, r) => s + Number(r.net_amount || 0), 0) || 0;
++  const paid = rows?.filter((r) => r.status === "Paid").reduce((s, r) => s + Number(r.net_amount || 0), 0) || 0;
++
++  return (
++    <Card right={<button className="btn primary sm" onClick={() => setShowAdd(true)}><Plus size={14} /> New Payout</button>}>
++      <p className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
++        Commission owed to agencies. A payout can only be marked Paid once the supplier payment date is recorded —
++        we pay agencies out of money we've actually received.
++      </p>
++      <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
++        <select value={f.agency_id} onChange={set("agency_id")} style={sel}>
++          <option value="">All agencies</option>
++          {agencies.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
++        </select>
++        <select value={f.status} onChange={set("status")} style={sel}>
++          <option value="">All statuses</option>
++          {(cfg.statuses || []).map((s) => <option key={s}>{s}</option>)}
++        </select>
++        <select value={f.payment_method} onChange={set("payment_method")} style={sel}>
++          <option value="">All methods</option>
++          {(cfg.methods || []).map((m) => <option key={m}>{m}</option>)}
++        </select>
++        {active && <button className="btn ghost" onClick={() => setF({ agency_id: "", status: "", payment_method: "" })}><RotateCcw size={14} /> Reset</button>}
++        {rows && rows.length > 0 && (
++          <span className="sub" style={{ fontSize: 12, marginLeft: "auto" }}>
++            Outstanding <b>{money(owed)}</b> · Paid <b>{money(paid)}</b>
++          </span>
++        )}
++      </div>
++
++      {err && <ErrorBanner error={err} onRetry={load} />}
++      {!rows ? <Spinner /> : (
++        <div className="table-wrap">
++          <table className="tbl">
++            <thead><tr>
++              <th>Agency</th><th>Supplier</th><th>Net</th><th>Method</th><th>Crypto Detail</th>
++              <th>Supplier Paid</th><th>Paid On</th><th>Status</th><th></th>
++            </tr></thead>
++            <tbody>
++              {rows.length === 0 && <tr><td colSpan={9} className="state">No agency payouts recorded yet.</td></tr>}
++              {rows.map((p) => (
++                <tr key={p.id}>
++                  <td className="name">{p.agency_name || "—"}</td>
++                  <td style={{ fontSize: 12 }}>{p.supplier_name || "—"}</td>
++                  <td className="name">{money(p.net_amount)}</td>
++                  <td>
++                    <span className="mini">
++                      <span className="ini sq">{isCrypto(p.payment_method) ? <Bitcoin size={13} /> : <Landmark size={13} />}</span>
++                      <span style={{ fontSize: 12 }}>{p.payment_method}</span>
++                    </span>
++                  </td>
++                  <td style={{ fontSize: 11.5 }}>
++                    {isCrypto(p.payment_method) ? (
++                      <>
++                        <div><b>{p.crypto_amount ?? "—"}</b> {(p.crypto_currency || "").split(" ")[0]}</div>
++                        <div className="sub">{p.crypto_network || "—"}{p.exchange_rate ? ` · @ ${money(p.exchange_rate)}` : ""}</div>
++                        {p.wallet_address && <div className="sub mono" style={{ fontSize: 10 }} title={p.wallet_address}>{p.wallet_address.slice(0, 10)}…{p.wallet_address.slice(-6)}</div>}
++                        {p.tx_hash && <div className="sub mono" style={{ fontSize: 10 }} title={p.tx_hash}>tx {p.tx_hash.slice(0, 10)}…</div>}
++                      </>
++                    ) : <span className="sub">—</span>}
++                  </td>
++                  <td className="mono" style={{ fontSize: 12 }}>{p.supplier_paid_on ? new Date(p.supplier_paid_on).toLocaleDateString("en-GB") : <span className="sub">—</span>}</td>
++                  <td className="mono" style={{ fontSize: 12 }}>{p.paid_on ? new Date(p.paid_on).toLocaleDateString("en-GB") : <span className="sub">—</span>}</td>
++                  <td>
++                    <select value={p.status} onChange={(e) => setStatus(p, e.target.value)}
++                      style={{ fontSize: 11.5, padding: "3px 6px", borderRadius: 6, border: "1px solid var(--line,#E7EBF0)" }}>
++                      {(cfg.statuses || ["Awaiting Supplier", "Ready to Pay", "Paid", "Failed", "On Hold"]).map((s) => <option key={s}>{s}</option>)}
++                    </select>
++                    <div style={{ marginTop: 2 }}><Badge tone={TONE[p.status] || "slate"}>{p.status}</Badge></div>
++                  </td>
++                  <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
++                    <button className="btn ghost sm" onClick={() => setEditing(p)}><Pencil size={13} /></button>
++                    <button className="btn ghost sm" onClick={() => del(p)}><Trash2 size={13} /></button>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++
++      {(showAdd || editing) && (
++        <PayoutModal payout={editing} agencies={agencies} cfg={cfg}
++          onClose={() => { setShowAdd(false); setEditing(null); }}
++          onSaved={() => { setShowAdd(false); setEditing(null); load(); }} />
++      )}
++    </Card>
++  );
++}
++
++function PayoutModal({ payout, agencies, cfg, onClose, onSaved }) {
++  const [f, setF] = useState({
++    agency_id: payout?.agency_id || "", supplier_id: payout?.supplier_id || "",
++    gross_amount: payout?.gross_amount ?? "", vat_amount: payout?.vat_amount ?? "",
++    payment_method: payout?.payment_method || "BACS",
++    supplier_paid_on: payout?.supplier_paid_on || "", status: payout?.status || "Awaiting Supplier",
++    reference: payout?.reference || "",
++    crypto_currency: payout?.crypto_currency || "", crypto_network: payout?.crypto_network || "",
++    wallet_address: payout?.wallet_address || "", exchange_rate: payout?.exchange_rate ?? "",
++    tx_hash: payout?.tx_hash || "", notes: payout?.notes || "",
++  });
++  const [suppliers, setSuppliers] = useState([]);
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  useEffect(() => { api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {}); }, []);
++
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++  const crypto = isCrypto(f.payment_method);
++  const net = (Number(f.gross_amount) || 0) - (Number(f.vat_amount) || 0);
++  const coinAmount = crypto && Number(f.exchange_rate) > 0 ? net / Number(f.exchange_rate) : null;
++
++  // Pre-fill wallet details from the agency's saved defaults when switching to crypto.
++  const onAgency = (e) => {
++    const id = e.target.value;
++    const a = agencies.find((x) => String(x.id) === String(id));
++    setF((p) => ({
++      ...p, agency_id: id,
++      payment_method: a?.payout_method || p.payment_method,
++      crypto_currency: a?.crypto_currency || p.crypto_currency,
++      crypto_network: a?.crypto_network || p.crypto_network,
++      wallet_address: a?.wallet_address || p.wallet_address,
++    }));
++  };
++
++  const save = async () => {
++    if (!f.agency_id) return setErr("Select an agency");
++    if (!f.gross_amount || Number(f.gross_amount) <= 0) return setErr("Enter a gross amount");
++    setSaving(true); setErr(null);
++    const num = (v) => (v === "" || v == null ? null : Number(v));
++    const body = {
++      agency_id: Number(f.agency_id), supplier_id: num(f.supplier_id),
++      gross_amount: Number(f.gross_amount), vat_amount: Number(f.vat_amount) || 0,
++      payment_method: f.payment_method, supplier_paid_on: f.supplier_paid_on || null,
++      status: f.status, reference: f.reference || null,
++      crypto_currency: crypto ? f.crypto_currency || null : null,
++      crypto_network: crypto ? f.crypto_network || null : null,
++      wallet_address: crypto ? f.wallet_address || null : null,
++      exchange_rate: crypto ? num(f.exchange_rate) : null,
++      tx_hash: crypto ? f.tx_hash || null : null,
++      notes: f.notes || null,
++    };
++    try {
++      if (payout) await api.agencyPayoutUpdate(payout.id, body);
++      else await api.agencyPayoutCreate(body);
++      onSaved();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title={payout ? "Edit Payout" : "New Agency Payout"} onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Payout"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="grid cols-2">
++        <Field label="Agency *">
++          <select value={f.agency_id} onChange={onAgency}>
++            <option value="">Select agency…</option>
++            {agencies.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
++          </select>
++        </Field>
++        <Field label="Supplier (source of the commission)">
++          <select value={f.supplier_id} onChange={set("supplier_id")}>
++            <option value="">—</option>
++            {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
++          </select>
++        </Field>
++        <Field label="Gross Amount (£) *"><input type="number" step="0.01" value={f.gross_amount} onChange={set("gross_amount")} /></Field>
++        <Field label="VAT (£)"><input type="number" step="0.01" value={f.vat_amount} onChange={set("vat_amount")} /></Field>
++        <Field label="Supplier Paid Us On"><input type="date" value={f.supplier_paid_on} onChange={set("supplier_paid_on")} /></Field>
++        <Field label="Payment Method">
++          <select value={f.payment_method} onChange={set("payment_method")}>
++            {(cfg.methods || ["BACS", "Faster Payments", "CHAPS", "Cheque", "Cryptocurrency"]).map((m) => <option key={m}>{m}</option>)}
++          </select>
++        </Field>
++        <Field label="Status">
++          <select value={f.status} onChange={set("status")}>
++            {(cfg.statuses || ["Awaiting Supplier", "Ready to Pay", "Paid", "Failed", "On Hold"]).map((s) => <option key={s}>{s}</option>)}
++          </select>
++        </Field>
++        <Field label="Reference"><input value={f.reference} onChange={set("reference")} /></Field>
++      </div>
++
++      <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 8, background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", display: "flex", justifyContent: "space-between" }}>
++        <span className="sub" style={{ fontSize: 12 }}>Net payable to agency</span>
++        <b style={{ fontSize: 16, color: "var(--brand,#0E7C7B)" }}>{money(net)}</b>
++      </div>
++
++      {crypto && (
++        <div style={{ marginTop: 10, padding: "12px", borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a" }}>
++          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
++            <Bitcoin size={14} /> Cryptocurrency Payment
++          </div>
++          <div className="sub" style={{ fontSize: 11, marginBottom: 10 }}>
++            Check the network carefully — sending to the right address on the wrong chain will lose the funds.
++          </div>
++          <div className="grid cols-2">
++            <Field label="Coin">
++              <select value={f.crypto_currency} onChange={set("crypto_currency")}>
++                <option value="">Select…</option>
++                {(cfg.coins || []).map((c) => <option key={c}>{c}</option>)}
++              </select>
++            </Field>
++            <Field label="Network *">
++              <select value={f.crypto_network} onChange={set("crypto_network")}>
++                <option value="">Select…</option>
++                {(cfg.networks || []).map((n) => <option key={n}>{n}</option>)}
++              </select>
++            </Field>
++            <Field label="Exchange Rate (£ per coin)"><input type="number" step="0.01" value={f.exchange_rate} onChange={set("exchange_rate")} /></Field>
++            <Field label="Transaction Hash"><input value={f.tx_hash} onChange={set("tx_hash")} placeholder="Required to mark as Paid" /></Field>
++          </div>
++          <Field label="Wallet Address *"><input className="mono" value={f.wallet_address} onChange={set("wallet_address")} /></Field>
++          {coinAmount != null && (
++            <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
++              <span className="sub">Coin amount to send</span>
++              <b>{coinAmount.toFixed(8)} {(f.crypto_currency || "").split(" ")[0]}</b>
++            </div>
++          )}
++        </div>
++      )}
++      <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
+diff --git a/amsl-frontend/src/components/EnergyAssetsTab.jsx b/amsl-frontend/src/components/EnergyAssetsTab.jsx
+new file mode 100644
+index 0000000..c20609d
+--- /dev/null
++++ b/amsl-frontend/src/components/EnergyAssetsTab.jsx
+@@ -0,0 +1,198 @@
++import { useState, useEffect } from "react";
++import { Plus, Pencil, Trash2, BatteryCharging, Plug, Sun, Zap, Moon } from "lucide-react";
++import { api } from "../api.js";
++import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "./ui.jsx";
++
++const ICONS = {
++  "Battery Storage": BatteryCharging,
++  "EV Charge Point": Plug,
++  "Solar PV": Sun,
++};
++// Only these assets can shift load into the night rate period, so the day/night tariff
++// question is only relevant (and only shown) for them.
++const DAY_NIGHT_RELEVANT = ["Battery Storage", "EV Charge Point"];
++const num = (v) => (v === "" || v == null ? null : Number(v));
++
++export default function EnergyAssetsTab({ businessId }) {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [showAdd, setShowAdd] = useState(false);
++  const [editing, setEditing] = useState(null);
++  const [cfg, setCfg] = useState({});
++
++  const load = () => api.energyAssets(businessId).then((r) => setRows(r.data)).catch((e) => setErr(e.message));
++  useEffect(load, [businessId]); // eslint-disable-line
++  useEffect(() => {
++    api.configLookups().then((c) => setCfg({
++      types: (c.data["Energy Asset Type"] || []).map((x) => x.value),
++      ownership: (c.data["Asset Ownership"] || []).map((x) => x.value),
++      strategies: (c.data["Battery Charging Strategy"] || []).map((x) => x.value),
++    })).catch(() => {});
++  }, []);
++
++  const del = async (row) => {
++    if (!confirm(`Remove this ${row.asset_type} record?`)) return;
++    try { await api.energyAssetDelete(row.id); load(); } catch (e) { alert(e.message); }
++  };
++
++  if (err) return <ErrorBanner error={err} onRetry={load} />;
++  if (!rows) return <Spinner />;
++
++  return (
++    <Card title="Energy Assets" right={<button className="btn primary sm" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Asset</button>}>
++      <p className="sub" style={{ fontSize: 12, marginBottom: 12 }}>
++        On-site generation, storage and charging equipment. For batteries and EV chargers, the day/night flag records
++        whether the site is on a dual-rate tariff — which is what makes overnight charging worth costing separately.
++      </p>
++      <div className="table-wrap">
++        <table className="tbl">
++          <thead><tr>
++            <th>Asset</th><th>Make / Model</th><th>Rating</th><th>Qty</th>
++            <th>Day/Night</th><th>Strategy</th><th>Ownership</th><th>Status</th><th></th>
++          </tr></thead>
++          <tbody>
++            {rows.length === 0 && <tr><td colSpan={9} className="state">No energy assets recorded — add one with "Add Asset".</td></tr>}
++            {rows.map((a) => {
++              const Icon = ICONS[a.asset_type] || Zap;
++              const relevant = DAY_NIGHT_RELEVANT.includes(a.asset_type);
++              return (
++                <tr key={a.id}>
++                  <td><span className="mini"><span className="ini sq"><Icon size={14} /></span><span className="name">{a.asset_type}</span></span></td>
++                  <td style={{ fontSize: 12 }}>{[a.manufacturer, a.model].filter(Boolean).join(" ") || "—"}</td>
++                  <td className="mono" style={{ fontSize: 12 }}>
++                    {a.capacity_kw != null ? `${a.capacity_kw} kW` : ""}
++                    {a.capacity_kw != null && a.capacity_kwh != null ? " / " : ""}
++                    {a.capacity_kwh != null ? `${a.capacity_kwh} kWh` : ""}
++                    {a.capacity_kw == null && a.capacity_kwh == null ? "—" : ""}
++                  </td>
++                  <td className="mono">{a.quantity ?? 1}</td>
++                  <td>
++                    {!relevant ? <span className="sub">n/a</span>
++                      : Number(a.day_night_active)
++                        ? <Badge tone="indigo"><Moon size={11} style={{ verticalAlign: "-1px", marginRight: 2 }} />Active</Badge>
++                        : <Badge tone="slate">Single rate</Badge>}
++                  </td>
++                  <td style={{ fontSize: 12 }}>{a.charging_strategy || <span className="sub">—</span>}</td>
++                  <td style={{ fontSize: 12 }}>{a.ownership || "—"}</td>
++                  <td><Badge tone={a.status === "Active" ? "green" : a.status === "Planned" ? "amber" : "slate"}>{a.status}</Badge></td>
++                  <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
++                    <button className="btn ghost sm" onClick={() => setEditing(a)}><Pencil size={13} /></button>
++                    <button className="btn ghost sm" onClick={() => del(a)}><Trash2 size={13} /></button>
++                  </td>
++                </tr>
++              );
++            })}
++          </tbody>
++        </table>
++      </div>
++      {(showAdd || editing) && (
++        <AssetModal businessId={businessId} asset={editing} cfg={cfg}
++          onClose={() => { setShowAdd(false); setEditing(null); }}
++          onSaved={() => { setShowAdd(false); setEditing(null); load(); }} />
++      )}
++    </Card>
++  );
++}
++
++function AssetModal({ businessId, asset, cfg, onClose, onSaved }) {
++  const [f, setF] = useState({
++    asset_type: asset?.asset_type || "Battery Storage",
++    manufacturer: asset?.manufacturer || "", model: asset?.model || "",
++    capacity_kw: asset?.capacity_kw ?? "", capacity_kwh: asset?.capacity_kwh ?? "",
++    quantity: asset?.quantity ?? 1, install_date: asset?.install_date || "",
++    ownership: asset?.ownership || "", mpan: asset?.mpan || "",
++    day_night_active: !!Number(asset?.day_night_active),
++    charging_strategy: asset?.charging_strategy || "",
++    export_capable: !!Number(asset?.export_capable),
++    status: asset?.status || "Active", notes: asset?.notes || "",
++  });
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
++
++  const isBattery = f.asset_type === "Battery Storage";
++  const relevant = DAY_NIGHT_RELEVANT.includes(f.asset_type);
++
++  const save = async () => {
++    setSaving(true); setErr(null);
++    const body = {
++      business_id: businessId, asset_type: f.asset_type,
++      manufacturer: f.manufacturer || null, model: f.model || null,
++      capacity_kw: num(f.capacity_kw), capacity_kwh: num(f.capacity_kwh),
++      quantity: num(f.quantity) ?? 1, install_date: f.install_date || null,
++      ownership: f.ownership || null, mpan: f.mpan || null,
++      day_night_active: relevant && f.day_night_active ? 1 : 0,
++      charging_strategy: relevant ? (f.charging_strategy || null) : null,
++      export_capable: f.export_capable ? 1 : 0,
++      status: f.status, notes: f.notes || null,
++    };
++    try {
++      if (asset) await api.energyAssetUpdate(asset.id, body);
++      else await api.energyAssetCreate(body);
++      onSaved();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title={asset ? "Edit Energy Asset" : "Add Energy Asset"} onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="grid cols-2">
++        <Field label="Asset Type *">
++          <select value={f.asset_type} onChange={set("asset_type")}>
++            {(cfg.types || ["Battery Storage", "EV Charge Point", "Solar PV"]).map((t) => <option key={t}>{t}</option>)}
++          </select>
++        </Field>
++        <Field label="Status">
++          <select value={f.status} onChange={set("status")}>
++            <option>Active</option><option>Planned</option><option>Decommissioned</option>
++          </select>
++        </Field>
++        <Field label="Manufacturer"><input value={f.manufacturer} onChange={set("manufacturer")} placeholder="e.g. Tesla, Zappi, GivEnergy" /></Field>
++        <Field label="Model"><input value={f.model} onChange={set("model")} /></Field>
++        <Field label={isBattery ? "Power Rating (kW)" : "Rating (kW)"}>
++          <input type="number" step="0.1" value={f.capacity_kw} onChange={set("capacity_kw")} placeholder={f.asset_type === "EV Charge Point" ? "e.g. 7.4 or 22" : ""} />
++        </Field>
++        {isBattery && <Field label="Storage Capacity (kWh)"><input type="number" step="0.1" value={f.capacity_kwh} onChange={set("capacity_kwh")} /></Field>}
++        <Field label={f.asset_type === "EV Charge Point" ? "Number of Sockets" : "Quantity"}><input type="number" value={f.quantity} onChange={set("quantity")} /></Field>
++        <Field label="Install Date"><input type="date" value={f.install_date} onChange={set("install_date")} /></Field>
++        <Field label="Ownership">
++          <select value={f.ownership} onChange={set("ownership")}>
++            <option value="">Select…</option>
++            {(cfg.ownership || []).map((o) => <option key={o}>{o}</option>)}
++          </select>
++        </Field>
++        <Field label="MPAN (if behind a specific meter)"><input value={f.mpan} onChange={set("mpan")} /></Field>
++      </div>
++
++      {relevant && (
++        <div style={{ marginTop: 6, padding: "10px 12px", borderRadius: 8, background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)" }}>
++          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600 }}>
++            <input type="checkbox" checked={f.day_night_active} onChange={set("day_night_active")} style={{ width: 16, height: 16, accentColor: "var(--brand,#0E7C7B)" }} />
++            Day/Night (dual-rate) tariff active on this supply
++          </label>
++          <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
++            Tick this when the site is on an Economy 7 / dual-rate meter. It records that overnight charging is
++            being priced at the night rate rather than a single flat rate.
++          </div>
++          {f.day_night_active && (
++            <div style={{ marginTop: 10 }}>
++              <Field label="Charging Strategy">
++                <select value={f.charging_strategy} onChange={set("charging_strategy")}>
++                  <option value="">Select…</option>
++                  {(cfg.strategies || []).map((s) => <option key={s}>{s}</option>)}
++                </select>
++              </Field>
++            </div>
++          )}
++        </div>
++      )}
++
++      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, marginTop: 10 }}>
++        <input type="checkbox" checked={f.export_capable} onChange={set("export_capable")} style={{ width: 16, height: 16, accentColor: "var(--brand,#0E7C7B)" }} />
++        Can export / discharge back to the grid
++      </label>
++      <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
+diff --git a/amsl-frontend/src/components/Layout.jsx b/amsl-frontend/src/components/Layout.jsx
+index 95be699..a071d41 100644
+--- a/amsl-frontend/src/components/Layout.jsx
++++ b/amsl-frontend/src/components/Layout.jsx
+@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, Link } from "react-router-do
+ import {
+   LayoutDashboard, Building2, Users, Truck, CreditCard, Package,
+   UserPlus, FilePlus2, ClipboardList, UserCheck, FileSignature, Ticket,
+-  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter} from "lucide-react";
++  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf} from "lucide-react";
+ import { useAuth } from "./AuthContext.jsx";
+ import { api } from "../api.js";
+ import { initials } from "./ui.jsx";
+@@ -75,6 +75,7 @@ const NAV = [
+   { group: "Compliance", icon: ShieldAlert, items: [
+     { to: "/bill-validation", icon: ShieldAlert, label: "Bill Validation" },
+     { to: "/eii-certificates", icon: FileCheck2, label: "EII Certificates" },
++    { to: "/rego-certificates", icon: Leaf, label: "REGO Certificates" },
+   ] },
+   { to: "/tutorials", icon: GraduationCap, label: "Platform Guide" },
+   { to: "/settings", icon: SlidersHorizontal, label: "System Settings" },
+diff --git a/amsl-frontend/src/components/OtherServicesTab.jsx b/amsl-frontend/src/components/OtherServicesTab.jsx
+new file mode 100644
+index 0000000..4cc8baf
+--- /dev/null
++++ b/amsl-frontend/src/components/OtherServicesTab.jsx
+@@ -0,0 +1,173 @@
++import { useState, useEffect } from "react";
++import { Plus, Pencil, Trash2, Download, Droplets, Trash, CreditCard, FileUp, Fuel } from "lucide-react";
++import { api, API_BASE } from "../api.js";
++import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "./ui.jsx";
++
++const SERVICE_TYPES = ["Water", "Waste", "Card Payment", "LPG"];
++
++// Each service type's provider dropdown is admin-managed via System Settings, under the
++// matching category below — the same generic add/edit/delete lookup mechanism every other
++// dropdown in the app uses (Contract Stage, Payment Type, etc). Nothing is hardcoded here;
++// adding/removing a provider is just editing that category in Settings.
++const PROVIDER_CATEGORY = {
++  Water: "Water Provider",
++  Waste: "Waste Provider",
++  "Card Payment": "Card Payment Provider",
++  LPG: "LPG Provider",
++};
++
++const ICONS = { Water: Droplets, Waste: Trash, "Card Payment": CreditCard, LPG: Fuel };
++const MAX_BILL_MB = 8;
++
++const fileToBase64 = (file) => new Promise((resolve, reject) => {
++  const r = new FileReader();
++  r.onload = () => resolve(String(r.result).split(",")[1] || "");
++  r.onerror = () => reject(new Error("Could not read the file"));
++  r.readAsDataURL(file);
++});
++
++export default function OtherServicesTab({ businessId }) {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [showAdd, setShowAdd] = useState(false);
++  const [editing, setEditing] = useState(null);
++
++  const load = () => api.otherServicesList(businessId).then((r) => setRows(r.data)).catch((e) => setErr(e.message));
++  useEffect(load, [businessId]); // eslint-disable-line
++
++  const del = async (row) => {
++    if (!confirm(`Remove this ${row.service_type} service record?`)) return;
++    try { await api.otherServiceDelete(row.id); load(); }
++    catch (e) { alert(e.message); }
++  };
++
++  const daysLeft = (d) => d ? Math.ceil((new Date(d) - new Date()) / 86400000) : null;
++
++  if (err) return <ErrorBanner error={err} onRetry={load} />;
++  if (!rows) return <Spinner />;
++
++  return (
++    <Card title="Other Services" right={<button className="btn primary sm" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Service</button>}>
++      <p className="sub" style={{ fontSize: 12, marginBottom: 12 }}>
++        Non-energy and off-mains services for this customer — Water, Waste, Card Payment, and LPG — each with its own provider, contract end date, and an optional uploaded bill.
++      </p>
++      <table className="tbl">
++        <thead><tr><th>Service</th><th>Provider</th><th>Contract End</th><th>Bill</th><th>Notes</th><th></th></tr></thead>
++        <tbody>
++          {rows.length === 0 && <tr><td colSpan={6} className="sub" style={{ padding: 16, textAlign: "center" }}>No other services recorded — add one with "Add Service".</td></tr>}
++          {rows.map((row) => {
++            const Icon = ICONS[row.service_type] || Droplets;
++            const left = daysLeft(row.contract_end);
++            return (
++              <tr key={row.id}>
++                <td><span className="mini"><span className="ini sq"><Icon size={14} /></span><span className="name">{row.service_type}</span></span></td>
++                <td>{row.provider || "—"}</td>
++                <td>
++                  {row.contract_end ? new Date(row.contract_end).toLocaleDateString("en-GB") : "—"}
++                  {left != null && left <= 30 && (
++                    <span style={{ marginLeft: 6 }}><Badge tone={left < 0 ? "rose" : "amber"}>{left < 0 ? "Expired" : `${left}d left`}</Badge></span>
++                  )}
++                </td>
++                <td>
++                  {row.bill_filename
++                    ? <a className="btn ghost sm" href={`${API_BASE}/other-services/${row.id}/bill`} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><Download size={13} /> {row.bill_filename}</a>
++                    : <span className="sub">—</span>}
++                </td>
++                <td style={{ fontSize: 12, maxWidth: 220 }}>{row.notes || "—"}</td>
++                <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
++                  <button className="btn ghost sm" onClick={() => setEditing(row)}><Pencil size={13} /></button>
++                  <button className="btn ghost sm" onClick={() => del(row)}><Trash2 size={13} /></button>
++                </td>
++              </tr>
++            );
++          })}
++        </tbody>
++      </table>
++      {(showAdd || editing) && (
++        <ServiceFormModal businessId={businessId} row={editing}
++          onClose={() => { setShowAdd(false); setEditing(null); }}
++          onSaved={() => { setShowAdd(false); setEditing(null); load(); }} />
++      )}
++    </Card>
++  );
++}
++
++function ServiceFormModal({ businessId, row, onClose, onSaved }) {
++  const [f, setF] = useState({
++    service_type: row?.service_type || "Water",
++    provider: row?.provider || "",
++    contract_end: row?.contract_end || "",
++    notes: row?.notes || "",
++  });
++  const [providerLists, setProviderLists] = useState(null); // { Water: [...], Waste: [...], "Card Payment": [...] }
++  const [billFile, setBillFile] = useState(null); // { name, mime, data } once read
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++
++  useEffect(() => {
++    api.configLookups().then((cfg) => {
++      const lists = {};
++      for (const [type, category] of Object.entries(PROVIDER_CATEGORY)) {
++        lists[type] = (cfg.data[category] || []).map((x) => x.value);
++      }
++      setProviderLists(lists);
++    }).catch(() => setProviderLists({}));
++  }, []);
++
++  const onFile = async (e) => {
++    const file = e.target.files?.[0];
++    if (!file) return;
++    if (file.size > MAX_BILL_MB * 1024 * 1024) { setErr(`File is too large — please keep bills under ${MAX_BILL_MB}MB`); e.target.value = ""; return; }
++    setErr(null);
++    try { setBillFile({ name: file.name, mime: file.type, data: await fileToBase64(file) }); }
++    catch (e2) { setErr(e2.message); }
++  };
++
++  const save = async () => {
++    setSaving(true); setErr(null);
++    const body = {
++      business_id: businessId, service_type: f.service_type, provider: f.provider || null,
++      contract_end: f.contract_end || null, notes: f.notes || null,
++      ...(billFile ? { bill_filename: billFile.name, bill_mime: billFile.mime, bill_data: billFile.data } : {}),
++    };
++    try {
++      if (row) await api.otherServiceUpdate(row.id, body);
++      else await api.otherServiceCreate(body);
++      onSaved();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  const providerOptions = providerLists?.[f.service_type] || [];
++
++  return (
++    <Modal title={row ? "Edit Service" : "Add Service"} onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="grid cols-2">
++        <Field label="Service Type *">
++          <select value={f.service_type} onChange={(e) => setF({ ...f, service_type: e.target.value, provider: "" })}>
++            {SERVICE_TYPES.map((s) => <option key={s}>{s}</option>)}
++          </select>
++        </Field>
++        <Field label="Provider">
++          <select value={f.provider} onChange={set("provider")} disabled={!providerLists}>
++            <option value="">{providerLists ? "Select provider…" : "Loading…"}</option>
++            {providerOptions.map((p) => <option key={p}>{p}</option>)}
++          </select>
++          {providerLists && !providerOptions.length && (
++            <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>No {f.service_type} providers set up yet — add some in Settings → {PROVIDER_CATEGORY[f.service_type]}.</div>
++          )}
++        </Field>
++        <Field label="Contract End Date"><input type="date" value={f.contract_end || ""} onChange={set("contract_end")} /></Field>
++        <Field label="Upload Bill (xlsx, csv, pdf)">
++          <label className="btn ghost sm" style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", width: "fit-content" }}>
++            <FileUp size={14} /> {billFile ? billFile.name : row?.bill_filename ? "Replace file…" : "Choose file…"}
++            <input type="file" accept=".xlsx,.xls,.csv,.pdf" onChange={onFile} style={{ display: "none" }} />
++          </label>
++        </Field>
++      </div>
++      <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
+diff --git a/amsl-frontend/src/pages/Commission.jsx b/amsl-frontend/src/pages/Commission.jsx
+index 5a13322..5b83bbc 100644
+--- a/amsl-frontend/src/pages/Commission.jsx
++++ b/amsl-frontend/src/pages/Commission.jsx
+@@ -1,6 +1,7 @@
+ import { useState, useEffect, useCallback } from "react";
+ import { api } from "../api.js";
+ import { Card, Spinner, ErrorBanner } from "../components/ui.jsx";
++import AgencyPayoutsTab from "../components/AgencyPayoutsTab.jsx";
+ 
+ const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2 });
+ const stTone = { Projected: "#64748B", Reconciled: "#0F766E", Clawback: "#E11D48", Invoiced: "#B45309", Paid: "#0F766E", Overdue: "#E11D48" };
+@@ -63,6 +64,7 @@ export default function Commission() {
+         <button className={tab === "byagent" ? "active" : ""} onClick={() => setTab("byagent")}>By Agent</button>
+         <button className={tab === "ledger" ? "active" : ""} onClick={() => setTab("ledger")}>Ledger</button>
+         <button className={tab === "statements" ? "active" : ""} onClick={() => setTab("statements")}>Statements</button>
++        <button className={tab === "payouts" ? "active" : ""} onClick={() => setTab("payouts")}>Agency Payouts</button>
+       </div>
+ 
+       {tab === "records" && (
+@@ -144,6 +146,8 @@ export default function Commission() {
+           )}
+         </Card>
+       )}
++      {tab === "payouts" && <AgencyPayoutsTab />}
++
+       {tab === "statements" && (
+         <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 16, alignItems: "start" }}>
+           <Card title="Import supplier statement">
+diff --git a/amsl-frontend/src/pages/CustomerDetail.jsx b/amsl-frontend/src/pages/CustomerDetail.jsx
+index 1f9388b..598270b 100644
+--- a/amsl-frontend/src/pages/CustomerDetail.jsx
++++ b/amsl-frontend/src/pages/CustomerDetail.jsx
+@@ -3,6 +3,8 @@ import { useParams, useNavigate, Link } from "react-router-dom";
+ import { ArrowLeft, Pencil, Zap, Flame } from "lucide-react";
+ import { api, JOURNEY_STAGES } from "../api.js";
+ import { Card, Spinner, ErrorBanner, initials } from "../components/ui.jsx";
++import OtherServicesTab from "../components/OtherServicesTab.jsx";
++import EnergyAssetsTab from "../components/EnergyAssetsTab.jsx";
+ 
+ const labelOf = (k) => JOURNEY_STAGES.find((s) => s.key === k)?.label || k;
+ const p2 = (v) => (v == null || v === "" ? "—" : `${Number(v).toFixed(2)}p`);
+@@ -90,6 +92,8 @@ export default function CustomerDetail() {
+       <div className="toggle" style={{ marginBottom: 14 }}>
+         <button className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
+         <button className={tab === "utility" ? "active" : ""} onClick={() => setTab("utility")}>Utility on Site{meters.length ? ` (${meters.length})` : ""}</button>
++        <button className={tab === "services" ? "active" : ""} onClick={() => setTab("services")}>Other Services</button>
++        <button className={tab === "assets" ? "active" : ""} onClick={() => setTab("assets")}>Energy Assets</button>
+         <button className={tab === "comments" ? "active" : ""} onClick={() => setTab("comments")}>Comments{data.comments?.length ? ` (${data.comments.length})` : ""}</button>
+       </div>
+ 
+@@ -120,6 +124,9 @@ export default function CustomerDetail() {
+         </div>
+       )}
+ 
++      {tab === "services" && <OtherServicesTab businessId={id} />}
++      {tab === "assets" && <EnergyAssetsTab businessId={id} />}
++
+       {tab === "comments" && (
+         <Card>
+           <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+diff --git a/amsl-frontend/src/pages/LeadDetail.jsx b/amsl-frontend/src/pages/LeadDetail.jsx
+index 95e254e..553bf8f 100644
+--- a/amsl-frontend/src/pages/LeadDetail.jsx
++++ b/amsl-frontend/src/pages/LeadDetail.jsx
+@@ -3,13 +3,15 @@ import { useParams, useNavigate } from "react-router-dom";
+ import { ArrowLeft, Plus, Pencil, Trash2, Zap, Flame } from "lucide-react";
+ import { api } from "../api.js";
+ import { Card, Badge, Spinner, ErrorBanner, initials, Modal, Field } from "../components/ui.jsx";
++import OtherServicesTab from "../components/OtherServicesTab.jsx";
++import EnergyAssetsTab from "../components/EnergyAssetsTab.jsx";
+ 
+ const SEGMENTS = ["SME", "Corporate", "Domestic"];
+ const STATUSES = [{ v: "C", l: "Current" }, { v: "S", l: "Switching" }, { v: "D", l: "Dropped" }];
+ 
+ const TABS = [
+   ["user", "User Detail"], ["site", "Site Address"], ["elec", "Electric Meter Detail"],
+-  ["gas", "Gas Meter Detail"], ["quote", "Quote"], ["callback", "Callback"], ["notes", "Notes"],
++  ["gas", "Gas Meter Detail"], ["services", "Other Services"], ["assets", "Energy Assets"], ["quote", "Quote"], ["callback", "Callback"], ["notes", "Notes"],
+ ];
+ 
+ export default function LeadDetail() {
+@@ -66,6 +68,8 @@ export default function LeadDetail() {
+       {tab === "site" && <SiteTab businessId={id} />}
+       {tab === "elec" && <MeterTab businessId={id} utility="ELEC" icon={<Zap size={14} />} suppliers={refs.suppliers} />}
+       {tab === "gas" && <MeterTab businessId={id} utility="GAS" icon={<Flame size={14} />} suppliers={refs.suppliers} />}
++      {tab === "services" && <OtherServicesTab businessId={id} />}
++      {tab === "assets" && <EnergyAssetsTab businessId={id} />}
+       {tab === "quote" && <QuoteTab businessId={id} />}
+       {tab === "callback" && <CallbackTab businessId={id} />}
+       {tab === "notes" && <NotesTab businessId={id} comments={detail.comments || []} onSaved={load} />}
+diff --git a/amsl-frontend/src/pages/NewQuote.jsx b/amsl-frontend/src/pages/NewQuote.jsx
+index 47066c9..7410089 100644
+--- a/amsl-frontend/src/pages/NewQuote.jsx
++++ b/amsl-frontend/src/pages/NewQuote.jsx
+@@ -1,10 +1,12 @@
+ import { useState, useEffect } from "react";
+ import { useNavigate } from "react-router-dom";
+-import { ArrowLeft, Zap, Flame, Search, Trophy, Check } from "lucide-react";
++import { ArrowLeft, Zap, Flame, Search, Trophy, Check, Leaf } from "lucide-react";
+ import { api } from "../api.js";
+ import { Card, Field, ErrorBanner, Badge, Spinner, Modal } from "../components/ui.jsx";
+ 
+ const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++// Same list as the Products "Payment Method" dropdown, kept in sync.
++const PAY_METHODS = ["Cash/Cheque/Bacs", "Fixed DD", "Quarterly DD", "Variable DD", "Monthly DD", "DD and Non DD", "Monthly Fixed DD", "Quarterly Fixed DD"];
+ 
+ export default function NewQuote() {
+   const nav = useNavigate();
+@@ -13,6 +15,30 @@ export default function NewQuote() {
+   const [sites, setSites] = useState([]);
+   const [meters, setMeters] = useState([]);
+   const [bespoke, setBespoke] = useState(false);
++  // Three pricing routes: fixed market comparison, hand-keyed bespoke, or a flexible
++  // (non-fixed) purchasing enquiry. `bespoke` is derived so the existing bespoke logic
++  // below keeps working unchanged.
++  const [mode, setMode] = useState("market");
++  useEffect(() => { setBespoke(mode === "bespoke"); }, [mode]);
++  const [ff, setFfState] = useState({
++    annual_volume: "", sites_count: "", contract_start: "", contract_length: "",
++    purchasing_strategy: "", basket_type: "", tranche_count: "", index_reference: "",
++    risk_appetite: "", volume_tolerance: "", management_fee: "", target_supplier_id: "", notes: "",
++  });
++  const setFf = (k) => (e) => setFfState((p) => ({ ...p, [k]: e.target.value }));
++  const [fuelFilter, setFuelFilter] = useState("");      // "" | Green | Brown | Mix
++  const [paymentFilter, setPaymentFilter] = useState(""); // "" or one of PAY_METHODS
++  const [nightPct, setNightPct] = useState("");           // % of consumption on the night rate
++  const [flexCfg, setFlexCfg] = useState({});
++  useEffect(() => {
++    api.configLookups().then((cfg) => {
++      const pick = {};
++      for (const c of ["Flex Purchasing Strategy", "Flex Basket Type", "Flex Index Reference"]) {
++        pick[c] = (cfg.data[c] || []).map((x) => x.value);
++      }
++      setFlexCfg(pick);
++    }).catch(() => {});
++  }, []);
+   const [bf, setBf] = useState({ meter_point: "", meter_details: "", supplier_id: "", product_name: "", unit_rate: "", standing_charge: "", distribution_charge: "", transmission_charge: "", term: "24" });
+   const [suppliers, setSuppliers] = useState([]);
+   const setB = (k) => (e) => setBf({ ...bf, [k]: e.target.value });
+@@ -75,6 +101,31 @@ export default function NewQuote() {
+     api.pipelineMeters(form.business_id, utilKey).then((r) => setMeters(r.data.filter((m) => String(m.site_id) === form.site_id))).catch(() => setMeters([]));
+   }, [form.utility]); // eslint-disable-line
+ 
++  const saveFlex = async () => {
++    if (!ff.annual_volume || Number(ff.annual_volume) <= 0) return setErr("Annual volume (kWh) is required for a flex request");
++    setSaving("flex"); setErr(null);
++    const chosen = businesses.find((b) => String(b.id) === String(form.business_id));
++    const num = (v) => (v === "" || v == null ? null : Number(v));
++    try {
++      const { data } = await api.flexCreate({
++        business_id: form.business_id || null,
++        business_name: chosen?.business_name || form.business_name || null,
++        utility: form.utility, meter_number: form.meter_number || null,
++        annual_volume: Number(ff.annual_volume), sites_count: num(ff.sites_count),
++        contract_start: ff.contract_start || form.start_date || null,
++        contract_length: num(ff.contract_length),
++        basket_type: ff.basket_type || null, purchasing_strategy: ff.purchasing_strategy || null,
++        tranche_count: num(ff.tranche_count), index_reference: ff.index_reference || null,
++        risk_appetite: ff.risk_appetite || null, volume_tolerance: ff.volume_tolerance || null,
++        management_fee: num(ff.management_fee),
++        target_supplier_id: ff.target_supplier_id || null,
++        status: "Requested", notes: ff.notes || null,
++      });
++      setSaved({ quote_no: data.ref, supplier: data.target_supplier_name || "supplier to be sourced" });
++    } catch (e) { setErr(e.message); }
++    setSaving(null);
++  };
++
+   const saveBespoke = async () => {
+     if (!bf.meter_point) return setErr("Enter the meter point (MPAN/MPRN) for the bespoke quote");
+     if (!bf.supplier_id) return setErr("Select a supplier for the bespoke quote");
+@@ -126,6 +177,7 @@ export default function NewQuote() {
+         current_supplier_id: form.current_supplier_id || undefined,
+         meter_number: form.meter_number || undefined,
+         topline: form.topline || undefined,
++        night_pct: nightPct === "" ? undefined : Number(nightPct),
+       });
+       setResult(data);
+     } catch (e) { setErr(e.message); }
+@@ -166,8 +218,9 @@ export default function NewQuote() {
+       <Card title="Quote Parameters" right={<button className="btn ghost sm" onClick={() => nav("/tariffs")}>Manage tariffs →</button>}>
+         {err && <ErrorBanner error={err} />}
+         <div className="toggle" style={{ marginBottom: 14 }}>
+-          <button className={!bespoke ? "active" : ""} onClick={() => setBespoke(false)}>Market Comparison</button>
+-          <button className={bespoke ? "active" : ""} onClick={() => setBespoke(true)}>Bespoke Pricing</button>
++          <button className={mode === "market" ? "active" : ""} onClick={() => setMode("market")}>Market Comparison</button>
++          <button className={mode === "bespoke" ? "active" : ""} onClick={() => setMode("bespoke")}>Bespoke Pricing</button>
++          <button className={mode === "flex" ? "active" : ""} onClick={() => setMode("flex")}>Flex Request</button>
+         </div>
+         <div className="grid cols-3" style={{ gap: 14 }}>
+           <Field label="Utility *">
+@@ -259,11 +312,68 @@ export default function NewQuote() {
+             </div>
+           </div>
+         )}
++        {mode === "flex" && (
++          <div style={{ marginTop: 8, paddingTop: 14, borderTop: "1px solid var(--line,#EEF1F4)" }}>
++            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Flexible Purchasing Request</div>
++            <div className="sub" style={{ fontSize: 11.5, marginBottom: 10 }}>
++              Flex contracts aren't priced from a matrix — volume is bought in tranches against the wholesale market.
++              This logs the customer's requirements as an enquiry to take to suppliers/trading desks.
++            </div>
++            <div className="grid cols-3" style={{ gap: 14 }}>
++              <Field label="Annual Volume (kWh) *"><input type="number" value={ff.annual_volume} onChange={setFf("annual_volume")} placeholder="e.g. 5000000" /></Field>
++              <Field label="Number of Sites"><input type="number" value={ff.sites_count} onChange={setFf("sites_count")} /></Field>
++              <Field label="Contract Start"><input type="date" value={ff.contract_start} onChange={setFf("contract_start")} /></Field>
++              <Field label="Contract Length (months)">
++                <select value={ff.contract_length} onChange={setFf("contract_length")}>
++                  <option value="">—</option><option value="12">12</option><option value="24">24</option>
++                  <option value="36">36</option><option value="48">48</option><option value="60">60</option>
++                </select>
++              </Field>
++              <Field label="Purchasing Strategy">
++                <select value={ff.purchasing_strategy} onChange={setFf("purchasing_strategy")}>
++                  <option value="">Select…</option>
++                  {(flexCfg["Flex Purchasing Strategy"] || []).map((v) => <option key={v}>{v}</option>)}
++                </select>
++              </Field>
++              <Field label="Basket Type">
++                <select value={ff.basket_type} onChange={setFf("basket_type")}>
++                  <option value="">Select…</option>
++                  {(flexCfg["Flex Basket Type"] || []).map((v) => <option key={v}>{v}</option>)}
++                </select>
++              </Field>
++              <Field label="Number of Tranches"><input type="number" value={ff.tranche_count} onChange={setFf("tranche_count")} placeholder="e.g. 8" /></Field>
++              <Field label="Index Reference">
++                <select value={ff.index_reference} onChange={setFf("index_reference")}>
++                  <option value="">Select…</option>
++                  {(flexCfg["Flex Index Reference"] || []).map((v) => <option key={v}>{v}</option>)}
++                </select>
++              </Field>
++              <Field label="Risk Appetite">
++                <select value={ff.risk_appetite} onChange={setFf("risk_appetite")}>
++                  <option value="">Select…</option><option>Low</option><option>Medium</option><option>High</option>
++                </select>
++              </Field>
++              <Field label="Volume Tolerance"><input value={ff.volume_tolerance} onChange={setFf("volume_tolerance")} placeholder="e.g. +/- 20%" /></Field>
++              <Field label="Management Fee (p/kWh)"><input type="number" step="0.01" value={ff.management_fee} onChange={setFf("management_fee")} /></Field>
++              <Field label="Target Supplier">
++                <select value={ff.target_supplier_id} onChange={setFf("target_supplier_id")}>
++                  <option value="">Any / to be sourced</option>
++                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
++                </select>
++              </Field>
++            </div>
++            <Field label="Notes"><textarea value={ff.notes} onChange={setFf("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++          </div>
++        )}
+         <div style={{ marginTop: 16 }}>
+-          {bespoke ? (
++          {mode === "bespoke" ? (
+             <button className="btn primary" onClick={saveBespoke} disabled={saving === "bespoke"}>
+               <Search size={15} /> {saving === "bespoke" ? "Saving…" : "Save Bespoke Quote"}
+             </button>
++          ) : mode === "flex" ? (
++            <button className="btn primary" onClick={saveFlex} disabled={saving === "flex"}>
++              <Search size={15} /> {saving === "flex" ? "Saving…" : "Submit Flex Request"}
++            </button>
+           ) : (
+             <button className="btn primary" onClick={runCompare} disabled={loading}>
+               <Search size={15} /> {loading ? "Comparing…" : "Compare Prices"}
+@@ -308,6 +418,24 @@ export default function NewQuote() {
+                   <option value="36">36 months</option>
+                 </select>
+               </Field>
++              <Field label="Energy Source">
++                <select value={fuelFilter} onChange={(e) => setFuelFilter(e.target.value)}>
++                  <option value="">All sources</option>
++                  <option value="Green">Green (renewable)</option>
++                  <option value="Brown">Brown (non-renewable)</option>
++                  <option value="Mix">Mix</option>
++                </select>
++              </Field>
++              <Field label="Payment Method">
++                <select value={paymentFilter} onChange={(e) => setPaymentFilter(e.target.value)}>
++                  <option value="">All payment methods</option>
++                  {PAY_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
++                </select>
++              </Field>
++              <Field label="Night Usage (%)">
++                <input type="number" min="0" max="100" value={nightPct} placeholder="e.g. 40"
++                  onChange={(e) => setNightPct(e.target.value)} onBlur={runCompare} style={{ width: 120 }} />
++              </Field>
+               <Field label="Broker Uplift (p/kWh)">
+                 <input type="number" step="0.1" value={form.uplift} onChange={(e) => setForm({ ...form, uplift: e.target.value })} onBlur={runCompare} style={{ width: 120 }} />
+               </Field>
+@@ -317,12 +445,16 @@ export default function NewQuote() {
+               <table className="tbl">
+                 <thead>
+                   <tr>
+-                    <th>Rank</th><th>Supplier</th><th>Deal</th><th>Term</th><th>Unit Rate</th><th>Standing Charge</th>
++                    <th>Rank</th><th>Supplier</th><th>Deal</th><th>Term</th><th>Source</th><th>Payment</th><th>Unit Rate</th><th>Standing Charge</th>
+                     <th>Annual Cost</th><th>Monthly</th><th>Your Commission</th><th></th>
+                   </tr>
+                 </thead>
+                 <tbody>
+-                  {result.offers.filter((o) => !form.term || String(o.term_months) === String(form.term)).map((o) => {
++                  {result.offers
++                    .filter((o) => !form.term || String(o.term_months) === String(form.term))
++                    .filter((o) => !fuelFilter || o.fuel_mix === fuelFilter)
++                    .filter((o) => !paymentFilter || o.payment_method === paymentFilter)
++                    .map((o) => {
+                     const key = o.supplier_id + "-" + o.term_months;
+                     return (
+                       <tr key={key} style={o.best ? { background: "#f5f3ff" } : {}}>
+@@ -330,7 +462,14 @@ export default function NewQuote() {
+                         <td><span className="mini"><span className="ini sq">{o.utility === "GAS" ? <Flame size={14} /> : <Zap size={14} />}</span><span className="name">{o.supplier}</span></span></td>
+                         <td><Badge tone={o.deal_type === "Renewal" ? "indigo" : "slate"}>{o.deal_type}</Badge></td>
+                         <td>{o.term_months} m</td>
+-                        <td className="mono">{o.unit_rate}p</td>
++                        <td>{o.fuel_mix ? <Badge tone={o.fuel_mix === "Green" ? "green" : o.fuel_mix === "Brown" ? "amber" : "slate"}>{o.fuel_mix === "Green" && <Leaf size={11} style={{ verticalAlign: "-1px", marginRight: 2 }} />}{o.fuel_mix}</Badge> : <span className="sub">—</span>}</td>
++                        <td style={{ fontSize: 12 }}>{o.payment_method || <span className="sub">—</span>}</td>
++                        <td className="mono">
++                          {o.unit_rate}p
++                          {o.dual_rate && o.night_rate != null && (
++                            <div className="sub" style={{ fontSize: 10.5 }}>night {o.night_rate}p · {o.night_split_pct}%</div>
++                          )}
++                        </td>
+                         <td className="mono">{o.standing_charge}p/d</td>
+                         <td className="name">{money(o.annual_cost)}</td>
+                         <td className="mono">{money(o.monthly_cost)}</td>
+diff --git a/amsl-frontend/src/pages/RegoCertificates.jsx b/amsl-frontend/src/pages/RegoCertificates.jsx
+new file mode 100644
+index 0000000..9c41f24
+--- /dev/null
++++ b/amsl-frontend/src/pages/RegoCertificates.jsx
+@@ -0,0 +1,316 @@
++import { useState, useEffect, useCallback } from "react";
++import { Leaf, ShoppingCart, Plus, Trash2, RotateCcw, Pencil } from "lucide-react";
++import { api } from "../api.js";
++import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
++
++const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++const mwh = (n) => Number(n || 0).toLocaleString("en-GB") + " MWh";
++const STATUS_TONE = { Ordered: "amber", Issued: "indigo", Retired: "green", Cancelled: "rose" };
++
++export default function RegoCertificates() {
++  const [tab, setTab] = useState("market");
++  return (
++    <>
++      <div className="page-head">
++        <div>
++          <h1>REGO Certificates</h1>
++          <p className="sub">Buy Renewable Energy Guarantees of Origin across marketplaces. One REGO certifies 1 MWh of renewable generation.</p>
++        </div>
++      </div>
++      <div className="toggle" style={{ marginBottom: 14 }}>
++        <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>Marketplace</button>
++        <button className={tab === "purchases" ? "active" : ""} onClick={() => setTab("purchases")}>Customer Purchases</button>
++      </div>
++      {tab === "market" ? <Marketplace /> : <Purchases />}
++    </>
++  );
++}
++
++function Marketplace() {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [cfg, setCfg] = useState({});
++  const [f, setF] = useState({ marketplace: "", technology: "", vintage_year: "", max_price: "", status: "" });
++  const [buying, setBuying] = useState(null);   // offer being purchased
++  const [editing, setEditing] = useState(null); // offer being added/edited
++  const [showAdd, setShowAdd] = useState(false);
++
++  const load = useCallback(() => {
++    setRows(null);
++    api.regoOffers(f).then((r) => setRows(r.data)).catch((e) => setErr(e.message));
++  }, [f]);
++  useEffect(() => { load(); }, [load]);
++  useEffect(() => {
++    api.configLookups().then((c) => setCfg({
++      marketplaces: (c.data["REGO Marketplace"] || []).map((x) => x.value),
++      technologies: (c.data["REGO Technology"] || []).map((x) => x.value),
++    })).catch(() => {});
++  }, []);
++
++  const del = async (row) => {
++    if (!confirm(`Remove this ${row.marketplace} offer from the catalogue?`)) return;
++    try { await api.regoOfferDelete(row.id); load(); } catch (e) { alert(e.message); }
++  };
++  const reset = () => setF({ marketplace: "", technology: "", vintage_year: "", max_price: "", status: "" });
++  const active = Object.values(f).some(Boolean);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++
++  return (
++    <Card right={<button className="btn primary sm" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Offer</button>}>
++      <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
++        <select value={f.marketplace} onChange={set("marketplace")} style={sel}>
++          <option value="">All marketplaces</option>
++          {(cfg.marketplaces || []).map((m) => <option key={m}>{m}</option>)}
++        </select>
++        <select value={f.technology} onChange={set("technology")} style={sel}>
++          <option value="">All technologies</option>
++          {(cfg.technologies || []).map((t) => <option key={t}>{t}</option>)}
++        </select>
++        <input value={f.vintage_year} onChange={set("vintage_year")} placeholder="Vintage year" style={{ ...sel, width: 130 }} />
++        <input value={f.max_price} onChange={set("max_price")} placeholder="Max £/MWh" style={{ ...sel, width: 130 }} />
++        <select value={f.status} onChange={set("status")} style={sel}>
++          <option value="">Available only</option>
++          <option value="all">All statuses</option>
++          <option value="Sold Out">Sold Out</option>
++          <option value="Withdrawn">Withdrawn</option>
++        </select>
++        {active && <button className="btn ghost" onClick={reset}><RotateCcw size={14} /> Reset</button>}
++      </div>
++
++      {err && <ErrorBanner error={err} onRetry={load} />}
++      {!rows ? <Spinner /> : (
++        <div className="table-wrap">
++          <table className="tbl">
++            <thead><tr>
++              <th>Marketplace</th><th>Technology</th><th>Generator</th><th>Vintage</th>
++              <th>Price</th><th>Available</th><th>Status</th><th></th>
++            </tr></thead>
++            <tbody>
++              {rows.length === 0 && <tr><td colSpan={8} className="state">No offers match these filters.</td></tr>}
++              {rows.map((o, i) => (
++                <tr key={o.id} style={i === 0 && o.status === "Available" ? { background: "#f0fdf4" } : {}}>
++                  <td><span className="mini"><span className="ini sq"><Leaf size={14} /></span><span className="name">{o.marketplace}</span></span></td>
++                  <td style={{ fontSize: 12 }}>{o.technology || "—"}</td>
++                  <td style={{ fontSize: 12 }}>{o.generator_name || <span className="sub">—</span>}</td>
++                  <td className="mono">{o.vintage_year || "—"}</td>
++                  <td className="name">{money(o.price_per_mwh)}<span className="sub" style={{ fontWeight: 400 }}>/MWh</span></td>
++                  <td className="mono">{o.volume_available != null ? mwh(o.volume_available) : "—"}</td>
++                  <td><Badge tone={o.status === "Available" ? "green" : o.status === "Sold Out" ? "slate" : "rose"}>{o.status}</Badge></td>
++                  <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
++                    <button className="btn primary sm" disabled={o.status !== "Available"} onClick={() => setBuying(o)}>
++                      <ShoppingCart size={13} /> Purchase
++                    </button>
++                    <button className="btn ghost sm" onClick={() => setEditing(o)}><Pencil size={13} /></button>
++                    <button className="btn ghost sm" onClick={() => del(o)}><Trash2 size={13} /></button>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++      {buying && <PurchaseModal offer={buying} onClose={() => setBuying(null)} onDone={() => { setBuying(null); load(); }} />}
++      {(showAdd || editing) && (
++        <OfferModal offer={editing} cfg={cfg}
++          onClose={() => { setShowAdd(false); setEditing(null); }}
++          onDone={() => { setShowAdd(false); setEditing(null); load(); }} />
++      )}
++    </Card>
++  );
++}
++
++const sel = { padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" };
++
++function PurchaseModal({ offer, onClose, onDone }) {
++  const [businesses, setBusinesses] = useState([]);
++  const [businessId, setBusinessId] = useState("");
++  const [volume, setVolume] = useState("");
++  const [ref, setRef] = useState("");
++  const [notes, setNotes] = useState("");
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++
++  useEffect(() => { api.list("customers", { limit: 500 }).then((r) => setBusinesses(r.data)).catch(() => {}); }, []);
++
++  const vol = Number(volume) || 0;
++  const total = vol * offer.price_per_mwh;
++
++  const save = async () => {
++    if (!businessId) return setErr("Select the customer this purchase is for");
++    if (vol <= 0) return setErr("Enter a volume greater than zero");
++    setSaving(true); setErr(null);
++    try {
++      await api.regoPurchaseCreate({
++        business_id: Number(businessId), offer_id: offer.id, volume_mwh: vol,
++        certificate_ref: ref || null, notes: notes || null,
++      });
++      onDone();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title="Purchase REGOs" onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Purchasing…" : "Confirm Purchase"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div style={{ padding: "10px 12px", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, marginBottom: 12, fontSize: 12.5 }}>
++        <b>{offer.marketplace}</b> · {offer.technology} · vintage {offer.vintage_year}
++        {offer.generator_name && <> · {offer.generator_name}</>}
++        <div className="sub" style={{ fontSize: 11.5, marginTop: 2 }}>
++          {money(offer.price_per_mwh)}/MWh · {offer.volume_available != null ? `${mwh(offer.volume_available)} available` : "volume unlimited"}
++        </div>
++      </div>
++      <div className="grid cols-2">
++        <Field label="Customer *">
++          <select value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
++            <option value="">Select customer…</option>
++            {businesses.map((b) => <option key={b.id} value={b.id}>{b.business_name}</option>)}
++          </select>
++        </Field>
++        <Field label="Volume (MWh) *"><input type="number" step="0.01" value={volume} onChange={(e) => setVolume(e.target.value)} autoFocus /></Field>
++        <Field label="Certificate Reference"><input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="Issued by the registry" /></Field>
++        <Field label="Notes"><input value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
++      </div>
++      {vol > 0 && (
++        <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 8, background: "#f0fdf4", border: "1px solid #bbf7d0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
++          <span className="sub" style={{ fontSize: 12 }}>{mwh(vol)} × {money(offer.price_per_mwh)}/MWh</span>
++          <span style={{ fontWeight: 800, fontSize: 18, color: "var(--brand,#0E7C7B)" }}>{money(total)}</span>
++        </div>
++      )}
++    </Modal>
++  );
++}
++
++function OfferModal({ offer, cfg, onClose, onDone }) {
++  const [f, setF] = useState({
++    marketplace: offer?.marketplace || "", technology: offer?.technology || "",
++    country: offer?.country || "United Kingdom", vintage_year: offer?.vintage_year || new Date().getFullYear(),
++    price_per_mwh: offer?.price_per_mwh ?? "", volume_available: offer?.volume_available ?? "",
++    generator_name: offer?.generator_name || "", status: offer?.status || "Available", notes: offer?.notes || "",
++  });
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++
++  const save = async () => {
++    if (!f.marketplace) return setErr("Marketplace is required");
++    if (f.price_per_mwh === "" || Number(f.price_per_mwh) < 0) return setErr("Enter a valid price per MWh");
++    setSaving(true); setErr(null);
++    const body = {
++      ...f, vintage_year: f.vintage_year ? Number(f.vintage_year) : null,
++      price_per_mwh: Number(f.price_per_mwh),
++      volume_available: f.volume_available === "" ? null : Number(f.volume_available),
++    };
++    try {
++      if (offer) await api.regoOfferUpdate(offer.id, body);
++      else await api.regoOfferCreate(body);
++      onDone();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title={offer ? "Edit Offer" : "Add REGO Offer"} onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="grid cols-2">
++        <Field label="Marketplace *">
++          <select value={f.marketplace} onChange={set("marketplace")}>
++            <option value="">Select marketplace…</option>
++            {(cfg.marketplaces || []).map((m) => <option key={m}>{m}</option>)}
++          </select>
++        </Field>
++        <Field label="Technology">
++          <select value={f.technology} onChange={set("technology")}>
++            <option value="">Select…</option>
++            {(cfg.technologies || []).map((t) => <option key={t}>{t}</option>)}
++          </select>
++        </Field>
++        <Field label="Generator Name"><input value={f.generator_name} onChange={set("generator_name")} placeholder="Optional" /></Field>
++        <Field label="Country of Origin"><input value={f.country} onChange={set("country")} /></Field>
++        <Field label="Vintage Year"><input type="number" value={f.vintage_year} onChange={set("vintage_year")} /></Field>
++        <Field label="Price (£ per MWh) *"><input type="number" step="0.01" value={f.price_per_mwh} onChange={set("price_per_mwh")} /></Field>
++        <Field label="Volume Available (MWh)"><input type="number" step="0.01" value={f.volume_available} onChange={set("volume_available")} placeholder="Blank = unlimited" /></Field>
++        <Field label="Status">
++          <select value={f.status} onChange={set("status")}>
++            <option>Available</option><option>Sold Out</option><option>Withdrawn</option>
++          </select>
++        </Field>
++      </div>
++      <Field label="Notes"><input value={f.notes} onChange={set("notes")} /></Field>
++    </Modal>
++  );
++}
++
++function Purchases() {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [status, setStatus] = useState("");
++
++  const load = useCallback(() => {
++    setRows(null);
++    api.regoPurchases(status ? { status } : {}).then((r) => setRows(r.data)).catch((e) => setErr(e.message));
++  }, [status]);
++  useEffect(() => { load(); }, [load]);
++
++  const setPurchaseStatus = async (row, next) => {
++    try { await api.regoPurchaseUpdate(row.id, { status: next }); load(); } catch (e) { alert(e.message); }
++  };
++  const del = async (row) => {
++    if (!confirm(`Cancel this purchase of ${mwh(row.volume_mwh)}? The volume returns to the marketplace offer.`)) return;
++    try { await api.regoPurchaseDelete(row.id); load(); } catch (e) { alert(e.message); }
++  };
++
++  const totalMwh = rows?.reduce((s, r) => s + Number(r.volume_mwh || 0), 0) || 0;
++  const totalCost = rows?.reduce((s, r) => s + Number(r.total_cost || 0), 0) || 0;
++
++  return (
++    <Card>
++      <div style={{ display: "flex", gap: 10, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
++        <select value={status} onChange={(e) => setStatus(e.target.value)} style={sel}>
++          <option value="">All statuses</option>
++          <option>Ordered</option><option>Issued</option><option>Retired</option><option>Cancelled</option>
++        </select>
++        {rows && rows.length > 0 && (
++          <span className="sub" style={{ fontSize: 12 }}>
++            {rows.length} purchase(s) · <b>{mwh(totalMwh)}</b> · <b>{money(totalCost)}</b>
++          </span>
++        )}
++      </div>
++      {err && <ErrorBanner error={err} onRetry={load} />}
++      {!rows ? <Spinner /> : (
++        <div className="table-wrap">
++          <table className="tbl">
++            <thead><tr>
++              <th>Customer</th><th>Marketplace</th><th>Technology</th><th>Vintage</th>
++              <th>Volume</th><th>Price</th><th>Total</th><th>Purchased</th><th>Ref</th><th>Status</th><th></th>
++            </tr></thead>
++            <tbody>
++              {rows.length === 0 && <tr><td colSpan={11} className="state">No REGO purchases recorded yet.</td></tr>}
++              {rows.map((p) => (
++                <tr key={p.id}>
++                  <td className="name">{p.business_name || "—"}</td>
++                  <td style={{ fontSize: 12 }}>{p.marketplace || "—"}</td>
++                  <td style={{ fontSize: 12 }}>{p.technology || "—"}</td>
++                  <td className="mono">{p.vintage_year || "—"}</td>
++                  <td className="mono">{mwh(p.volume_mwh)}</td>
++                  <td className="mono">{money(p.price_per_mwh)}</td>
++                  <td className="name">{money(p.total_cost)}</td>
++                  <td className="mono" style={{ fontSize: 12 }}>{p.purchase_date ? new Date(p.purchase_date).toLocaleDateString("en-GB") : "—"}</td>
++                  <td className="mono" style={{ fontSize: 11.5 }}>{p.certificate_ref || <span className="sub">—</span>}</td>
++                  <td>
++                    <select value={p.status} onChange={(e) => setPurchaseStatus(p, e.target.value)}
++                      style={{ fontSize: 11.5, padding: "3px 6px", borderRadius: 6, border: "1px solid var(--line,#E7EBF0)" }}>
++                      <option>Ordered</option><option>Issued</option><option>Retired</option><option>Cancelled</option>
++                    </select>
++                  </td>
++                  <td style={{ textAlign: "right" }}>
++                    <button className="btn ghost sm" title="Cancel purchase" onClick={() => del(p)}><Trash2 size={13} /></button>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++    </Card>
++  );
++}

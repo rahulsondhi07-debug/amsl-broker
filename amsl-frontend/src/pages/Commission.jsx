@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api.js";
 import { Card, Spinner, ErrorBanner } from "../components/ui.jsx";
+import AgencyPayoutsTab from "../components/AgencyPayoutsTab.jsx";
 
 const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2 });
 const stTone = { Projected: "#64748B", Reconciled: "#0F766E", Clawback: "#E11D48", Invoiced: "#B45309", Paid: "#0F766E", Overdue: "#E11D48" };
@@ -63,6 +64,7 @@ export default function Commission() {
         <button className={tab === "byagent" ? "active" : ""} onClick={() => setTab("byagent")}>By Agent</button>
         <button className={tab === "ledger" ? "active" : ""} onClick={() => setTab("ledger")}>Ledger</button>
         <button className={tab === "statements" ? "active" : ""} onClick={() => setTab("statements")}>Statements</button>
+        <button className={tab === "payouts" ? "active" : ""} onClick={() => setTab("payouts")}>Agency Payouts</button>
       </div>
 
       {tab === "records" && (
@@ -144,6 +146,8 @@ export default function Commission() {
           )}
         </Card>
       )}
+      {tab === "payouts" && <AgencyPayoutsTab />}
+
       {tab === "statements" && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 16, alignItems: "start" }}>
           <Card title="Import supplier statement">
