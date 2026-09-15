@@ -747,6 +747,53 @@ export function migrate() {
       notes            TEXT,
       created_at       TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Local energy marketplace: buying power directly from a named generator (a PPA),
+    -- rather than from a supplier's price book.
+    -- "Locality" here means the electricity distribution area, identified by dist_id — the
+    -- same two-digit code we already derive from the first 2 digits of a customer's MPAN.
+    -- That is the meaningful unit for local supply: a generator and a consumer in the same
+    -- distribution area share the local network, which is what underpins any genuine
+    -- "bought from your local wind farm" claim.
+    CREATE TABLE IF NOT EXISTS generators (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      name              TEXT NOT NULL,
+      operator          TEXT,
+      technology        TEXT,              -- Solar PV | Wind (Onshore) | Hydro | Anaerobic Digestion | ...
+      dist_id           INTEGER,           -- distribution area (10-23), matches MPAN first 2 digits
+      region            TEXT,              -- human-readable area name
+      postcode          TEXT,
+      capacity_mw       REAL,
+      annual_output_mwh REAL,              -- typical generation per year
+      available_mwh     REAL,              -- volume still uncontracted and offerable
+      price_p_kwh       REAL,              -- indicative PPA price
+      min_volume_mwh    REAL,
+      term_months_min   INTEGER,
+      term_months_max   INTEGER,
+      commissioned_year INTEGER,
+      rego_accredited   INTEGER NOT NULL DEFAULT 1,
+      status            TEXT NOT NULL DEFAULT 'Available',  -- Available | Fully Contracted | Offline
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS ppa_deals (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id     INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      generator_id    INTEGER REFERENCES generators(id) ON DELETE SET NULL,
+      generator_name  TEXT,
+      technology      TEXT,
+      volume_mwh      REAL NOT NULL,
+      price_p_kwh     REAL NOT NULL,
+      term_months     INTEGER,
+      annual_value    REAL,
+      start_date      TEXT,
+      end_date        TEXT,
+      locality        TEXT,   -- 'Local' when the customer and generator share a distribution area
+      reference       TEXT,
+      status          TEXT NOT NULL DEFAULT 'Enquiry',  -- Enquiry | Offer Sent | Contracted | Live | Ended
+      notes           TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
   setDef.run("brand_name", "AMSL Broker");
@@ -851,6 +898,29 @@ export function seedPlatform() {
     ].forEach((v) => ro.run(...v));
     console.log("Seeded 10 sample REGO offers.");
   }
+  // Sample generators for the local energy marketplace, spread across distribution areas so
+  // the locality matching is demonstrable. Prices and volumes are illustrative — real PPA
+  // terms are negotiated per deal and should be maintained by an admin.
+  if (db.prepare("SELECT COUNT(*) c FROM generators").get().c === 0) {
+    const gi = db.prepare(`INSERT INTO generators
+      (name, operator, technology, dist_id, region, postcode, capacity_mw, annual_output_mwh,
+       available_mwh, price_p_kwh, min_volume_mwh, term_months_min, term_months_max,
+       commissioned_year, rego_accredited, status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'Available')`);
+    [
+      ["Whitelee Wind Farm", "ScottishPower Renewables", "Wind (Onshore)", 18, "Southern Scotland", "G76 0QQ", 539, 1300000, 40000, 8.20, 500, 24, 120, 2009],
+      ["Pen y Cymoedd", "Vattenfall", "Wind (Onshore)", 21, "South Wales", "CF44 9RU", 228, 700000, 25000, 8.05, 500, 24, 120, 2017],
+      ["Shotwick Solar Park", "Wirsol Energy", "Solar PV", 13, "North Wales, Merseyside & Cheshire", "CH5 2LL", 72, 68000, 9000, 9.10, 250, 12, 60, 2016],
+      ["Lyneham Solar Farm", "Lightsource bp", "Solar PV", 22, "South West England", "SN15 4PZ", 25, 24000, 5000, 9.40, 100, 12, 60, 2015],
+      ["Cruachan Power Station", "Drax Group", "Hydro", 17, "Northern Scotland", "PA33 1AN", 440, 705000, 30000, 8.60, 1000, 36, 120, 1965],
+      ["Fenland AD Facility", "Bio Capital", "Anaerobic Digestion", 10, "Eastern England", "PE13 2TB", 5, 38000, 6000, 10.20, 100, 12, 84, 2014],
+      ["Keadby Wind", "SSE Renewables", "Wind (Onshore)", 23, "Yorkshire", "DN17 3EF", 68, 180000, 12000, 8.35, 250, 24, 96, 2012],
+      ["Rampion Offshore", "RWE", "Wind (Offshore)", 19, "South East England", "BN43 5HZ", 400, 1400000, 35000, 8.90, 1000, 36, 180, 2018],
+      ["Birmingham Rooftop Portfolio", "Midlands Community Energy", "Solar PV", 14, "West Midlands", "B1 1AA", 12, 11000, 3000, 9.75, 50, 12, 48, 2019],
+      ["Tees Renewable Plant", "MGT Power", "Biomass", 15, "North East England", "TS2 1UD", 299, 2000000, 18000, 9.95, 500, 24, 120, 2020],
+    ].forEach((v) => gi.run(...v));
+    console.log("Seeded 10 sample generators for the local energy marketplace.");
+  }
   return { skipped: false };
 }
 
@@ -869,6 +939,7 @@ export const MENU_CATALOG = [
   { key: "/commission", label: "Commission" }, { key: "/bill-validation", label: "Bill Validation" },
   { key: "/eii-certificates", label: "EII Certificates" },
   { key: "/rego-certificates", label: "REGO Certificates" },
+  { key: "/local-energy", label: "Local Energy Marketplace" },
   { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];
