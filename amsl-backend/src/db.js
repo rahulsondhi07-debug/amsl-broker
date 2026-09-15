@@ -868,6 +868,7 @@ export const MENU_CATALOG = [
   { key: "/tickets", label: "Tickets" }, { key: "/permissions", label: "Permissions" },
   { key: "/commission", label: "Commission" }, { key: "/bill-validation", label: "Bill Validation" },
   { key: "/eii-certificates", label: "EII Certificates" },
+  { key: "/rego-certificates", label: "REGO Certificates" },
   { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];
