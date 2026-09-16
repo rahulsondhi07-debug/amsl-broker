@@ -1,0 +1,943 @@
+diff --git a/amsl-backend/src/db.js b/amsl-backend/src/db.js
+index b873ff7..a69133b 100644
+--- a/amsl-backend/src/db.js
++++ b/amsl-backend/src/db.js
+@@ -794,6 +794,69 @@ export function migrate() {
+       notes           TEXT,
+       created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+     );
++
++    -- Virtual Power Plant: aggregating customer batteries (and other flexible assets) so
++    -- they can be paid for turning down or exporting during peak periods.
++    -- Two distinct ways these schemes pay, which is why both rate columns exist:
++    --   * utilisation — paid per MWh actually shifted during a called event (e.g. NESO's
++    --     Demand Flexibility Service), so earnings depend on measured performance.
++    --   * availability — paid per kW simply for being contracted and available across a
++    --     season (e.g. the Capacity Market), whether or not an event is ever called.
++    CREATE TABLE IF NOT EXISTS vpp_programmes (
++      id                INTEGER PRIMARY KEY AUTOINCREMENT,
++      name              TEXT NOT NULL,
++      operator          TEXT,              -- NESO, a supplier, or an aggregator
++      scheme_type       TEXT,              -- Demand Flexibility | Capacity Market | Frequency Response | ...
++      payment_basis     TEXT NOT NULL DEFAULT 'Utilisation',  -- Utilisation | Availability
++      utilisation_rate  REAL,              -- £ per MWh shifted
++      availability_rate REAL,              -- £ per kW per year
++      min_capacity_kw   REAL,              -- smallest asset the scheme will accept
++      typical_window    TEXT,              -- e.g. "16:00-19:00 weekdays, Nov-Mar"
++      season_start      TEXT,
++      season_end        TEXT,
++      status            TEXT NOT NULL DEFAULT 'Open',  -- Open | Closed
++      notes             TEXT,
++      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++    CREATE TABLE IF NOT EXISTS vpp_enrolments (
++      id              INTEGER PRIMARY KEY AUTOINCREMENT,
++      business_id     INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
++      asset_id        INTEGER REFERENCES energy_assets(id) ON DELETE SET NULL,
++      programme_id    INTEGER NOT NULL REFERENCES vpp_programmes(id) ON DELETE CASCADE,
++      contracted_kw   REAL,                -- capacity committed to the scheme
++      start_date      TEXT,
++      end_date        TEXT,
++      reference       TEXT,
++      status          TEXT NOT NULL DEFAULT 'Registered', -- Registered | Active | Suspended | Exited
++      notes           TEXT,
++      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++    CREATE TABLE IF NOT EXISTS vpp_events (
++      id              INTEGER PRIMARY KEY AUTOINCREMENT,
++      programme_id    INTEGER NOT NULL REFERENCES vpp_programmes(id) ON DELETE CASCADE,
++      event_date      TEXT NOT NULL,
++      start_time      TEXT,
++      end_time        TEXT,
++      event_type      TEXT NOT NULL DEFAULT 'Live',  -- Live | Test
++      notes           TEXT,
++      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
++    );
++    -- One row per enrolment per event. Reduction is baseline minus actual: the baseline is
++    -- what the site would normally have used in that window, so payment reflects the extra
++    -- turn-down achieved, not total consumption.
++    CREATE TABLE IF NOT EXISTS vpp_participation (
++      id              INTEGER PRIMARY KEY AUTOINCREMENT,
++      event_id        INTEGER NOT NULL REFERENCES vpp_events(id) ON DELETE CASCADE,
++      enrolment_id    INTEGER NOT NULL REFERENCES vpp_enrolments(id) ON DELETE CASCADE,
++      baseline_kwh    REAL,
++      actual_kwh      REAL,
++      reduction_kwh   REAL,
++      rate_per_mwh    REAL,
++      payment         REAL,
++      status          TEXT NOT NULL DEFAULT 'Estimated', -- Estimated | Verified | Paid
++      notes           TEXT,
++      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
++    );
+   `);
+   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
+   setDef.run("brand_name", "AMSL Broker");
+@@ -921,6 +984,28 @@ export function seedPlatform() {
+     ].forEach((v) => gi.run(...v));
+     console.log("Seeded 10 sample generators for the local energy marketplace.");
+   }
++  // Flexibility schemes a business can be paid through for shifting load off peak. Rates
++  // are indicative starting points only — real rates are set per season/auction and must be
++  // maintained by an admin on the Virtual Power Plant screen.
++  if (db.prepare("SELECT COUNT(*) c FROM vpp_programmes").get().c === 0) {
++    const vp = db.prepare(`INSERT INTO vpp_programmes
++      (name, operator, scheme_type, payment_basis, utilisation_rate, availability_rate,
++       min_capacity_kw, typical_window, status, notes)
++      VALUES (?,?,?,?,?,?,?,?, 'Open', ?)`);
++    [
++      ["Demand Flexibility Service", "NESO", "Demand Flexibility", "Utilisation", 3000, null, 10,
++       "16:00-19:00 weekdays, Nov-Mar", "Paid per MWh shifted out of called peak windows. Delivered through a registered provider, not claimed directly."],
++      ["Capacity Market (DSR)", "NESO", "Capacity Market", "Availability", null, 60, 500,
++       "Winter stress events", "Availability payment per kW for being contracted; penalties apply if you fail to deliver when called."],
++      ["Dynamic Containment", "NESO", "Frequency Response", "Availability", null, 85, 1000,
++       "24/7 second-by-second", "Fast frequency response — needs battery-grade response times."],
++      ["Local Flexibility (DNO)", "Distribution Network Operator", "Local Flexibility", "Utilisation", 2200, null, 50,
++       "Constraint windows, area-specific", "Paid to relieve local network constraints in specific distribution areas."],
++      ["Supplier Peak-Shift Scheme", "Energy Supplier", "Demand Flexibility", "Utilisation", 1800, null, 5,
++       "Supplier-defined peak events", "Supplier-run scheme; typically lower rates but a lower entry threshold."],
++    ].forEach((v) => vp.run(...v));
++    console.log("Seeded 5 flexibility programmes.");
++  }
+   return { skipped: false };
+ }
+ 
+@@ -940,6 +1025,7 @@ export const MENU_CATALOG = [
+   { key: "/eii-certificates", label: "EII Certificates" },
+   { key: "/rego-certificates", label: "REGO Certificates" },
+   { key: "/local-energy", label: "Local Energy Marketplace" },
++  { key: "/vpp", label: "Virtual Power Plant" },
+   { key: "/tutorials", label: "Platform Guide" },
+   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
+ ];
+diff --git a/amsl-backend/src/routes/vpp.js b/amsl-backend/src/routes/vpp.js
+new file mode 100644
+index 0000000..8e069a6
+--- /dev/null
++++ b/amsl-backend/src/routes/vpp.js
+@@ -0,0 +1,244 @@
++import { Router } from "express";
++import { db } from "../db.js";
++
++const r = Router();
++const round2 = (n) => Math.round(n * 100) / 100;
++
++/* ---- Programmes: the flexibility schemes a customer can be paid through ---- */
++r.get("/programmes", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.status) { where.push("status = ?"); params.push(req.query.status); }
++  if (req.query.scheme_type) { where.push("scheme_type = ?"); params.push(req.query.scheme_type); }
++  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
++  res.json({ data: db.prepare(`SELECT * FROM vpp_programmes ${w} ORDER BY name`).all(...params) });
++});
++
++const PROG_COLS = ["name", "operator", "scheme_type", "payment_basis", "utilisation_rate",
++  "availability_rate", "min_capacity_kw", "typical_window", "season_start", "season_end", "status", "notes"];
++
++r.post("/programmes", (req, res) => {
++  const b = req.body || {};
++  if (!b.name) return res.status(400).json({ error: "name is required" });
++  const info = db.prepare(`INSERT INTO vpp_programmes (${PROG_COLS.join(",")}) VALUES (${PROG_COLS.map(() => "?").join(",")})`)
++    .run(...PROG_COLS.map((c) => b[c] ?? null));
++  res.status(201).json({ data: db.prepare("SELECT * FROM vpp_programmes WHERE id=?").get(info.lastInsertRowid) });
++});
++
++const updProg = (req, res) => {
++  const b = req.body || {};
++  const cols = PROG_COLS.filter((c) => b[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE vpp_programmes SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => b[c]), req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: db.prepare("SELECT * FROM vpp_programmes WHERE id=?").get(req.params.id) });
++};
++r.put("/programmes/:id", updProg);
++r.patch("/programmes/:id", updProg);
++
++r.delete("/programmes/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM vpp_programmes WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++/* ---- Eligible assets: flexible assets that could be enrolled ----
++   Batteries are the obvious candidate, but an EV charge point can also be turned down,
++   so both are offered. Earnings potential is shown per asset from the programme rates. */
++r.get("/eligible-assets", (req, res) => {
++  const where = ["a.asset_type IN ('Battery Storage','EV Charge Point')", "a.status = 'Active'"];
++  const params = [];
++  if (req.query.business_id) { where.push("a.business_id = ?"); params.push(req.query.business_id); }
++  const rows = db.prepare(`
++    SELECT a.id, a.business_id, b.business_name, a.asset_type, a.manufacturer, a.model,
++           a.capacity_kw, a.capacity_kwh, a.export_capable, a.mpan,
++           (SELECT COUNT(*) FROM vpp_enrolments e WHERE e.asset_id = a.id AND e.status IN ('Registered','Active')) AS enrolments
++    FROM energy_assets a LEFT JOIN businesses b ON b.id = a.business_id
++    WHERE ${where.join(" AND ")} ORDER BY a.capacity_kw DESC`).all(...params);
++  res.json({ data: rows });
++});
++
++/* ---- Enrolments ---- */
++r.get("/enrolments", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.business_id) { where.push("e.business_id = ?"); params.push(req.query.business_id); }
++  if (req.query.status) { where.push("e.status = ?"); params.push(req.query.status); }
++  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
++  res.json({
++    data: db.prepare(`
++      SELECT e.*, b.business_name, p.name AS programme_name, p.operator, p.payment_basis,
++             p.utilisation_rate, p.availability_rate, p.scheme_type,
++             a.asset_type, a.manufacturer, a.model, a.capacity_kwh,
++             (SELECT COALESCE(SUM(pt.payment),0) FROM vpp_participation pt WHERE pt.enrolment_id = e.id) AS earned_to_date
++      FROM vpp_enrolments e
++      LEFT JOIN businesses b ON b.id = e.business_id
++      LEFT JOIN vpp_programmes p ON p.id = e.programme_id
++      LEFT JOIN energy_assets a ON a.id = e.asset_id
++      ${w} ORDER BY e.created_at DESC`).all(...params),
++  });
++});
++
++r.post("/enrolments", (req, res) => {
++  const b = req.body || {};
++  if (!b.business_id || !b.programme_id) return res.status(400).json({ error: "business_id and programme_id are required" });
++  const prog = db.prepare("SELECT * FROM vpp_programmes WHERE id=?").get(b.programme_id);
++  if (!prog) return res.status(404).json({ error: "programme not found" });
++  if (prog.status !== "Open") return res.status(400).json({ error: `${prog.name} is closed to new enrolments.` });
++
++  const kw = b.contracted_kw != null ? Number(b.contracted_kw) : null;
++  if (prog.min_capacity_kw != null && (kw == null || kw < prog.min_capacity_kw)) {
++    return res.status(400).json({ error: `${prog.name} requires at least ${prog.min_capacity_kw} kW. This asset offers ${kw ?? 0} kW.` });
++  }
++  const dup = db.prepare("SELECT id FROM vpp_enrolments WHERE asset_id IS NOT NULL AND asset_id=? AND programme_id=? AND status IN ('Registered','Active')")
++    .get(b.asset_id ?? null, b.programme_id);
++  if (dup) return res.status(400).json({ error: "This asset is already enrolled in that programme." });
++
++  const info = db.prepare(`INSERT INTO vpp_enrolments
++    (business_id, asset_id, programme_id, contracted_kw, start_date, end_date, reference, status, notes)
++    VALUES (?,?,?,?,?,?,?,?,?)`)
++    .run(b.business_id, b.asset_id ?? null, b.programme_id, kw, b.start_date || null,
++      b.end_date || null, b.reference || null, b.status || "Registered", b.notes || null);
++  res.status(201).json({ data: db.prepare("SELECT * FROM vpp_enrolments WHERE id=?").get(info.lastInsertRowid) });
++});
++
++const updEnrol = (req, res) => {
++  const b = req.body || {};
++  const allowed = ["contracted_kw", "start_date", "end_date", "reference", "status", "notes"];
++  const cols = allowed.filter((c) => b[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  const info = db.prepare(`UPDATE vpp_enrolments SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => b[c]), req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: db.prepare("SELECT * FROM vpp_enrolments WHERE id=?").get(req.params.id) });
++};
++r.put("/enrolments/:id", updEnrol);
++r.patch("/enrolments/:id", updEnrol);
++
++r.delete("/enrolments/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM vpp_enrolments WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++/* ---- Events: a called turn-down window ---- */
++r.get("/events", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.programme_id) { where.push("ev.programme_id = ?"); params.push(req.query.programme_id); }
++  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
++  res.json({
++    data: db.prepare(`
++      SELECT ev.*, p.name AS programme_name, p.utilisation_rate,
++             (SELECT COUNT(*) FROM vpp_participation pt WHERE pt.event_id = ev.id) AS participants,
++             (SELECT COALESCE(SUM(pt.reduction_kwh),0) FROM vpp_participation pt WHERE pt.event_id = ev.id) AS total_reduction_kwh,
++             (SELECT COALESCE(SUM(pt.payment),0) FROM vpp_participation pt WHERE pt.event_id = ev.id) AS total_payment
++      FROM vpp_events ev LEFT JOIN vpp_programmes p ON p.id = ev.programme_id
++      ${w} ORDER BY ev.event_date DESC, ev.start_time DESC`).all(...params),
++  });
++});
++
++r.post("/events", (req, res) => {
++  const b = req.body || {};
++  if (!b.programme_id || !b.event_date) return res.status(400).json({ error: "programme_id and event_date are required" });
++  const info = db.prepare(`INSERT INTO vpp_events (programme_id, event_date, start_time, end_time, event_type, notes)
++    VALUES (?,?,?,?,?,?)`)
++    .run(b.programme_id, b.event_date, b.start_time || null, b.end_time || null, b.event_type || "Live", b.notes || null);
++  res.status(201).json({ data: db.prepare("SELECT * FROM vpp_events WHERE id=?").get(info.lastInsertRowid) });
++});
++
++r.delete("/events/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM vpp_events WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++/* ---- Participation: what each site actually delivered in an event, and what it earned ---- */
++r.get("/participation", (req, res) => {
++  const where = [];
++  const params = [];
++  if (req.query.event_id) { where.push("pt.event_id = ?"); params.push(req.query.event_id); }
++  if (req.query.enrolment_id) { where.push("pt.enrolment_id = ?"); params.push(req.query.enrolment_id); }
++  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
++  res.json({
++    data: db.prepare(`
++      SELECT pt.*, b.business_name, p.name AS programme_name, ev.event_date, ev.start_time, ev.end_time
++      FROM vpp_participation pt
++      LEFT JOIN vpp_enrolments e ON e.id = pt.enrolment_id
++      LEFT JOIN businesses b ON b.id = e.business_id
++      LEFT JOIN vpp_events ev ON ev.id = pt.event_id
++      LEFT JOIN vpp_programmes p ON p.id = ev.programme_id
++      ${w} ORDER BY ev.event_date DESC`).all(...params),
++  });
++});
++
++r.post("/participation", (req, res) => {
++  const b = req.body || {};
++  if (!b.event_id || !b.enrolment_id) return res.status(400).json({ error: "event_id and enrolment_id are required" });
++  const ev = db.prepare("SELECT * FROM vpp_events WHERE id=?").get(b.event_id);
++  if (!ev) return res.status(404).json({ error: "event not found" });
++  const prog = db.prepare("SELECT * FROM vpp_programmes WHERE id=?").get(ev.programme_id);
++
++  const baseline = Number(b.baseline_kwh) || 0;
++  const actual = Number(b.actual_kwh) || 0;
++  // Only genuine turn-down earns: if the site used more than its baseline, reduction is nil
++  // rather than negative, so a poor performance can't produce a negative payment.
++  const reduction = round2(Math.max(0, baseline - actual));
++  const rate = b.rate_per_mwh != null ? Number(b.rate_per_mwh) : prog?.utilisation_rate ?? 0;
++  const payment = round2((reduction / 1000) * rate);
++
++  const info = db.prepare(`INSERT INTO vpp_participation
++    (event_id, enrolment_id, baseline_kwh, actual_kwh, reduction_kwh, rate_per_mwh, payment, status, notes)
++    VALUES (?,?,?,?,?,?,?,?,?)`)
++    .run(b.event_id, b.enrolment_id, baseline, actual, reduction, rate, payment, b.status || "Estimated", b.notes || null);
++  res.status(201).json({ data: db.prepare("SELECT * FROM vpp_participation WHERE id=?").get(info.lastInsertRowid) });
++});
++
++const updPart = (req, res) => {
++  const b = req.body || {};
++  const row = db.prepare("SELECT * FROM vpp_participation WHERE id=?").get(req.params.id);
++  if (!row) return res.status(404).json({ error: "not found" });
++  const allowed = ["baseline_kwh", "actual_kwh", "rate_per_mwh", "status", "notes"];
++  const cols = allowed.filter((c) => b[c] !== undefined);
++  if (!cols.length) return res.status(400).json({ error: "No valid fields" });
++  db.prepare(`UPDATE vpp_participation SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
++    .run(...cols.map((c) => b[c]), req.params.id);
++  // Recalculate whenever any input to the payment changed, so stored figures can't drift.
++  const updated = db.prepare("SELECT * FROM vpp_participation WHERE id=?").get(req.params.id);
++  const reduction = round2(Math.max(0, (updated.baseline_kwh || 0) - (updated.actual_kwh || 0)));
++  const payment = round2((reduction / 1000) * (updated.rate_per_mwh || 0));
++  db.prepare("UPDATE vpp_participation SET reduction_kwh=?, payment=? WHERE id=?").run(reduction, payment, req.params.id);
++  res.json({ data: db.prepare("SELECT * FROM vpp_participation WHERE id=?").get(req.params.id) });
++};
++r.put("/participation/:id", updPart);
++r.patch("/participation/:id", updPart);
++
++r.delete("/participation/:id", (req, res) => {
++  const info = db.prepare("DELETE FROM vpp_participation WHERE id=?").run(req.params.id);
++  if (!info.changes) return res.status(404).json({ error: "not found" });
++  res.json({ data: { id: Number(req.params.id), deleted: true } });
++});
++
++/* ---- Headline figures for the dashboard strip ---- */
++r.get("/summary", (req, res) => {
++  const bid = req.query.business_id;
++  const scope = bid ? "WHERE e.business_id = " + Number(bid) : "";
++  const enrolled = db.prepare(`SELECT COUNT(*) c, COALESCE(SUM(contracted_kw),0) kw FROM vpp_enrolments e ${scope || "WHERE 1=1"} AND e.status IN ('Registered','Active')`).get();
++  const earnings = db.prepare(`
++    SELECT COALESCE(SUM(pt.payment),0) total, COALESCE(SUM(pt.reduction_kwh),0) kwh
++    FROM vpp_participation pt JOIN vpp_enrolments e ON e.id = pt.enrolment_id ${scope}`).get();
++  const paid = db.prepare(`
++    SELECT COALESCE(SUM(pt.payment),0) total FROM vpp_participation pt
++    JOIN vpp_enrolments e ON e.id = pt.enrolment_id
++    ${scope ? scope + " AND" : "WHERE"} pt.status = 'Paid'`).get();
++  res.json({
++    data: {
++      enrolments: enrolled.c, contracted_kw: round2(enrolled.kw),
++      total_earnings: round2(earnings.total), total_reduction_kwh: round2(earnings.kwh),
++      paid_to_date: round2(paid.total), pending: round2(earnings.total - paid.total),
++    },
++  });
++});
++
++export default r;
+diff --git a/amsl-backend/src/server.js b/amsl-backend/src/server.js
+index ef0e33e..fc19fdc 100644
+--- a/amsl-backend/src/server.js
++++ b/amsl-backend/src/server.js
+@@ -13,6 +13,7 @@ import branding from "./routes/branding.js";
+ import otherServices from "./routes/otherServices.js";
+ import rego from "./routes/rego.js";
+ import localEnergy from "./routes/localEnergy.js";
++import vpp from "./routes/vpp.js";
+ import flex from "./routes/flex.js";
+ import energyAssets from "./routes/energyAssets.js";
+ import agencyPayouts from "./routes/agencyPayouts.js";
+@@ -88,6 +89,7 @@ api.use("/branding", branding);
+ api.use("/other-services", otherServices);
+ api.use("/rego", rego);
+ api.use("/local-energy", localEnergy);
++api.use("/vpp", vpp);
+ api.use("/flex", flex);
+ api.use("/energy-assets", energyAssets);
+ api.use("/agency-payouts", agencyPayouts);
+diff --git a/amsl-frontend/src/App.jsx b/amsl-frontend/src/App.jsx
+index ac6036b..4a8150b 100644
+--- a/amsl-frontend/src/App.jsx
++++ b/amsl-frontend/src/App.jsx
+@@ -26,6 +26,7 @@ import BillValidation from "./pages/BillValidation.jsx";
+ import EiiCertificates from "./pages/EiiCertificates.jsx";
+ import RegoCertificates from "./pages/RegoCertificates.jsx";
+ import LocalEnergy from "./pages/LocalEnergy.jsx";
++import Vpp from "./pages/Vpp.jsx";
+ import Quotes from "./pages/Quotes.jsx";
+ import NewQuote from "./pages/NewQuote.jsx";
+ import Contracts from "./pages/Contracts.jsx";
+@@ -82,6 +83,7 @@ export default function App() {
+               <Route path="eii-certificates" element={<EiiCertificates />} />
+               <Route path="rego-certificates" element={<RegoCertificates />} />
+               <Route path="local-energy" element={<LocalEnergy />} />
++              <Route path="vpp" element={<Vpp />} />
+               <Route path="contracts" element={<Contracts />} />
+               <Route path="contracts/:id" element={<ContractDetail />} />
+               <Route path="contracts/generate" element={<GenerateContract />} />
+diff --git a/amsl-frontend/src/api.js b/amsl-frontend/src/api.js
+index ac873d6..ecf170a 100644
+--- a/amsl-frontend/src/api.js
++++ b/amsl-frontend/src/api.js
+@@ -85,6 +85,22 @@ export const api = {
+   dailyReminders: () => request(`/pipeline/reminders/daily`),
+   branding: () => request(`/branding`),
+   brandingSet: (b) => request(`/branding`, { method: "PUT", body: b }),
++  vppSummary: (params) => request(`/vpp/summary`, { params }),
++  vppProgrammes: (params) => request(`/vpp/programmes`, { params }),
++  vppProgrammeCreate: (body) => request(`/vpp/programmes`, { method: "POST", body }),
++  vppProgrammeUpdate: (id, body) => request(`/vpp/programmes/${id}`, { method: "PUT", body }),
++  vppProgrammeDelete: (id) => request(`/vpp/programmes/${id}`, { method: "DELETE" }),
++  vppEligibleAssets: (params) => request(`/vpp/eligible-assets`, { params }),
++  vppEnrolments: (params) => request(`/vpp/enrolments`, { params }),
++  vppEnrolmentCreate: (body) => request(`/vpp/enrolments`, { method: "POST", body }),
++  vppEnrolmentUpdate: (id, body) => request(`/vpp/enrolments/${id}`, { method: "PUT", body }),
++  vppEnrolmentDelete: (id) => request(`/vpp/enrolments/${id}`, { method: "DELETE" }),
++  vppEvents: (params) => request(`/vpp/events`, { params }),
++  vppEventCreate: (body) => request(`/vpp/events`, { method: "POST", body }),
++  vppEventDelete: (id) => request(`/vpp/events/${id}`, { method: "DELETE" }),
++  vppParticipation: (params) => request(`/vpp/participation`, { params }),
++  vppParticipationCreate: (body) => request(`/vpp/participation`, { method: "POST", body }),
++  vppParticipationUpdate: (id, body) => request(`/vpp/participation/${id}`, { method: "PUT", body }),
+   localAreas: () => request(`/local-energy/areas`),
+   localGenerators: (params) => request(`/local-energy/generators`, { params }),
+   localGeneratorCreate: (body) => request(`/local-energy/generators`, { method: "POST", body }),
+diff --git a/amsl-frontend/src/components/Layout.jsx b/amsl-frontend/src/components/Layout.jsx
+index 41075a1..7200fb9 100644
+--- a/amsl-frontend/src/components/Layout.jsx
++++ b/amsl-frontend/src/components/Layout.jsx
+@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, Link } from "react-router-do
+ import {
+   LayoutDashboard, Building2, Users, Truck, CreditCard, Package,
+   UserPlus, FilePlus2, ClipboardList, UserCheck, FileSignature, Ticket,
+-  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf, MapPin} from "lucide-react";
++  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf, MapPin, BatteryCharging} from "lucide-react";
+ import { useAuth } from "./AuthContext.jsx";
+ import { api } from "../api.js";
+ import { initials } from "./ui.jsx";
+@@ -77,6 +77,7 @@ const NAV = [
+     { to: "/eii-certificates", icon: FileCheck2, label: "EII Certificates" },
+     { to: "/rego-certificates", icon: Leaf, label: "REGO Certificates" },
+     { to: "/local-energy", icon: MapPin, label: "Local Energy Marketplace" },
++    { to: "/vpp", icon: BatteryCharging, label: "Virtual Power Plant" },
+   ] },
+   { to: "/tutorials", icon: GraduationCap, label: "Platform Guide" },
+   { to: "/settings", icon: SlidersHorizontal, label: "System Settings" },
+diff --git a/amsl-frontend/src/pages/Vpp.jsx b/amsl-frontend/src/pages/Vpp.jsx
+new file mode 100644
+index 0000000..b92fdc1
+--- /dev/null
++++ b/amsl-frontend/src/pages/Vpp.jsx
+@@ -0,0 +1,488 @@
++import { useState, useEffect, useCallback } from "react";
++import { Plus, Pencil, Trash2, BatteryCharging, Zap, CalendarClock, PoundSterling, RotateCcw } from "lucide-react";
++import { api } from "../api.js";
++import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
++
++const SCHEME_TYPES = ["Demand Flexibility", "Capacity Market", "Frequency Response", "Local Flexibility"];
++const BASES = ["Utilisation", "Availability"];
++const ENROL_STATUS = ["Registered", "Active", "Suspended", "Exited"];
++const PART_STATUS = ["Estimated", "Verified", "Paid"];
++
++const money = (n) => (n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
++const money0 = (n) => (n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { maximumFractionDigits: 0 }));
++const num = (v) => (v === "" || v == null ? null : Number(v));
++const sel = { padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" };
++
++export default function Vpp() {
++  const [tab, setTab] = useState("enrolments");
++  const [summary, setSummary] = useState(null);
++  const loadSummary = useCallback(() => { api.vppSummary().then((r) => setSummary(r.data)).catch(() => {}); }, []);
++  useEffect(() => { loadSummary(); }, [loadSummary]);
++
++  return (
++    <>
++      <div className="page-head">
++        <div>
++          <h1>Virtual Power Plant</h1>
++          <p className="sub">Enrol customer batteries into flexibility schemes that pay for shifting load out of peak hours.</p>
++        </div>
++      </div>
++
++      {summary && (
++        <div className="grid cols-4" style={{ marginBottom: 14 }}>
++          <Card><div className="sub" style={{ fontSize: 11 }}>ENROLLED ASSETS</div><div style={{ fontWeight: 800, fontSize: 22 }}>{summary.enrolments}</div><div className="sub" style={{ fontSize: 11 }}>{summary.contracted_kw} kW contracted</div></Card>
++          <Card><div className="sub" style={{ fontSize: 11 }}>TOTAL EARNED</div><div style={{ fontWeight: 800, fontSize: 22, color: "var(--brand,#0E7C7B)" }}>{money0(summary.total_earnings)}</div><div className="sub" style={{ fontSize: 11 }}>{Number(summary.total_reduction_kwh).toLocaleString()} kWh shifted</div></Card>
++          <Card><div className="sub" style={{ fontSize: 11 }}>PAID TO DATE</div><div style={{ fontWeight: 800, fontSize: 22 }}>{money0(summary.paid_to_date)}</div></Card>
++          <Card><div className="sub" style={{ fontSize: 11 }}>AWAITING PAYMENT</div><div style={{ fontWeight: 800, fontSize: 22 }}>{money0(summary.pending)}</div></Card>
++        </div>
++      )}
++
++      <div className="toggle" style={{ marginBottom: 14 }}>
++        <button className={tab === "enrolments" ? "active" : ""} onClick={() => setTab("enrolments")}>Enrolments</button>
++        <button className={tab === "programmes" ? "active" : ""} onClick={() => setTab("programmes")}>Programmes</button>
++        <button className={tab === "events" ? "active" : ""} onClick={() => setTab("events")}>Events & Earnings</button>
++      </div>
++
++      {tab === "enrolments" && <Enrolments onChanged={loadSummary} />}
++      {tab === "programmes" && <Programmes />}
++      {tab === "events" && <Events onChanged={loadSummary} />}
++    </>
++  );
++}
++
++/* ---------------- Enrolments ---------------- */
++function Enrolments({ onChanged }) {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [status, setStatus] = useState("");
++  const [showAdd, setShowAdd] = useState(false);
++
++  const load = useCallback(() => {
++    api.vppEnrolments(status ? { status } : {}).then((r) => { setRows(r.data); setErr(null); }).catch((e) => setErr(e.message));
++  }, [status]);
++  useEffect(() => { load(); }, [load]);
++
++  const setStat = async (row, s) => { await api.vppEnrolmentUpdate(row.id, { status: s }); load(); onChanged?.(); };
++  const del = async (row) => {
++    if (!confirm(`Remove this enrolment from ${row.programme_name}?`)) return;
++    try { await api.vppEnrolmentDelete(row.id); load(); onChanged?.(); } catch (e) { alert(e.message); }
++  };
++
++  return (
++    <Card>
++      <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
++        <select value={status} onChange={(e) => setStatus(e.target.value)} style={sel}>
++          <option value="">All statuses</option>
++          {ENROL_STATUS.map((s) => <option key={s}>{s}</option>)}
++        </select>
++        <button className="btn primary" style={{ marginLeft: "auto" }} onClick={() => setShowAdd(true)}><Plus size={15} /> Enrol Asset</button>
++      </div>
++      {err && <ErrorBanner error={err} onRetry={load} />}
++      {!rows ? <Spinner /> : (
++        <div className="table-wrap">
++          <table className="tbl">
++            <thead><tr><th>Customer</th><th>Asset</th><th>Programme</th><th>Basis</th><th>Contracted</th><th>Earned</th><th>Status</th><th></th></tr></thead>
++            <tbody>
++              {rows.length === 0 && <tr><td colSpan={8} className="sub" style={{ padding: 16, textAlign: "center" }}>No enrolments yet — use "Enrol Asset" to add a battery to a scheme.</td></tr>}
++              {rows.map((e) => (
++                <tr key={e.id}>
++                  <td className="name">{e.business_name || "—"}</td>
++                  <td>
++                    <span className="mini"><span className="ini sq"><BatteryCharging size={13} /></span>
++                      <span style={{ fontSize: 12 }}>{e.asset_type || "—"}</span></span>
++                    <div className="sub" style={{ fontSize: 11 }}>{[e.manufacturer, e.model].filter(Boolean).join(" ")}{e.capacity_kwh ? ` · ${e.capacity_kwh} kWh` : ""}</div>
++                  </td>
++                  <td style={{ fontSize: 12 }}>{e.programme_name}<div className="sub" style={{ fontSize: 11 }}>{e.operator}</div></td>
++                  <td>
++                    <Badge tone={e.payment_basis === "Availability" ? "indigo" : "slate"}>{e.payment_basis}</Badge>
++                    <div className="sub" style={{ fontSize: 10.5 }}>
++                      {e.payment_basis === "Availability" ? `£${e.availability_rate}/kW/yr` : `£${e.utilisation_rate}/MWh`}
++                    </div>
++                  </td>
++                  <td className="mono">{e.contracted_kw != null ? `${e.contracted_kw} kW` : "—"}</td>
++                  <td className="name">{money(e.earned_to_date)}</td>
++                  <td>
++                    <select value={e.status} onChange={(ev) => setStat(e, ev.target.value)} style={{ fontSize: 12, padding: "4px 6px", borderRadius: 7, border: "1px solid var(--line,#E7EBF0)" }}>
++                      {ENROL_STATUS.map((s) => <option key={s}>{s}</option>)}
++                    </select>
++                  </td>
++                  <td style={{ textAlign: "right" }}><button className="btn ghost sm" onClick={() => del(e)}><Trash2 size={13} /></button></td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++      {showAdd && <EnrolForm onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); onChanged?.(); }} />}
++    </Card>
++  );
++}
++
++function EnrolForm({ onClose, onSaved }) {
++  const [assets, setAssets] = useState([]);
++  const [progs, setProgs] = useState([]);
++  const [f, setF] = useState({ asset_id: "", programme_id: "", contracted_kw: "", start_date: "", reference: "", notes: "" });
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++
++  useEffect(() => {
++    api.vppEligibleAssets().then((r) => setAssets(r.data)).catch(() => {});
++    api.vppProgrammes({ status: "Open" }).then((r) => setProgs(r.data)).catch(() => {});
++  }, []);
++
++  const asset = assets.find((a) => String(a.id) === String(f.asset_id));
++  const prog = progs.find((p) => String(p.id) === String(f.programme_id));
++  // Default the contracted capacity to the asset's rated power — the agent can trim it.
++  const onAsset = (e) => {
++    const a = assets.find((x) => String(x.id) === String(e.target.value));
++    setF({ ...f, asset_id: e.target.value, contracted_kw: a?.capacity_kw ?? "" });
++  };
++  const kw = num(f.contracted_kw);
++  const belowMin = prog?.min_capacity_kw != null && kw != null && kw < prog.min_capacity_kw;
++  const estimate = prog && kw
++    ? prog.payment_basis === "Availability"
++      ? `Roughly ${money0(kw * (prog.availability_rate || 0))}/yr in availability payments`
++      : `About ${money(((kw * 2) / 1000) * (prog.utilisation_rate || 0))} per 2-hour event at full output`
++    : null;
++
++  const save = async () => {
++    if (!f.asset_id) return setErr("Select an asset to enrol");
++    if (!f.programme_id) return setErr("Select a programme");
++    setSaving(true); setErr(null);
++    try {
++      await api.vppEnrolmentCreate({
++        business_id: asset.business_id, asset_id: Number(f.asset_id), programme_id: Number(f.programme_id),
++        contracted_kw: kw, start_date: f.start_date || null, reference: f.reference || null, notes: f.notes || null,
++      });
++      onSaved();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title="Enrol Asset in a Flexibility Scheme" onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Enrol"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      {assets.length === 0 && (
++        <div className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
++          No eligible assets found. Add a Battery Storage or EV Charge Point on a customer's Energy Assets tab first.
++        </div>
++      )}
++      <div className="grid cols-2">
++        <Field label="Asset *">
++          <select value={f.asset_id} onChange={onAsset}>
++            <option value="">Select asset…</option>
++            {assets.map((a) => (
++              <option key={a.id} value={a.id}>
++                {a.business_name} — {a.asset_type}{a.capacity_kw ? ` (${a.capacity_kw} kW)` : ""}
++              </option>
++            ))}
++          </select>
++        </Field>
++        <Field label="Programme *">
++          <select value={f.programme_id} onChange={(e) => setF({ ...f, programme_id: e.target.value })}>
++            <option value="">Select programme…</option>
++            {progs.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.operator})</option>)}
++          </select>
++        </Field>
++        <Field label="Contracted Capacity (kW)"><input type="number" value={f.contracted_kw} onChange={(e) => setF({ ...f, contracted_kw: e.target.value })} /></Field>
++        <Field label="Start Date"><input type="date" value={f.start_date} onChange={(e) => setF({ ...f, start_date: e.target.value })} /></Field>
++        <Field label="Reference"><input value={f.reference} onChange={(e) => setF({ ...f, reference: e.target.value })} placeholder="Scheme/provider reference" /></Field>
++      </div>
++      {prog?.typical_window && <div className="sub" style={{ fontSize: 11.5, marginTop: 4 }}>Typical call window: {prog.typical_window}</div>}
++      {belowMin && (
++        <div style={{ padding: "8px 10px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, fontSize: 12, marginTop: 8 }}>
++          {prog.name} requires at least {prog.min_capacity_kw} kW — this asset is below the threshold and will be rejected. Smaller sites usually need an aggregator to pool capacity.
++        </div>
++      )}
++      {estimate && !belowMin && (
++        <div style={{ padding: "8px 10px", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, fontSize: 12, marginTop: 8 }}>
++          Indicative only: {estimate}. Actual earnings depend on how often events are called and measured performance.
++        </div>
++      )}
++      <Field label="Notes"><textarea value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
++
++/* ---------------- Programmes ---------------- */
++function Programmes() {
++  const [rows, setRows] = useState(null);
++  const [err, setErr] = useState(null);
++  const [editing, setEditing] = useState(null);
++  const [showAdd, setShowAdd] = useState(false);
++  const load = useCallback(() => { api.vppProgrammes().then((r) => { setRows(r.data); setErr(null); }).catch((e) => setErr(e.message)); }, []);
++  useEffect(() => { load(); }, [load]);
++
++  const del = async (p) => {
++    if (!confirm(`Delete programme "${p.name}"? Any enrolments in it will be removed too.`)) return;
++    try { await api.vppProgrammeDelete(p.id); load(); } catch (e) { alert(e.message); }
++  };
++
++  return (
++    <Card>
++      <div style={{ display: "flex", marginBottom: 12 }}>
++        <button className="btn primary" style={{ marginLeft: "auto" }} onClick={() => setShowAdd(true)}><Plus size={15} /> Add Programme</button>
++      </div>
++      {err && <ErrorBanner error={err} onRetry={load} />}
++      {!rows ? <Spinner /> : (
++        <div className="table-wrap">
++          <table className="tbl">
++            <thead><tr><th>Programme</th><th>Operator</th><th>Type</th><th>Basis</th><th>Rate</th><th>Min Capacity</th><th>Window</th><th>Status</th><th></th></tr></thead>
++            <tbody>
++              {rows.map((p) => (
++                <tr key={p.id}>
++                  <td className="name">{p.name}</td>
++                  <td style={{ fontSize: 12 }}>{p.operator || "—"}</td>
++                  <td style={{ fontSize: 12 }}>{p.scheme_type || "—"}</td>
++                  <td><Badge tone={p.payment_basis === "Availability" ? "indigo" : "slate"}>{p.payment_basis}</Badge></td>
++                  <td className="mono">{p.payment_basis === "Availability" ? `£${p.availability_rate}/kW/yr` : `£${p.utilisation_rate}/MWh`}</td>
++                  <td className="mono">{p.min_capacity_kw != null ? `${p.min_capacity_kw} kW` : "—"}</td>
++                  <td style={{ fontSize: 11.5, maxWidth: 200 }}>{p.typical_window || "—"}</td>
++                  <td><Badge tone={p.status === "Open" ? "green" : "slate"}>{p.status}</Badge></td>
++                  <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
++                    <button className="btn ghost sm" onClick={() => setEditing(p)}><Pencil size={13} /></button>
++                    <button className="btn ghost sm" onClick={() => del(p)}><Trash2 size={13} /></button>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++      {(showAdd || editing) && (
++        <ProgrammeForm prog={editing} onClose={() => { setShowAdd(false); setEditing(null); }}
++          onSaved={() => { setShowAdd(false); setEditing(null); load(); }} />
++      )}
++    </Card>
++  );
++}
++
++function ProgrammeForm({ prog, onClose, onSaved }) {
++  const [f, setF] = useState({
++    name: prog?.name || "", operator: prog?.operator || "", scheme_type: prog?.scheme_type || "Demand Flexibility",
++    payment_basis: prog?.payment_basis || "Utilisation", utilisation_rate: prog?.utilisation_rate ?? "",
++    availability_rate: prog?.availability_rate ?? "", min_capacity_kw: prog?.min_capacity_kw ?? "",
++    typical_window: prog?.typical_window || "", status: prog?.status || "Open", notes: prog?.notes || "",
++  });
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++
++  const save = async () => {
++    if (!f.name.trim()) return setErr("Programme name is required");
++    setSaving(true); setErr(null);
++    const body = { ...f, utilisation_rate: num(f.utilisation_rate), availability_rate: num(f.availability_rate), min_capacity_kw: num(f.min_capacity_kw) };
++    try {
++      if (prog) await api.vppProgrammeUpdate(prog.id, body);
++      else await api.vppProgrammeCreate(body);
++      onSaved();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title={prog ? `Edit — ${prog.name}` : "Add Programme"} onClose={onClose} wide
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="grid cols-2">
++        <Field label="Programme Name *"><input value={f.name} onChange={set("name")} /></Field>
++        <Field label="Operator"><input value={f.operator} onChange={set("operator")} placeholder="NESO, supplier or aggregator" /></Field>
++        <Field label="Scheme Type"><select value={f.scheme_type} onChange={set("scheme_type")}>{SCHEME_TYPES.map((s) => <option key={s}>{s}</option>)}</select></Field>
++        <Field label="Payment Basis"><select value={f.payment_basis} onChange={set("payment_basis")}>{BASES.map((s) => <option key={s}>{s}</option>)}</select></Field>
++        {f.payment_basis === "Utilisation"
++          ? <Field label="Utilisation Rate (£/MWh)"><input type="number" step="0.01" value={f.utilisation_rate} onChange={set("utilisation_rate")} /></Field>
++          : <Field label="Availability Rate (£/kW/yr)"><input type="number" step="0.01" value={f.availability_rate} onChange={set("availability_rate")} /></Field>}
++        <Field label="Minimum Capacity (kW)"><input type="number" value={f.min_capacity_kw} onChange={set("min_capacity_kw")} /></Field>
++        <Field label="Typical Window"><input value={f.typical_window} onChange={set("typical_window")} placeholder="16:00-19:00 weekdays, Nov-Mar" /></Field>
++        <Field label="Status"><select value={f.status} onChange={set("status")}><option>Open</option><option>Closed</option></select></Field>
++      </div>
++      <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
++
++/* ---------------- Events & Earnings ---------------- */
++function Events({ onChanged }) {
++  const [events, setEvents] = useState(null);
++  const [err, setErr] = useState(null);
++  const [showAdd, setShowAdd] = useState(false);
++  const [logFor, setLogFor] = useState(null);
++  const [expanded, setExpanded] = useState(null);
++  const [parts, setParts] = useState([]);
++
++  const load = useCallback(() => { api.vppEvents().then((r) => { setEvents(r.data); setErr(null); }).catch((e) => setErr(e.message)); }, []);
++  useEffect(() => { load(); }, [load]);
++
++  const openEvent = (ev) => {
++    if (expanded === ev.id) { setExpanded(null); return; }
++    setExpanded(ev.id);
++    api.vppParticipation({ event_id: ev.id }).then((r) => setParts(r.data)).catch(() => setParts([]));
++  };
++  const setPartStatus = async (p, s) => {
++    await api.vppParticipationUpdate(p.id, { status: s });
++    api.vppParticipation({ event_id: expanded }).then((r) => setParts(r.data));
++    load(); onChanged?.();
++  };
++  const delEvent = async (ev) => {
++    if (!confirm(`Delete this event and its recorded performance?`)) return;
++    try { await api.vppEventDelete(ev.id); setExpanded(null); load(); onChanged?.(); } catch (e) { alert(e.message); }
++  };
++
++  return (
++    <Card>
++      <div style={{ display: "flex", marginBottom: 12 }}>
++        <div className="sub" style={{ fontSize: 12 }}>A called turn-down window. Log what each site delivered to calculate what they've earned.</div>
++        <button className="btn primary" style={{ marginLeft: "auto" }} onClick={() => setShowAdd(true)}><Plus size={15} /> Add Event</button>
++      </div>
++      {err && <ErrorBanner error={err} onRetry={load} />}
++      {!events ? <Spinner /> : (
++        <div className="table-wrap">
++          <table className="tbl">
++            <thead><tr><th>Date</th><th>Window</th><th>Programme</th><th>Type</th><th>Sites</th><th>Shifted</th><th>Payments</th><th></th></tr></thead>
++            <tbody>
++              {events.length === 0 && <tr><td colSpan={8} className="sub" style={{ padding: 16, textAlign: "center" }}>No events recorded yet.</td></tr>}
++              {events.map((ev) => (
++                <>
++                  <tr key={ev.id} style={{ cursor: "pointer" }} onClick={() => openEvent(ev)}>
++                    <td className="name">{new Date(ev.event_date).toLocaleDateString("en-GB")}</td>
++                    <td className="mono">{ev.start_time || "—"}{ev.end_time ? `–${ev.end_time}` : ""}</td>
++                    <td style={{ fontSize: 12 }}>{ev.programme_name}</td>
++                    <td><Badge tone={ev.event_type === "Test" ? "slate" : "indigo"}>{ev.event_type}</Badge></td>
++                    <td className="mono">{ev.participants}</td>
++                    <td className="mono">{Number(ev.total_reduction_kwh || 0).toLocaleString()} kWh</td>
++                    <td className="name">{money(ev.total_payment)}</td>
++                    <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
++                      <button className="btn ghost sm" onClick={(e) => { e.stopPropagation(); setLogFor(ev); }}><Zap size={13} /> Log</button>
++                      <button className="btn ghost sm" onClick={(e) => { e.stopPropagation(); delEvent(ev); }}><Trash2 size={13} /></button>
++                    </td>
++                  </tr>
++                  {expanded === ev.id && (
++                    <tr key={`${ev.id}-detail`}>
++                      <td colSpan={8} style={{ background: "var(--subtle,#F8FAFC)", padding: 12 }}>
++                        {parts.length === 0 ? <div className="sub" style={{ fontSize: 12 }}>Nothing logged for this event yet — use "Log" to record performance.</div> : (
++                          <table className="tbl" style={{ background: "#fff" }}>
++                            <thead><tr><th>Customer</th><th>Baseline</th><th>Actual</th><th>Reduction</th><th>Rate</th><th>Payment</th><th>Status</th></tr></thead>
++                            <tbody>
++                              {parts.map((p) => (
++                                <tr key={p.id}>
++                                  <td className="name">{p.business_name}</td>
++                                  <td className="mono">{p.baseline_kwh} kWh</td>
++                                  <td className="mono">{p.actual_kwh} kWh</td>
++                                  <td className="mono" style={{ color: p.reduction_kwh > 0 ? "var(--brand,#0E7C7B)" : undefined }}>{p.reduction_kwh} kWh</td>
++                                  <td className="mono">£{p.rate_per_mwh}/MWh</td>
++                                  <td className="name">{money(p.payment)}</td>
++                                  <td>
++                                    <select value={p.status} onChange={(e) => setPartStatus(p, e.target.value)} style={{ fontSize: 12, padding: "3px 6px", borderRadius: 7, border: "1px solid var(--line,#E7EBF0)" }}>
++                                      {PART_STATUS.map((s) => <option key={s}>{s}</option>)}
++                                    </select>
++                                  </td>
++                                </tr>
++                              ))}
++                            </tbody>
++                          </table>
++                        )}
++                      </td>
++                    </tr>
++                  )}
++                </>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      )}
++      {showAdd && <EventForm onClose={() => setShowAdd(false)} onSaved={() => { setShowAdd(false); load(); }} />}
++      {logFor && <LogForm event={logFor} onClose={() => setLogFor(null)} onSaved={() => { setLogFor(null); load(); onChanged?.(); if (expanded) api.vppParticipation({ event_id: expanded }).then((r) => setParts(r.data)); }} />}
++    </Card>
++  );
++}
++
++function EventForm({ onClose, onSaved }) {
++  const [progs, setProgs] = useState([]);
++  const [f, setF] = useState({ programme_id: "", event_date: "", start_time: "16:00", end_time: "19:00", event_type: "Live", notes: "" });
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  useEffect(() => { api.vppProgrammes().then((r) => setProgs(r.data)).catch(() => {}); }, []);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++
++  const save = async () => {
++    if (!f.programme_id || !f.event_date) return setErr("Programme and date are required");
++    setSaving(true); setErr(null);
++    try { await api.vppEventCreate({ ...f, programme_id: Number(f.programme_id) }); onSaved(); }
++    catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title="Add Event" onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="grid cols-2">
++        <Field label="Programme *">
++          <select value={f.programme_id} onChange={set("programme_id")}>
++            <option value="">Select…</option>
++            {progs.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
++          </select>
++        </Field>
++        <Field label="Date *"><input type="date" value={f.event_date} onChange={set("event_date")} /></Field>
++        <Field label="Start Time"><input type="time" value={f.start_time} onChange={set("start_time")} /></Field>
++        <Field label="End Time"><input type="time" value={f.end_time} onChange={set("end_time")} /></Field>
++        <Field label="Type"><select value={f.event_type} onChange={set("event_type")}><option>Live</option><option>Test</option></select></Field>
++      </div>
++      <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
++
++function LogForm({ event, onClose, onSaved }) {
++  const [enrolments, setEnrolments] = useState([]);
++  const [f, setF] = useState({ enrolment_id: "", baseline_kwh: "", actual_kwh: "", status: "Estimated", notes: "" });
++  const [err, setErr] = useState(null);
++  const [saving, setSaving] = useState(false);
++  useEffect(() => { api.vppEnrolments({ status: "Active" }).then((r) => setEnrolments(r.data)).catch(() => {}); }, []);
++  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
++
++  const reduction = Math.max(0, (num(f.baseline_kwh) || 0) - (num(f.actual_kwh) || 0));
++  const rate = event.utilisation_rate || 0;
++  const payment = (reduction / 1000) * rate;
++
++  const save = async () => {
++    if (!f.enrolment_id) return setErr("Select which enrolment this is for");
++    setSaving(true); setErr(null);
++    try {
++      await api.vppParticipationCreate({
++        event_id: event.id, enrolment_id: Number(f.enrolment_id),
++        baseline_kwh: num(f.baseline_kwh), actual_kwh: num(f.actual_kwh),
++        status: f.status, notes: f.notes || null,
++      });
++      onSaved();
++    } catch (e) { setErr(e.message); setSaving(false); }
++  };
++
++  return (
++    <Modal title={`Log Performance — ${new Date(event.event_date).toLocaleDateString("en-GB")}`} onClose={onClose}
++      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button></>}>
++      {err && <ErrorBanner error={err} />}
++      <div className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
++        Baseline is what the site would normally have used in this window. Payment is based on the reduction against it, not total usage.
++      </div>
++      <div className="grid cols-2">
++        <Field label="Enrolment *">
++          <select value={f.enrolment_id} onChange={set("enrolment_id")}>
++            <option value="">Select…</option>
++            {enrolments.map((e) => <option key={e.id} value={e.id}>{e.business_name} — {e.programme_name}</option>)}
++          </select>
++        </Field>
++        <Field label="Status"><select value={f.status} onChange={set("status")}>{PART_STATUS.map((s) => <option key={s}>{s}</option>)}</select></Field>
++        <Field label="Baseline (kWh)"><input type="number" step="0.01" value={f.baseline_kwh} onChange={set("baseline_kwh")} /></Field>
++        <Field label="Actual (kWh)"><input type="number" step="0.01" value={f.actual_kwh} onChange={set("actual_kwh")} /></Field>
++      </div>
++      {(f.baseline_kwh || f.actual_kwh) && (
++        <div style={{ padding: "10px 12px", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, fontSize: 13, marginTop: 4 }}>
++          Reduction <b>{round(reduction)} kWh</b> × £{rate}/MWh = <b>{money(payment)}</b>
++          {reduction === 0 && <div className="sub" style={{ fontSize: 11 }}>No reduction against baseline, so nothing earned for this event.</div>}
++        </div>
++      )}
++      <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
++    </Modal>
++  );
++}
++
++const round = (n) => Math.round(n * 100) / 100;
