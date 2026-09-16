@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, Link } from "react-router-do
 import {
   LayoutDashboard, Building2, Users, Truck, CreditCard, Package,
   UserPlus, FilePlus2, ClipboardList, UserCheck, FileSignature, Ticket,
-  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf, MapPin, BatteryCharging, Zap} from "lucide-react";
+  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf, MapPin, BatteryCharging, Zap, TrendingUp} from "lucide-react";
 import { useAuth } from "./AuthContext.jsx";
 import { api } from "../api.js";
 import { initials } from "./ui.jsx";
@@ -80,6 +80,7 @@ const NAV = [
     { to: "/vpp", icon: BatteryCharging, label: "Virtual Power Plant" },
     { to: "/carbon", icon: Leaf, label: "Carbon Credits" },
     { to: "/network-charges", icon: Zap, label: "Network Charges" },
+    { to: "/flex-position", icon: TrendingUp, label: "Flex Position" },
   ] },
   { to: "/tutorials", icon: GraduationCap, label: "Platform Guide" },
   { to: "/settings", icon: SlidersHorizontal, label: "System Settings" },
@@ -96,7 +97,7 @@ export default function Layout() {
   const [brand, setBrand] = useState(null);
   const railRef = useRef(null);
   useEffect(() => {
-    api.permissionsEffective(user?.role || "").then((r) => setAllowed(r.data)).catch(() => setAllowed(null));
+    api.permissionsEffective(user?.role || "", user?.id, user?.agency_id).then((r) => setAllowed(r.data)).catch(() => setAllowed(null));
     // V1.7-10: apply the full branding config (not just colour) so a logo/name set in
     // Settings → Branding actually shows up here, instead of the hardcoded "AB" mark.
     api.branding().then((r) => {

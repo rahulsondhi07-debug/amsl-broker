@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Zap, Flame, Search, Trophy, Check, Leaf } from "lucide-react";
 import { api } from "../api.js";
 import { Card, Field, ErrorBanner, Badge, Spinner, Modal } from "../components/ui.jsx";
+import { useAuth } from "../components/AuthContext.jsx";
 
 const money = (n) => "£" + Number(n || 0).toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 // Same list as the Products "Payment Method" dropdown, kept in sync.
@@ -30,6 +31,16 @@ export default function NewQuote() {
   const [paymentFilter, setPaymentFilter] = useState(""); // "" or one of PAY_METHODS
   const [nightPct, setNightPct] = useState("");           // % of consumption on the night rate
   const [flexCfg, setFlexCfg] = useState({});
+  // Flexible purchasing is permissioned per agency/agent, so the route is hidden entirely
+  // for anyone without it rather than shown and then refused on submit.
+  const { user } = useAuth();
+  const [canFlex, setCanFlex] = useState(true);
+  useEffect(() => {
+    api.permissionsEffective(user?.role || "", user?.id, user?.agency_id)
+      .then((r) => setCanFlex(r.data.includes("feature:flex-purchasing")))
+      .catch(() => setCanFlex(true));
+  }, [user?.role, user?.id, user?.agency_id]);
+  useEffect(() => { if (!canFlex && mode === "flex") setMode("market"); }, [canFlex, mode]);
   useEffect(() => {
     api.configLookups().then((cfg) => {
       const pick = {};
@@ -220,7 +231,7 @@ export default function NewQuote() {
         <div className="toggle" style={{ marginBottom: 14 }}>
           <button className={mode === "market" ? "active" : ""} onClick={() => setMode("market")}>Market Comparison</button>
           <button className={mode === "bespoke" ? "active" : ""} onClick={() => setMode("bespoke")}>Bespoke Pricing</button>
-          <button className={mode === "flex" ? "active" : ""} onClick={() => setMode("flex")}>Flex Request</button>
+          {canFlex && <button className={mode === "flex" ? "active" : ""} onClick={() => setMode("flex")}>Flex Request</button>}
         </div>
         <div className="grid cols-3" style={{ gap: 14 }}>
           <Field label="Utility *">

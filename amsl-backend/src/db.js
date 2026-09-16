@@ -447,6 +447,18 @@ export function migrate() {
       menu_key TEXT NOT NULL,
       UNIQUE(role, menu_key)
     );
+    -- Per-agency and per-agent permission overrides, layered on top of the role grant.
+    -- allowed is deliberately 1/0 rather than presence-only, because a deny has to be
+    -- expressible: a role may grant Compliance broadly while one agent is excluded.
+    -- Resolution is least-specific to most-specific: role -> agency -> agent.
+    CREATE TABLE IF NOT EXISTS entity_permissions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL,   -- 'agency' | 'agent'
+      entity_id   INTEGER NOT NULL,
+      perm_key    TEXT NOT NULL,   -- a menu key, or a feature key like 'feature:flex-purchasing'
+      allowed     INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(entity_type, entity_id, perm_key)
+    );
     CREATE TABLE IF NOT EXISTS app_settings (
       key   TEXT PRIMARY KEY,
       value TEXT
@@ -696,6 +708,66 @@ export function migrate() {
       agent_id            INTEGER REFERENCES agents(id) ON DELETE SET NULL,
       created_at          TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- Flexible purchasing: a consortium/basket, its members, and the tranches bought
+    -- against it. A "position" is simply how much of the basket's annual volume has been
+    -- hedged so far, at what weighted average price, versus what remains open to the market.
+    CREATE TABLE IF NOT EXISTS flex_baskets (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL,
+      code             TEXT,
+      basket_type      TEXT,            -- Framework / Consortium | Flexi Basket / Pooled | Individual
+      supplier_id      INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      purchasing_strategy TEXT,
+      index_reference  TEXT,
+      management_fee   REAL,            -- p/kWh
+      contract_start   TEXT,
+      contract_end     TEXT,
+      budget_power    REAL,             -- target £/MWh
+      budget_gas      REAL,             -- target p/therm
+      report_date     TEXT,             -- "position data as at"
+      market_commentary TEXT,           -- the narrative shown above the charts
+      member_message  TEXT,             -- the "what this means for members" section
+      status           TEXT NOT NULL DEFAULT 'Active',  -- Active | Closed
+      notes            TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- A member's volume is held per utility, so one customer can sit in the basket for
+    -- power, gas, or both, with different volumes for each.
+    CREATE TABLE IF NOT EXISTS flex_basket_members (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      basket_id         INTEGER NOT NULL REFERENCES flex_baskets(id) ON DELETE CASCADE,
+      business_id       INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+      business_name     TEXT,
+      utility           TEXT NOT NULL,  -- Power | Gas
+      annual_volume_kwh REAL NOT NULL,
+      joined_on         TEXT,
+      status            TEXT NOT NULL DEFAULT 'Active',
+      UNIQUE(basket_id, business_id, utility)
+    );
+    -- The position curve. One row per delivery period per fuel, which is how the source
+    -- position reports are actually structured: a hedge is held against a specific season,
+    -- not against the book as a whole.
+    --   market = today's market price for that period (from the broker curve)
+    --   locked = weighted average price already secured for that period
+    --   vol_req / traded are in the fuel's own unit: therms/day for gas, MW for power.
+    -- open and hedged % are derived rather than stored, so they can never drift out of
+    -- step with the volumes they come from.
+    CREATE TABLE IF NOT EXISTS flex_curve (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      basket_id     INTEGER NOT NULL REFERENCES flex_baskets(id) ON DELETE CASCADE,
+      utility       TEXT NOT NULL,      -- Gas | Power
+      period_type   TEXT NOT NULL,      -- season | month
+      label         TEXT NOT NULL,      -- "Winter 2026" or "Apr-25"
+      sort_order    INTEGER NOT NULL DEFAULT 0,
+      vol_req       REAL,
+      traded        REAL,
+      market        REAL,
+      locked        REAL,               -- null where nothing is traded for that period
+      notes         TEXT,
+      UNIQUE(basket_id, utility, period_type, label)
+    );
+
+
     -- On-site energy assets (battery storage, EV charge points, solar PV, CHP...).
     -- Kept separate from meters: an asset sits behind a meter rather than being one, and
     -- several assets can share a single MPAN. day_night_active flags whether the site is
@@ -1210,10 +1282,32 @@ export const MENU_CATALOG = [
   { key: "/vpp", label: "Virtual Power Plant" },
   { key: "/carbon", label: "Carbon Credits" },
   { key: "/network-charges", label: "Network Charges" },
+  { key: "/flex-position", label: "Flex Position" },
   { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];
 export const FULL_ACCESS_ROLES = ["Admin", "Super User"];
+
+/**
+ * Permissions that aren't nav items. Flexible purchasing is a route inside Get Quote
+ * rather than its own page, so it can't be gated by a menu key — it needs a feature key.
+ */
+export const FEATURE_CATALOG = [
+  { key: "feature:flex-purchasing", label: "Flexible Purchasing (Flex route on Get Quote)" },
+];
+
+/**
+ * Named bundles the admin grid ticks as a unit, so "give this agency Compliance" is one
+ * action rather than seven. Kept here so the set stays correct as pages are added.
+ */
+export const PERMISSION_GROUPS = [
+  {
+    name: "Compliance",
+    keys: ["/bill-validation", "/eii-certificates", "/rego-certificates", "/local-energy",
+           "/vpp", "/carbon", "/network-charges"],
+  },
+  { name: "Flexible Purchasing", keys: ["feature:flex-purchasing", "/flex-position"] },
+];
 
 /* Seed default role -> menu permissions. Idempotent. */
 export function seedPermissions() {
@@ -1223,8 +1317,13 @@ export function seedPermissions() {
   // database. INSERT OR IGNORE is safe to re-run: it only adds missing
   // (role, menu_key) pairs and never touches permissions someone has
   // customised via the Permissions screen.
-  const all = MENU_CATALOG.map((m) => m.key);
-  const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets"];
+  // Feature keys are granted alongside menus so behaviour is unchanged by default:
+  // everyone who could reach Flex before still can, and an admin then revokes it per
+  // agency or agent. Without this, adding the feature key would silently withdraw Flex
+  // from every existing user.
+  const all = [...MENU_CATALOG.map((m) => m.key), ...FEATURE_CATALOG.map((f) => f.key)];
+  const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets",
+                      "feature:flex-purchasing", "/flex-position"];
   const grants = { "Admin": all, "Super User": all, "Manager": all.filter((k) => k !== "/permissions"), "Agent": agentMenus };
   const before = db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c;
   const ins = db.prepare("INSERT OR IGNORE INTO role_permissions (role,menu_key) VALUES (?,?)");
