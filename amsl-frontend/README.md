@@ -1,6 +1,6 @@
-# AMSL Broker — Frontend
+# Utility X — Frontend
 
-A React (Vite) admin UI for the AMSL Broker portal. It talks to the backend API and reproduces
+A React (Vite) admin UI for the Utility X portal. It talks to the backend API and reproduces
 the portal’s screens: a live **Dashboard** and full pages for Leads, Customers, Quotes (+ the
 Get Quote form), Contracts, Suppliers, Supplier Payments, Products, Agencies, Agents and Tickets.
 

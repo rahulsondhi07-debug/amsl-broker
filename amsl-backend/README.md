@@ -1,6 +1,6 @@
-# AMSL Broker — Backend API
+# Utility X — Backend API
 
-A REST backend for the AMSL Broker energy‑brokerage portal. It reproduces the data model and
+A REST backend for the Utility X energy‑brokerage portal. It reproduces the data model and
 functionality of every module in the dashboard (leads, quotes, contracts, customers, suppliers,
 products, agencies, agents, supplier payments, tickets) plus the aggregated **dashboard**
 endpoints that drive the home screen widgets.

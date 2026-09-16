@@ -13,6 +13,9 @@ import branding from "./routes/branding.js";
 import otherServices from "./routes/otherServices.js";
 import rego from "./routes/rego.js";
 import localEnergy from "./routes/localEnergy.js";
+import vpp from "./routes/vpp.js";
+import carbon from "./routes/carbon.js";
+import networkCharges from "./routes/networkCharges.js";
 import flex from "./routes/flex.js";
 import energyAssets from "./routes/energyAssets.js";
 import agencyPayouts from "./routes/agencyPayouts.js";
@@ -61,7 +64,7 @@ app.use((req, _res, next) => { console.log(`${req.method} ${req.url}`); next(); 
 const api = express.Router();
 api.get("/", (_req, res) =>
   res.json({
-    name: "AMSL Broker API",
+    name: "Utility X API",
     version: "1.0.0",
     endpoints: [
       "GET  /api/dashboard", "GET  /api/dashboard/stats?period=monthly|total",
@@ -88,6 +91,9 @@ api.use("/branding", branding);
 api.use("/other-services", otherServices);
 api.use("/rego", rego);
 api.use("/local-energy", localEnergy);
+api.use("/vpp", vpp);
+api.use("/carbon", carbon);
+api.use("/network-charges", networkCharges);
 api.use("/flex", flex);
 api.use("/energy-assets", energyAssets);
 api.use("/agency-payouts", agencyPayouts);
@@ -142,5 +148,5 @@ const PORT = process.env.PORT || 4000;
 export default app;
 import { fileURLToPath } from "url";
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  app.listen(PORT, () => console.log(`\nAMSL Broker API running → http://localhost:${PORT}/api\n`));
+  app.listen(PORT, () => console.log(`\nUtility X API running → http://localhost:${PORT}/api\n`));
 }

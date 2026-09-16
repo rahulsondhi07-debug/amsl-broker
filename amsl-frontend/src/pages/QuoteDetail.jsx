@@ -20,7 +20,7 @@ async function downloadReport(q) {
   let disclaimerText = "This quote is valid until 5:30pm today; prices may change and are subject to availability. All contracts are subject to credit approval. Rates in pence/kWh, excl. CCL & VAT.";
   try { disclaimerText = (await api.disclaimer()).data.text; } catch { /* fall back to default above */ }
   const L = [
-    "AMSL BROKER — QUOTE RESULT", "".padEnd(40, "="), "",
+    "UTILITY X — QUOTE RESULT", "".padEnd(40, "="), "",
     `Quote ID:      ${q.quote_no}${Number(q.bespoke) ? "  (BESPOKE)" : ""}`,
     `Business:      ${q.business_name || "—"}`,
     `Product:       ${q.product_name || "—"}`,

@@ -26,6 +26,9 @@ import BillValidation from "./pages/BillValidation.jsx";
 import EiiCertificates from "./pages/EiiCertificates.jsx";
 import RegoCertificates from "./pages/RegoCertificates.jsx";
 import LocalEnergy from "./pages/LocalEnergy.jsx";
+import Vpp from "./pages/Vpp.jsx";
+import Carbon from "./pages/Carbon.jsx";
+import NetworkCharges from "./pages/NetworkCharges.jsx";
 import Quotes from "./pages/Quotes.jsx";
 import NewQuote from "./pages/NewQuote.jsx";
 import Contracts from "./pages/Contracts.jsx";
@@ -82,6 +85,9 @@ export default function App() {
               <Route path="eii-certificates" element={<EiiCertificates />} />
               <Route path="rego-certificates" element={<RegoCertificates />} />
               <Route path="local-energy" element={<LocalEnergy />} />
+              <Route path="vpp" element={<Vpp />} />
+              <Route path="carbon" element={<Carbon />} />
+              <Route path="network-charges" element={<NetworkCharges />} />
               <Route path="contracts" element={<Contracts />} />
               <Route path="contracts/:id" element={<ContractDetail />} />
               <Route path="contracts/generate" element={<GenerateContract />} />

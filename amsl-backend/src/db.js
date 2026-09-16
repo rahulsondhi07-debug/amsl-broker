@@ -202,6 +202,18 @@ export const JOURNEY_STAGES = [
 
 export function migrate() {
   const addCol = (sql) => { try { db.exec(sql); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } };
+
+  // Rebrand AMSL -> Utility X for databases seeded before the rename. Code defaults only
+  // apply to a fresh install, so without this an existing deployment would keep showing
+  // the old name and, more importantly, keep writing commission rows against a level
+  // called "AMSL" that no longer matches the split definition — quietly breaking payouts.
+  // Every statement is idempotent, so this is safe to run on each boot.
+  try {
+    db.prepare("UPDATE commission_splits SET level='Utility X' WHERE level='AMSL'").run();
+    db.prepare("UPDATE agencies SET name='Utility X Portal' WHERE name='AMSL broker portal'").run();
+    db.prepare("UPDATE app_settings SET value='Utility X' WHERE key='brand_name' AND value='AMSL Broker'").run();
+    db.prepare("UPDATE app_settings SET value='/utility-x-mark.svg' WHERE key='logo_url' AND (value IS NULL OR value='')").run();
+  } catch (e) { /* tables may not exist yet on a brand-new database — seeding covers those */ }
   addCol("ALTER TABLE businesses ADD COLUMN journey_stage    TEXT");
   addCol("ALTER TABLE businesses ADD COLUMN fuel             TEXT");   // ELEC | GAS | DUAL
   addCol("ALTER TABLE businesses ADD COLUMN supplier_id      INTEGER");
@@ -265,7 +277,7 @@ export function migrate() {
    "corporate_login_email TEXT",
    "mm_name TEXT", "mm_email TEXT", "mm_password TEXT", "mm_mobile TEXT", "mm_landline TEXT", "mm_threshold INTEGER",
    "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER",
-   "contract_agent_id TEXT"   // V1.7-14: the Agent ID this supplier issues to AMSL — gets
+   "contract_agent_id TEXT"   // V1.7-14: the Agent ID this supplier issues to Utility X — gets
                               // auto-published onto every contract generated for them.
   ].forEach(sc);
   // Contract generation fields (match production contract/generate form)
@@ -484,7 +496,7 @@ export function migrate() {
     CREATE TABLE IF NOT EXISTS commission_splits (
       id        INTEGER PRIMARY KEY AUTOINCREMENT,
       record_id INTEGER NOT NULL REFERENCES commission_records(id) ON DELETE CASCADE,
-      level     TEXT NOT NULL,   -- AMSL | Master Broker | Agent
+      level     TEXT NOT NULL,   -- Utility X | Master Broker | Agent
       pct       REAL NOT NULL,
       amount    REAL NOT NULL
     );
@@ -504,8 +516,8 @@ export function migrate() {
       note       TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    -- Agency payouts: what AMSL owes each agency once the supplier has actually paid us.
-    -- Separate from commission_records (what the supplier owes AMSL) because the two sides
+    -- Agency payouts: what Utility X owes each agency once the supplier has actually paid us.
+    -- Separate from commission_records (what the supplier owes Utility X) because the two sides
     -- settle independently — a supplier can pay us before we pay the agency, and the
     -- payout can go out by a completely different method.
     -- Cryptocurrency payouts capture the extra detail a bank transfer doesn't need: which
@@ -711,7 +723,7 @@ export function migrate() {
     );
     -- REGO (Renewable Energy Guarantees of Origin) certificates.
     -- rego_offers is the catalogue: what's currently available to buy, across the
-    -- different marketplaces/registries AMSL sources from. One REGO = 1 MWh of certified
+    -- different marketplaces/registries Utility X sources from. One REGO = 1 MWh of certified
     -- renewable generation, so everything is priced and traded per MWh.
     CREATE TABLE IF NOT EXISTS rego_offers (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -794,9 +806,194 @@ export function migrate() {
       notes           TEXT,
       created_at      TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Virtual Power Plant: aggregating customer batteries (and other flexible assets) so
+    -- they can be paid for turning down or exporting during peak periods.
+    -- Two distinct ways these schemes pay, which is why both rate columns exist:
+    --   * utilisation — paid per MWh actually shifted during a called event (e.g. NESO's
+    --     Demand Flexibility Service), so earnings depend on measured performance.
+    --   * availability — paid per kW simply for being contracted and available across a
+    --     season (e.g. the Capacity Market), whether or not an event is ever called.
+    CREATE TABLE IF NOT EXISTS vpp_programmes (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      name              TEXT NOT NULL,
+      operator          TEXT,              -- NESO, a supplier, or an aggregator
+      scheme_type       TEXT,              -- Demand Flexibility | Capacity Market | Frequency Response | ...
+      payment_basis     TEXT NOT NULL DEFAULT 'Utilisation',  -- Utilisation | Availability
+      utilisation_rate  REAL,              -- £ per MWh shifted
+      availability_rate REAL,              -- £ per kW per year
+      min_capacity_kw   REAL,              -- smallest asset the scheme will accept
+      typical_window    TEXT,              -- e.g. "16:00-19:00 weekdays, Nov-Mar"
+      season_start      TEXT,
+      season_end        TEXT,
+      status            TEXT NOT NULL DEFAULT 'Open',  -- Open | Closed
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS vpp_enrolments (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id     INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      asset_id        INTEGER REFERENCES energy_assets(id) ON DELETE SET NULL,
+      programme_id    INTEGER NOT NULL REFERENCES vpp_programmes(id) ON DELETE CASCADE,
+      contracted_kw   REAL,                -- capacity committed to the scheme
+      start_date      TEXT,
+      end_date        TEXT,
+      reference       TEXT,
+      status          TEXT NOT NULL DEFAULT 'Registered', -- Registered | Active | Suspended | Exited
+      notes           TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS vpp_events (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      programme_id    INTEGER NOT NULL REFERENCES vpp_programmes(id) ON DELETE CASCADE,
+      event_date      TEXT NOT NULL,
+      start_time      TEXT,
+      end_time        TEXT,
+      event_type      TEXT NOT NULL DEFAULT 'Live',  -- Live | Test
+      notes           TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- One row per enrolment per event. Reduction is baseline minus actual: the baseline is
+    -- what the site would normally have used in that window, so payment reflects the extra
+    -- turn-down achieved, not total consumption.
+    CREATE TABLE IF NOT EXISTS vpp_participation (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id        INTEGER NOT NULL REFERENCES vpp_events(id) ON DELETE CASCADE,
+      enrolment_id    INTEGER NOT NULL REFERENCES vpp_enrolments(id) ON DELETE CASCADE,
+      baseline_kwh    REAL,
+      actual_kwh      REAL,
+      reduction_kwh   REAL,
+      rate_per_mwh    REAL,
+      payment         REAL,
+      status          TEXT NOT NULL DEFAULT 'Estimated', -- Estimated | Verified | Paid
+      notes           TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Carbon credits. One credit = 1 tonne of CO2e.
+    -- The point of aggregation here is price: a single small business buying 40 tonnes pays
+    -- retail, but pooling many customers' demand into one purchase reaches volume tiers.
+    -- Pools therefore recalculate a single effective price for every member whenever the
+    -- committed total crosses a tier, so late joiners and early joiners pay the same rate.
+    CREATE TABLE IF NOT EXISTS carbon_projects (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL,
+      registry         TEXT,            -- Verra VCS | Gold Standard | Woodland Carbon Code | ...
+      project_type     TEXT,            -- Afforestation | REDD+ | Renewable Energy | Biochar | ...
+      country          TEXT,
+      vintage_year     INTEGER,
+      price_per_tonne  REAL,            -- retail/list price before pooling
+      available_tonnes REAL,
+      co_benefits      TEXT,            -- e.g. "SDG 8, SDG 15"
+      registry_ref     TEXT,            -- project ID on the registry, for verification
+      status           TEXT NOT NULL DEFAULT 'Available',  -- Available | Sold Out | Retired
+      notes            TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS carbon_pools (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      name             TEXT NOT NULL,
+      project_id       INTEGER REFERENCES carbon_projects(id) ON DELETE SET NULL,
+      target_tonnes    REAL,            -- volume we're aiming to reach
+      committed_tonnes REAL NOT NULL DEFAULT 0,  -- recalculated from allocations
+      effective_price  REAL,            -- current tier price, applied to all members
+      closes_on        TEXT,
+      status           TEXT NOT NULL DEFAULT 'Open',  -- Open | Closed | Settled
+      notes            TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- Volume discount ladder for a pool: the tier with the highest min_tonnes at or below
+    -- the pool's committed total sets the price everyone pays.
+    CREATE TABLE IF NOT EXISTS carbon_price_tiers (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      pool_id         INTEGER NOT NULL REFERENCES carbon_pools(id) ON DELETE CASCADE,
+      min_tonnes      REAL NOT NULL,
+      price_per_tonne REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS carbon_allocations (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      pool_id           INTEGER NOT NULL REFERENCES carbon_pools(id) ON DELETE CASCADE,
+      business_id       INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      tonnes            REAL NOT NULL,
+      price_per_tonne   REAL,           -- snapshot of the effective price for this member
+      cost              REAL,
+      retirement_serial TEXT,           -- registry serial once retired on the customer's behalf
+      retired_on        TEXT,
+      status            TEXT NOT NULL DEFAULT 'Committed', -- Committed | Purchased | Retired | Cancelled
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Network charge optimisation: coordinating battery dispatch to cut the non-commodity
+    -- costs that sit outside the "fixed" unit rate.
+    --
+    -- DUoS unit rates are banded by time of day (red/amber/green) and vary by distribution
+    -- area. The saving from shifting load is the difference between the band you left and
+    -- the band you moved into, so both rates matter, not just the red one.
+    CREATE TABLE IF NOT EXISTS duos_bands (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      dist_id       INTEGER NOT NULL,        -- distribution area (10-23)
+      band          TEXT NOT NULL,           -- Red | Amber | Green
+      day_type      TEXT NOT NULL DEFAULT 'Weekday', -- Weekday | Weekend | All
+      start_time    TEXT NOT NULL,
+      end_time      TEXT NOT NULL,
+      rate_p_kwh    REAL NOT NULL,
+      season        TEXT,                    -- optional, e.g. Winter
+      charge_year   TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- TNUoS locational demand tariff, £/kW of Triad demand per year, by transmission zone.
+    -- Post-TCR (April 2023) the residual element became a fixed band, so only this
+    -- locational element still responds to Triad behaviour.
+    CREATE TABLE IF NOT EXISTS tnuos_tariffs (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      zone_name       TEXT NOT NULL,
+      dist_id         INTEGER,
+      tariff_gbp_kw   REAL NOT NULL,
+      charge_year     TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- Candidate Triad half-hours. A Triad is one of the three highest national demand
+    -- half-hours between November and February, each separated by at least 10 clear days.
+    -- They're only confirmed retrospectively, so the workflow is: forecast -> warn ->
+    -- confirm after the season.
+    CREATE TABLE IF NOT EXISTS triad_alerts (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      alert_date        TEXT NOT NULL,
+      start_time        TEXT,
+      end_time          TEXT,
+      forecast_demand_mw REAL,
+      alert_level       TEXT NOT NULL DEFAULT 'Watch',  -- Watch | Warning | Confirmed Triad | Missed
+      season            TEXT,
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- A planned or delivered battery/load action in a specific window.
+    CREATE TABLE IF NOT EXISTS dispatch_plans (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id       INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+      asset_id          INTEGER REFERENCES energy_assets(id) ON DELETE SET NULL,
+      triad_alert_id    INTEGER REFERENCES triad_alerts(id) ON DELETE SET NULL,
+      purpose           TEXT NOT NULL,       -- Triad Avoidance | DUoS Red Shift
+      plan_date         TEXT NOT NULL,
+      start_time        TEXT,
+      end_time          TEXT,
+      planned_kw        REAL,                -- power reduction during the window
+      planned_kwh       REAL,                -- energy shifted out of the window
+      delivered_kw      REAL,
+      delivered_kwh     REAL,
+      from_band         TEXT,                -- band the load was shifted out of
+      to_band           TEXT,                -- band it moved into
+      estimated_saving  REAL,
+      actual_saving     REAL,
+      status            TEXT NOT NULL DEFAULT 'Planned', -- Planned | Dispatched | Verified | Missed
+      notes             TEXT,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
-  setDef.run("brand_name", "AMSL Broker");
+  setDef.run("brand_name", "Utility X");
+  setDef.run("logo_url", "/utility-x-mark.svg");
   setDef.run("primary_color", "#0E7C7B");
   setDef.run("logo_url", "");
 }
@@ -873,7 +1070,7 @@ export function seedPlatform() {
   else if (after > before) console.log(`Added ${after - before} new config_lookups value(s) for categories introduced since last deploy.`);
   if (db.prepare("SELECT COUNT(*) c FROM tutorials").get().c === 0) {
     const ins = db.prepare("INSERT INTO tutorials (title,kind,category,url,file_type) VALUES (?,?,?,?,?)");
-    ins.run("Getting started with AMSL Broker", "video", "Onboarding", "https://example.com/getting-started.mp4", "MP4");
+    ins.run("Getting started with Utility X", "video", "Onboarding", "https://example.com/getting-started.mp4", "MP4");
     ins.run("Creating a quote & comparison", "video", "Quotes", "https://example.com/quotes.mp4", "MP4");
     ins.run("Module Walkthroughs (PDF)", "document", "Reference", "https://example.com/walkthroughs.pdf", "PDF");
   }
@@ -921,6 +1118,76 @@ export function seedPlatform() {
     ].forEach((v) => gi.run(...v));
     console.log("Seeded 10 sample generators for the local energy marketplace.");
   }
+  // Flexibility schemes a business can be paid through for shifting load off peak. Rates
+  // are indicative starting points only — real rates are set per season/auction and must be
+  // maintained by an admin on the Virtual Power Plant screen.
+  if (db.prepare("SELECT COUNT(*) c FROM vpp_programmes").get().c === 0) {
+    const vp = db.prepare(`INSERT INTO vpp_programmes
+      (name, operator, scheme_type, payment_basis, utilisation_rate, availability_rate,
+       min_capacity_kw, typical_window, status, notes)
+      VALUES (?,?,?,?,?,?,?,?, 'Open', ?)`);
+    [
+      ["Demand Flexibility Service", "NESO", "Demand Flexibility", "Utilisation", 3000, null, 10,
+       "16:00-19:00 weekdays, Nov-Mar", "Paid per MWh shifted out of called peak windows. Delivered through a registered provider, not claimed directly."],
+      ["Capacity Market (DSR)", "NESO", "Capacity Market", "Availability", null, 60, 500,
+       "Winter stress events", "Availability payment per kW for being contracted; penalties apply if you fail to deliver when called."],
+      ["Dynamic Containment", "NESO", "Frequency Response", "Availability", null, 85, 1000,
+       "24/7 second-by-second", "Fast frequency response — needs battery-grade response times."],
+      ["Local Flexibility (DNO)", "Distribution Network Operator", "Local Flexibility", "Utilisation", 2200, null, 50,
+       "Constraint windows, area-specific", "Paid to relieve local network constraints in specific distribution areas."],
+      ["Supplier Peak-Shift Scheme", "Energy Supplier", "Demand Flexibility", "Utilisation", 1800, null, 5,
+       "Supplier-defined peak events", "Supplier-run scheme; typically lower rates but a lower entry threshold."],
+    ].forEach((v) => vp.run(...v));
+    console.log("Seeded 5 flexibility programmes.");
+  }
+  // Sample carbon projects. Prices are illustrative — the voluntary carbon market moves
+  // and varies hugely by project type and quality, so an admin should maintain these.
+  if (db.prepare("SELECT COUNT(*) c FROM carbon_projects").get().c === 0) {
+    const cp = db.prepare(`INSERT INTO carbon_projects
+      (name, registry, project_type, country, vintage_year, price_per_tonne, available_tonnes,
+       co_benefits, registry_ref, status)
+      VALUES (?,?,?,?,?,?,?,?,?, 'Available')`);
+    [
+      ["Scottish Highlands Native Woodland", "Woodland Carbon Code", "Afforestation", "United Kingdom", 2026, 32.00, 8000, "Biodiversity, SDG 15", "WCC-UK-2291"],
+      ["Pennine Peatland Restoration", "Peatland Code", "Peatland Restoration", "United Kingdom", 2026, 28.50, 5000, "Water quality, SDG 6", "PC-UK-0417"],
+      ["Devon Hedgerow & Agroforestry", "Woodland Carbon Code", "Agroforestry", "United Kingdom", 2025, 26.00, 3000, "Farm resilience, SDG 2", "WCC-UK-1863"],
+      ["Rimba Raya Biodiversity Reserve", "Verra VCS", "REDD+", "Indonesia", 2024, 11.50, 40000, "Orangutan habitat, SDG 13/15", "VCS-674"],
+      ["Kariba REDD+ Forest Protection", "Verra VCS", "REDD+", "Zimbabwe", 2023, 8.75, 60000, "Community livelihoods, SDG 1", "VCS-902"],
+      ["Gyapa Improved Cookstoves", "Gold Standard", "Cookstoves", "Ghana", 2025, 14.20, 25000, "Indoor air quality, SDG 3", "GS-1247"],
+      ["Bundled Solar Mini-Grids", "Gold Standard", "Renewable Energy", "India", 2025, 9.40, 35000, "Energy access, SDG 7", "GS-3390"],
+      ["UK Biochar Carbon Removal", "Puro.earth", "Biochar", "United Kingdom", 2026, 118.00, 800, "Durable removal, 100yr+", "PURO-BC-0088"],
+    ].forEach((v) => cp.run(...v));
+    console.log("Seeded 8 carbon projects.");
+  }
+  // DUoS band windows and rates. Indicative shapes only — every DNO publishes its own
+  // schedule and rates each charging year, so these must be maintained by an admin.
+  if (db.prepare("SELECT COUNT(*) c FROM duos_bands").get().c === 0) {
+    const dbnd = db.prepare(`INSERT INTO duos_bands
+      (dist_id, band, day_type, start_time, end_time, rate_p_kwh, charge_year) VALUES (?,?,?,?,?,?, '2026/27')`);
+    // [dist_id, red rate, amber rate, green rate]
+    [[10, 12.80, 1.40, 0.18], [12, 15.60, 1.85, 0.22], [14, 11.90, 1.30, 0.17],
+     [16, 10.40, 1.20, 0.15], [19, 13.20, 1.45, 0.19], [22, 14.10, 1.55, 0.20],
+     [23, 11.20, 1.25, 0.16], [18, 9.80, 1.10, 0.14]].forEach(([d, red, amber, green]) => {
+      dbnd.run(d, "Red", "Weekday", "16:00", "19:00", red);
+      dbnd.run(d, "Amber", "Weekday", "07:00", "16:00", amber);
+      dbnd.run(d, "Amber", "Weekday", "19:00", "21:00", amber);
+      dbnd.run(d, "Green", "Weekday", "21:00", "07:00", green);
+      dbnd.run(d, "Green", "Weekend", "00:00", "24:00", green);
+    });
+    console.log("Seeded DUoS bands for 8 distribution areas.");
+  }
+  if (db.prepare("SELECT COUNT(*) c FROM tnuos_tariffs").get().c === 0) {
+    const tn = db.prepare("INSERT INTO tnuos_tariffs (zone_name, dist_id, tariff_gbp_kw, charge_year) VALUES (?,?,?, '2026/27')");
+    // Locational element only. Northern zones are typically negative or low; southern
+    // zones carry the highest tariffs, which is where Triad avoidance is worth most.
+    [["Northern Scotland", 17, -2.40], ["Southern Scotland", 18, 1.85], ["North East England", 15, 6.20],
+     ["North West England", 16, 9.40], ["Yorkshire", 23, 8.10], ["East Midlands", 11, 14.70],
+     ["West Midlands", 14, 17.30], ["Eastern England", 10, 19.80], ["London", 12, 23.60],
+     ["South East England", 19, 26.40], ["Southern England", 20, 28.10], ["South Wales", 21, 21.50],
+     ["South West England", 22, 30.20], ["North Wales, Merseyside & Cheshire", 13, 12.60]]
+      .forEach(([z, d, t]) => tn.run(z, d, t));
+    console.log("Seeded TNUoS locational tariffs for 14 zones.");
+  }
   return { skipped: false };
 }
 
@@ -940,6 +1207,9 @@ export const MENU_CATALOG = [
   { key: "/eii-certificates", label: "EII Certificates" },
   { key: "/rego-certificates", label: "REGO Certificates" },
   { key: "/local-energy", label: "Local Energy Marketplace" },
+  { key: "/vpp", label: "Virtual Power Plant" },
+  { key: "/carbon", label: "Carbon Credits" },
+  { key: "/network-charges", label: "Network Charges" },
   { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];

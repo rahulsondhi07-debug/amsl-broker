@@ -33,7 +33,7 @@ export default function Login() {
               ? <img src={brand.logo_url} alt={brand.brand_name || "logo"} style={{ width: "100%", height: "100%", objectFit: "contain" }} onError={(e) => { e.target.style.display = "none"; }} />
               : (brand?.brand_name || "AB").slice(0, 2).toUpperCase()}
           </div>
-          <h2 style={{ fontSize: 20 }}>{brand?.brand_name || "AMSL Broker"}</h2>
+          <h2 style={{ fontSize: 20 }}>{brand?.brand_name || "Utility X"}</h2>
           <div style={{ color: "var(--slate-400)", fontSize: 13, marginTop: 2 }}>Sign in to the broker portal</div>
         </div>
 

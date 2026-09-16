@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Utility X">
+<defs>
+    <linearGradient id="ux-tile" gradientUnits="userSpaceOnUse" x1="16" y1="16" x2="184" y2="184">
+      <stop offset="0%" stop-color="#0E7C7B"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+    <linearGradient id="ux-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0E7C7B"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+  </defs>
+<g id="mark">
+    <rect x="16" y="16" width="168" height="168" rx="44" fill="url(#ux-tile)"/>
+    <!-- One arm is a straight stroke, the other kinks like a lightning bolt, so the
+         letterform itself carries the energy meaning instead of adding a separate icon. -->
+    <path d="M64 58 L136 142" stroke="#fff" stroke-width="19" stroke-linecap="round"/>
+    <path d="M139 56 L88 92 L120 110 L61 144" stroke="#fff" stroke-width="19"
+          stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+</svg>

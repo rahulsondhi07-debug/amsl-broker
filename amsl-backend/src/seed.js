@@ -20,7 +20,7 @@ export function seed({ reset = false } = {}) {
 
   const insAgency = db.prepare("INSERT INTO agencies (name, status) VALUES (?, 'Active')");
   const agencyId = {};
-  for (const n of ["Azentra Technologies", "linked", "AMSL broker portal"]) agencyId[n] = insAgency.run(n).lastInsertRowid;
+  for (const n of ["Azentra Technologies", "linked", "Utility X Portal"]) agencyId[n] = insAgency.run(n).lastInsertRowid;
 
   const insAgent = db.prepare(
     `INSERT INTO agents (name, agency_id, email, role, status, aircall_enabled, password_hash)
@@ -29,7 +29,7 @@ export function seed({ reset = false } = {}) {
   for (const a of [
     { name: "Lawrence Nadar", agency: "Azentra Technologies", email: "lawrence.nadar@azentratech.com", role: "Super User", aircall: 1, pw: "changeme" },
     { name: "rahul son", agency: "linked", email: "rahul@linkedenergy.co.uk", role: "Super User", aircall: 0, pw: "changeme" },
-    { name: "Admin Broker Portal", agency: "AMSL broker portal", email: "admin@brokerportal.com", role: "Admin", aircall: 1, pw: "admin123" },
+    { name: "Admin Broker Portal", agency: "Utility X Portal", email: "admin@brokerportal.com", role: "Admin", aircall: 1, pw: "admin123" },
   ]) agentId[a.name] = insAgent.run({ name: a.name, agency_id: agencyId[a.agency], email: a.email, role: a.role, aircall: a.aircall, ph: hash(a.pw) }).lastInsertRowid;
 
   const SUPPLIERS = [
@@ -70,16 +70,16 @@ export function seed({ reset = false } = {}) {
     for (const mt of o.meters || []) insMeter.run(siteId, id, mt.u, mt.n || null, mt.eac || null, mt.s || "C");
     return id;
   }
-  biz({ ref: "d8a9ec43", name: "test1", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-07-13", region: "West Midlands", meters: [{ u: "ELEC", s: "S", eac: 30000 }] });
-  biz({ ref: "9d4127ac", name: "test1", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-07-13", region: "London", meters: [{ u: "GAS", s: "S", eac: 20000 }] });
+  biz({ ref: "d8a9ec43", name: "test1", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-07-13", region: "West Midlands", meters: [{ u: "ELEC", s: "S", eac: 30000 }] });
+  biz({ ref: "9d4127ac", name: "test1", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-07-13", region: "London", meters: [{ u: "GAS", s: "S", eac: 20000 }] });
   biz({ ref: "529a7b2d", name: "rich son", contact: "rich son", mobile: "+447415212833", agency: "linked", agent: "rahul son", stage: "LEAD", created: "2026-06-01", region: "London" });
-  biz({ ref: "e8370d4e", name: "test1", contact: "Test Test", mobile: "+919638028505", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-05-29", region: "London", meters: [{ u: "ELEC", s: "S", eac: 25000 }, { u: "ELEC", s: "C", eac: 25000 }] });
-  biz({ ref: "e8856009", name: "Pizza Hut", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-05-18", region: "London", meters: [{ u: "ELEC", s: "S", eac: 40000 }] });
-  biz({ ref: "a1b2c3d4", name: "Pizza Hut", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-05-18", region: "London", meters: [{ u: "GAS", s: "S", eac: 40000 }] });
+  biz({ ref: "e8370d4e", name: "test1", contact: "Test Test", mobile: "+919638028505", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-05-29", region: "London", meters: [{ u: "ELEC", s: "S", eac: 25000 }, { u: "ELEC", s: "C", eac: 25000 }] });
+  biz({ ref: "e8856009", name: "Pizza Hut", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-05-18", region: "London", meters: [{ u: "ELEC", s: "S", eac: 40000 }] });
+  biz({ ref: "a1b2c3d4", name: "Pizza Hut", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "LEAD", created: "2026-05-18", region: "London", meters: [{ u: "GAS", s: "S", eac: 40000 }] });
   biz({ ref: "c1000001", name: "Rjr Chem Ltd", contact: "John Doe", agency: "Azentra Technologies", agent: "Lawrence Nadar", stage: "CUSTOMER", created: "2026-07-10", region: "West Midlands", meters: [{ u: "ELEC", s: "S", eac: 23444 }] });
-  biz({ ref: "c1000002", name: "Test Business", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "CUSTOMER", created: "2026-06-11", region: "London", meters: [{ u: "ELEC", s: "S", eac: 30000 }] });
-  biz({ ref: "c1000003", name: "test1", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "CUSTOMER", created: "2026-05-29", region: "London", meters: [{ u: "ELEC", s: "S", eac: 30000 }] });
-  biz({ ref: "c1000004", name: "joes", contact: "trert etery", email: "richrahulson@gmail.com", agency: "AMSL broker portal", agent: "Admin Broker Portal", stage: "CUSTOMER", created: "2026-05-18", region: "London" });
+  biz({ ref: "c1000002", name: "Test Business", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "CUSTOMER", created: "2026-06-11", region: "London", meters: [{ u: "ELEC", s: "S", eac: 30000 }] });
+  biz({ ref: "c1000003", name: "test1", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "CUSTOMER", created: "2026-05-29", region: "London", meters: [{ u: "ELEC", s: "S", eac: 30000 }] });
+  biz({ ref: "c1000004", name: "joes", contact: "trert etery", email: "richrahulson@gmail.com", agency: "Utility X Portal", agent: "Admin Broker Portal", stage: "CUSTOMER", created: "2026-05-18", region: "London" });
 
   const bizByName = (n) => db.prepare("SELECT id FROM businesses WHERE business_name = ? ORDER BY id LIMIT 1").get(n)?.id;
 
@@ -110,9 +110,9 @@ export function seed({ reset = false } = {}) {
     `INSERT INTO contracts (contract_no, business_id, business_name, supplier_id, agency_id, agent_id, term_months, meter_mpan_mpr, utility, segment, consumption, commission_value, status, created_at)
      VALUES (@no,@bid,@bn,@sid,@agid,@aid,@term,@meter,@u,'SME',@cons,@comm,@st,@created)`);
   for (const c of [
-    { no: "CN-01", bn: "test1", sup: "Clear Buisness", agency: "AMSL broker portal", agent: "Admin Broker Portal", term: 12, meter: "1476876768653", cons: 30000, comm: 180.0, st: "Contract Sent to Client", created: "2026-05-20" },
-    { no: "CN-02", bn: "test1", sup: "Clear Buisness", agency: "AMSL broker portal", agent: "Admin Broker Portal", term: 12, meter: "1476876768653", cons: 30000, comm: 180.0, st: "Contract Sent to Client", created: "2026-05-22" },
-    { no: "CN-03", bn: "Ann Bird", sup: "Smartest Energy", agency: "AMSL broker portal", agent: "Admin Broker Portal", term: 12, meter: "1785245444454", cons: 35000, comm: 700.0, st: "Contract Sent to Client", created: "2026-06-02" },
+    { no: "CN-01", bn: "test1", sup: "Clear Buisness", agency: "Utility X Portal", agent: "Admin Broker Portal", term: 12, meter: "1476876768653", cons: 30000, comm: 180.0, st: "Contract Sent to Client", created: "2026-05-20" },
+    { no: "CN-02", bn: "test1", sup: "Clear Buisness", agency: "Utility X Portal", agent: "Admin Broker Portal", term: 12, meter: "1476876768653", cons: 30000, comm: 180.0, st: "Contract Sent to Client", created: "2026-05-22" },
+    { no: "CN-03", bn: "Ann Bird", sup: "Smartest Energy", agency: "Utility X Portal", agent: "Admin Broker Portal", term: 12, meter: "1785245444454", cons: 35000, comm: 700.0, st: "Contract Sent to Client", created: "2026-06-02" },
     { no: "CN-06", bn: "Rjr Chem Ltd", sup: "Clear Buisness", agency: "Azentra Technologies", agent: "Lawrence Nadar", term: 36, meter: "1418094351005", cons: 23444, comm: 180.0, st: "Contract Sent to Client", created: "2026-07-08" },
     { no: "CN-07", bn: "Rjr Chem Ltd", sup: "Smartest Energy", agency: "Azentra Technologies", agent: "Lawrence Nadar", term: 24, meter: "1418094351005", cons: 23444, comm: 468.88, st: "Contract Accepted", created: "2026-07-10" },
   ]) insContract.run({ no: c.no, bid: bizByName(c.bn) || null, bn: c.bn, sid: supplierId[c.sup], agid: agencyId[c.agency], aid: agentId[c.agent], term: c.term, meter: c.meter, u: "ELECTRICITY", cons: c.cons, comm: c.comm, st: c.st, created: c.created });

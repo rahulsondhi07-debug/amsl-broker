@@ -4,8 +4,8 @@ const one = (sql, ...p) => db.prepare(sql).get(...p);
 const all = (sql, ...p) => db.prepare(sql).all(...p);
 const round = (n) => Math.round(n * 100) / 100;
 
-// Default multi-level split: Supplier -> AMSL -> Master Broker -> Agent
-const SPLIT = [{ level: "AMSL", pct: 40 }, { level: "Master Broker", pct: 20 }, { level: "Agent", pct: 40 }];
+// Default multi-level split: Supplier -> Utility X -> Master Broker -> Agent
+const SPLIT = [{ level: "Utility X", pct: 40 }, { level: "Master Broker", pct: 20 }, { level: "Agent", pct: 40 }];
 
 /* Seed a default commission config per supplier (idempotent). */
 export function seedCommissionConfig() {

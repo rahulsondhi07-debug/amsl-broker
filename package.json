@@ -2,7 +2,7 @@
   "name": "amsl-broker",
   "private": true,
   "version": "1.0.0",
-  "description": "AMSL Broker full-stack app \u2014 Express+SQLite API and React (Vite) UI.",
+  "description": "Utility X full-stack app \u2014 Express+SQLite API and React (Vite) UI.",
   "workspaces": [
     "amsl-backend",
     "amsl-frontend"

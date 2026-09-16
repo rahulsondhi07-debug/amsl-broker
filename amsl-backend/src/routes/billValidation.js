@@ -639,7 +639,7 @@ r.post("/:id/raise-claim", (req, res) => {
 /**
  * Merges the client's details into the standard Agency Client Agreement /
  * Letter of Authority for CCA advisory, EII and CCL rebate & bill validation
- * services (source: AMSL Bill Validation Agency Terms & Conditions).
+ * services (source: Utility X Bill Validation Agency Terms & Conditions).
  */
 function buildLoaText(row) {
   const today = new Date().toLocaleDateString("en-GB");
