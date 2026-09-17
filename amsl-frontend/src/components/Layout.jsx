@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate, Link } from "react-router-do
 import {
   LayoutDashboard, Building2, Users, Truck, CreditCard, Package,
   UserPlus, FilePlus2, ClipboardList, UserCheck, FileSignature, Ticket,
-  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf, MapPin, BatteryCharging, Zap, TrendingUp} from "lucide-react";
+  Search, Bell, Phone, LogOut, PoundSterling, Workflow , CalendarClock, ShieldCheck, Boxes, Palette, GraduationCap, SlidersHorizontal, Coins, ShieldAlert, FileCheck2, Filter, Leaf, MapPin, BatteryCharging, Zap, TrendingUp, Scale} from "lucide-react";
 import { useAuth } from "./AuthContext.jsx";
 import { api } from "../api.js";
 import { initials } from "./ui.jsx";
@@ -81,6 +81,7 @@ const NAV = [
     { to: "/carbon", icon: Leaf, label: "Carbon Credits" },
     { to: "/network-charges", icon: Zap, label: "Network Charges" },
     { to: "/flex-position", icon: TrendingUp, label: "Flex Position" },
+    { to: "/fixed-vs-flex", icon: Scale, label: "Fixed vs Flex" },
   ] },
   { to: "/tutorials", icon: GraduationCap, label: "Platform Guide" },
   { to: "/settings", icon: SlidersHorizontal, label: "System Settings" },

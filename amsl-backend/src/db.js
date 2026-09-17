@@ -752,6 +752,57 @@ export function migrate() {
     --   vol_req / traded are in the fuel's own unit: therms/day for gas, MW for power.
     -- open and hedged % are derived rather than stored, so they can never drift out of
     -- step with the volumes they come from.
+    -- Fixed vs Flex comparison. A quote is a stack of cost layers, not one unit rate:
+    -- commodity, non-commodity, network fixed charges, capacity, levies, then CCL and VAT
+    -- on top. The comparison only means anything if both sides are built from the same
+    -- consumption profile and shown layer by layer.
+    CREATE TABLE IF NOT EXISTS fvf_comparisons (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      business_id     INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+      client_name     TEXT NOT NULL,
+      account_ref     TEXT,
+      mpan            TEXT,
+      site            TEXT,
+      annual_kwh      REAL NOT NULL,
+      day_kwh         REAL,
+      night_kwh       REAL,
+      duos_red_kwh    REAL,
+      duos_amber_kwh  REAL,
+      duos_green_kwh  REAL,
+      capacity_kva    REAL,
+      days            INTEGER NOT NULL DEFAULT 365,
+      ccl_p_kwh       REAL NOT NULL DEFAULT 0.801,
+      vat_pct         REAL NOT NULL DEFAULT 20,
+      flex_start      TEXT,
+      notes           TEXT,
+      status          TEXT NOT NULL DEFAULT 'Draft',   -- Draft | Issued | Won | Lost
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- One row per cost layer, per scenario, per contract year. basis says how the line is
+    -- charged, so the amount is derived rather than typed and cannot drift from the rate.
+    CREATE TABLE IF NOT EXISTS fvf_lines (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      comparison_id   INTEGER NOT NULL REFERENCES fvf_comparisons(id) ON DELETE CASCADE,
+      scenario        TEXT NOT NULL,      -- Fixed | Flex
+      year_no         INTEGER NOT NULL DEFAULT 1,
+      year_label      TEXT,
+      label           TEXT NOT NULL,
+      basis           TEXT NOT NULL,      -- p_kwh | p_day | p_kva_day | p_kvarh
+      qty             REAL,               -- kWh, or kVA; days come from the comparison
+      rate            REAL,
+      sort_order      INTEGER NOT NULL DEFAULT 0,
+      notes           TEXT
+    );
+    -- The client-facing explainer, editable by an admin so the sales narrative stays in
+    -- one place rather than in a slide deck nobody can find.
+    CREATE TABLE IF NOT EXISTS fvf_guidance (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      section     TEXT NOT NULL,
+      heading     TEXT NOT NULL,
+      body        TEXT,
+      sort_order  INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE TABLE IF NOT EXISTS flex_curve (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       basket_id     INTEGER NOT NULL REFERENCES flex_baskets(id) ON DELETE CASCADE,
@@ -1072,6 +1123,20 @@ export function migrate() {
   addCol("ALTER TABLE generators ADD COLUMN certification TEXT");                   // REGO | RGGO | Green Gas Certification Scheme
   addCol("ALTER TABLE generators ADD COLUMN injection_point TEXT");                 // gas only: the grid entry point
   addCol("ALTER TABLE ppa_deals  ADD COLUMN utility       TEXT DEFAULT 'Power'");
+  // How a PPA is actually structured, which decides whether "buying direct from the
+  // generator" is literally true. Supplying a third party over the public network needs a
+  // supply licence, which a generator does not hold, so only a private wire is a genuinely
+  // direct physical supply. Sleeved and virtual deals keep a licensed supplier in the
+  // chain and carry a sleeving fee that materially changes the economics.
+  addCol("ALTER TABLE ppa_deals ADD COLUMN structure         TEXT DEFAULT 'Sleeved'");
+  addCol("ALTER TABLE ppa_deals ADD COLUMN sleeving_supplier_id INTEGER");
+  addCol("ALTER TABLE ppa_deals ADD COLUMN sleeving_fee_p_kwh REAL");
+  addCol("ALTER TABLE ppa_deals ADD COLUMN total_delivered_p_kwh REAL");
+  addCol("ALTER TABLE generators ADD COLUMN private_wire_available INTEGER NOT NULL DEFAULT 0");
+  // Existing deals pre-date the field. Default them to Sleeved rather than Private Wire:
+  // sleeved is overwhelmingly the common structure, and the conservative assumption avoids
+  // implying a direct physical supply that was never arranged.
+  try { db.prepare("UPDATE ppa_deals SET structure='Sleeved' WHERE structure IS NULL").run(); } catch (e) {}
   // Existing rows pre-date the column, so make the default explicit rather than leaving
   // nulls that would drop out of a fuel filter.
   try { db.prepare("UPDATE generators SET utility='Power' WHERE utility IS NULL").run(); } catch (e) {}
@@ -1249,6 +1314,34 @@ export function seedPlatform() {
   }
   // Sample carbon projects. Prices are illustrative — the voluntary carbon market moves
   // and varies hugely by project type and quality, so an admin should maintain these.
+  // The Fixed vs Flex explainer, so an agent can talk a client through the choice from
+  // inside the portal. Admin-editable.
+  if (db.prepare("SELECT COUNT(*) c FROM fvf_guidance").get().c === 0) {
+    const gi = db.prepare("INSERT INTO fvf_guidance (section, heading, body, sort_order) VALUES (?,?,?,?)");
+    [
+      ["Fixed", "One agreed price for a set term",
+       "Commit to buy energy for a set period, usually one to three years, at a price agreed at a single moment in time. It is a point-in-time bet: if that moment turns out well relative to the market, the client wins; if not, the opportunity is missed for the whole term.", 1],
+      ["Fixed", "Certainty is the product",
+       "Budget certainty is the genuine benefit. The client knows their unit cost for the full term and can plan against it. That is worth paying for in some businesses.", 2],
+      ["Fixed", "Where it still exposes the client",
+       "Not every fixed contract fixes everything. Many pass non-commodity costs through, so the bill can still move even though the headline rate has not. Always check what is actually fixed before describing a contract as fixed.", 3],
+      ["Flex", "Buying in parcels across the curve",
+       "Energy is bought at wholesale in tranches, at chosen points on the seasonal forward curve, rather than all at once. Purchases can be made well ahead of supply start when prices are favourable.", 1],
+      ["Flex", "Transparency and volume tolerance",
+       "Pricing is visible to the client rather than embedded in a single rate, and consumption changes are accommodated more easily than under a rigid fixed-volume contract.", 2],
+      ["Flex", "The consortium lowers the entry bar",
+       "Flexible buying has traditionally suited larger consumers only. Pooling many members into one basket gives the whole membership wholesale access and trading-desk timing that a smaller business could not reach alone.", 3],
+      ["Flex", "Why DUoS matters in a flex stack",
+       "Under flex, distribution charges are billed by time band rather than blended into the unit rate. A site with most of its consumption in amber and green bands pays materially less than the blended equivalent, which is often where a large part of the saving comes from.", 4],
+      ["Choosing", "Choose Fixed if the client…",
+       "Values budget certainty above all else; wants a known unit cost for the full term; accepts they will not benefit if prices fall.", 1],
+      ["Choosing", "Choose Flex if the client…",
+       "Is a larger consumer, or a smaller one joining via a consortium basket; can tolerate some variability for lower overall cost; wants transparent, actively managed market timing.", 2],
+      ["Choosing", "There is no single right answer",
+       "The right strategy depends on risk tolerance, consumption profile and appetite for market engagement. Present the trade-off honestly and let the comparison carry the argument.", 3],
+    ].forEach((v) => gi.run(...v));
+    console.log("Seeded Fixed vs Flex guidance.");
+  }
   if (db.prepare("SELECT COUNT(*) c FROM carbon_projects").get().c === 0) {
     const cp = db.prepare(`INSERT INTO carbon_projects
       (name, registry, project_type, country, vintage_year, price_per_tonne, available_tonnes,
@@ -1318,6 +1411,7 @@ export const MENU_CATALOG = [
   { key: "/carbon", label: "Carbon Credits" },
   { key: "/network-charges", label: "Network Charges" },
   { key: "/flex-position", label: "Flex Position" },
+  { key: "/fixed-vs-flex", label: "Fixed vs Flex" },
   { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];
@@ -1341,7 +1435,7 @@ export const PERMISSION_GROUPS = [
     keys: ["/bill-validation", "/eii-certificates", "/rego-certificates", "/local-energy",
            "/vpp", "/carbon", "/network-charges"],
   },
-  { name: "Flexible Purchasing", keys: ["feature:flex-purchasing", "/flex-position"] },
+  { name: "Flexible Purchasing", keys: ["feature:flex-purchasing", "/flex-position", "/fixed-vs-flex"] },
 ];
 
 /* Seed default role -> menu permissions. Idempotent. */
@@ -1358,7 +1452,7 @@ export function seedPermissions() {
   // from every existing user.
   const all = [...MENU_CATALOG.map((m) => m.key), ...FEATURE_CATALOG.map((f) => f.key)];
   const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets",
-                      "feature:flex-purchasing", "/flex-position"];
+                      "feature:flex-purchasing", "/flex-position", "/fixed-vs-flex"];
   const grants = { "Admin": all, "Super User": all, "Manager": all.filter((k) => k !== "/permissions"), "Agent": agentMenus };
   const before = db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c;
   const ins = db.prepare("INSERT OR IGNORE INTO role_permissions (role,menu_key) VALUES (?,?)");

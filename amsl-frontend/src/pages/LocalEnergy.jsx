@@ -12,6 +12,9 @@ const TECHS_BY_FUEL = {
 };
 const ALL_TECHS = [...TECHS_BY_FUEL.Power, ...TECHS_BY_FUEL.Gas];
 const CERTS = ["REGO", "RGGO", "Green Gas Certification Scheme", "None"];
+// Only a private wire is a genuinely direct physical supply; the rest keep a licensed
+// supplier in the chain, because supplying over the public network needs a supply licence.
+const STRUCTURES = ["Private Wire", "Sleeved", "Virtual (CfD)", "Supplier-matched"];
 const STATUSES = ["Available", "Fully Contracted", "Offline"];
 const DEAL_STATUSES = ["Enquiry", "Offer Sent", "Contracted", "Live", "Ended"];
 
@@ -23,6 +26,7 @@ const ICONS = {
   "Bio-SNG (Gasification)": Factory,
 };
 const money = (n) => (n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { maximumFractionDigits: 0 }));
+const round2 = (n) => Math.round(n * 100) / 100;
 const num = (v) => (v === "" || v == null ? null : Number(v));
 
 export default function LocalEnergy() {
@@ -188,6 +192,7 @@ function GeneratorForm({ gen, areas, onClose, onSaved }) {
     price_p_kwh: gen?.price_p_kwh ?? "", min_volume_mwh: gen?.min_volume_mwh ?? "",
     term_months_min: gen?.term_months_min ?? "", term_months_max: gen?.term_months_max ?? "",
     commissioned_year: gen?.commissioned_year ?? "", status: gen?.status || "Available", notes: gen?.notes || "",
+    private_wire_available: gen?.private_wire_available ? "1" : "0",
   });
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -201,7 +206,7 @@ function GeneratorForm({ gen, areas, onClose, onSaved }) {
       annual_output_mwh: num(f.annual_output_mwh), available_mwh: num(f.available_mwh),
       price_p_kwh: num(f.price_p_kwh), min_volume_mwh: num(f.min_volume_mwh),
       term_months_min: num(f.term_months_min), term_months_max: num(f.term_months_max),
-      commissioned_year: num(f.commissioned_year),
+      commissioned_year: num(f.commissioned_year), private_wire_available: Number(f.private_wire_available) || 0,
     };
     try {
       if (gen) await api.localGeneratorUpdate(gen.id, body);
@@ -250,6 +255,12 @@ function GeneratorForm({ gen, areas, onClose, onSaved }) {
         <Field label="Max Term (months)"><input type="number" value={f.term_months_max} onChange={set("term_months_max")} /></Field>
         <Field label="Commissioned Year"><input type="number" value={f.commissioned_year} onChange={set("commissioned_year")} /></Field>
         <Field label="Status"><select value={f.status} onChange={set("status")}>{STATUSES.map((s) => <option key={s}>{s}</option>)}</select></Field>
+        <Field label="Private Wire Possible">
+          <select value={f.private_wire_available} onChange={set("private_wire_available")}>
+            <option value="0">No — needs a supplier in the chain</option>
+            <option value="1">Yes — direct connection available</option>
+          </select>
+        </Field>
       </div>
       <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
     </Modal>
@@ -260,11 +271,23 @@ function BuyForm({ gen, businesses, defaultBusinessId, onClose, onSaved }) {
   const [f, setF] = useState({
     business_id: defaultBusinessId || "", volume_mwh: "", price_p_kwh: gen.price_p_kwh ?? "",
     term_months: gen.term_months_min ?? "", start_date: "", status: "Enquiry", notes: "",
+    structure: gen.private_wire_available ? "Private Wire" : "Sleeved",
+    sleeving_supplier_id: "", sleeving_fee_p_kwh: "",
   });
+  const [structures, setStructures] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  useEffect(() => {
+    api.localStructures().then((r) => setStructures(r.data)).catch(() => {});
+    api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {});
+  }, []);
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const annual = num(f.volume_mwh) && num(f.price_p_kwh) ? (num(f.volume_mwh) * 1000 * num(f.price_p_kwh)) / 100 : null;
+  const meta = structures.find((x) => x.name === f.structure);
+  const sleeve = num(f.sleeving_fee_p_kwh) || 0;
+  const delivered = num(f.price_p_kwh) != null ? round2(num(f.price_p_kwh) + sleeve) : null;
+  const annual = num(f.volume_mwh) && delivered ? (num(f.volume_mwh) * 1000 * delivered) / 100 : null;
+  const pwBlocked = f.structure === "Private Wire" && !gen.private_wire_available;
 
   const save = async () => {
     if (!f.business_id) return setErr("Select which customer this is for");
@@ -276,6 +299,8 @@ function BuyForm({ gen, businesses, defaultBusinessId, onClose, onSaved }) {
         volume_mwh: num(f.volume_mwh), price_p_kwh: num(f.price_p_kwh),
         term_months: num(f.term_months), start_date: f.start_date || null,
         status: f.status, notes: f.notes || null,
+        structure: f.structure, sleeving_supplier_id: num(f.sleeving_supplier_id),
+        sleeving_fee_p_kwh: num(f.sleeving_fee_p_kwh),
       });
       onSaved();
     } catch (e) { setErr(e.message); setSaving(false); }
@@ -297,14 +322,42 @@ function BuyForm({ gen, businesses, defaultBusinessId, onClose, onSaved }) {
           </select>
         </Field>
         <Field label="Volume (MWh/yr) *"><input type="number" value={f.volume_mwh} onChange={set("volume_mwh")} /></Field>
+        <Field label="PPA Structure *">
+          <select value={f.structure} onChange={set("structure")}>
+            {STRUCTURES.map((x) => <option key={x}>{x}</option>)}
+          </select>
+        </Field>
+        {meta?.needsSupplier && (
+          <Field label="Licensed Supplier *">
+            <select value={f.sleeving_supplier_id} onChange={set("sleeving_supplier_id")}>
+              <option value="">Select supplier…</option>
+              {suppliers.map((sp) => <option key={sp.id} value={sp.id}>{sp.name}</option>)}
+            </select>
+          </Field>
+        )}
+        {meta?.needsSupplier && (
+          <Field label="Sleeving Fee (p/kWh)"><input type="number" step="0.01" value={f.sleeving_fee_p_kwh} onChange={set("sleeving_fee_p_kwh")} /></Field>
+        )}
         <Field label="Price (p/kWh)"><input type="number" step="0.01" value={f.price_p_kwh} onChange={set("price_p_kwh")} /></Field>
         <Field label="Term (months)"><input type="number" value={f.term_months} onChange={set("term_months")} /></Field>
         <Field label="Start Date"><input type="date" value={f.start_date} onChange={set("start_date")} /></Field>
         <Field label="Status"><select value={f.status} onChange={set("status")}>{DEAL_STATUSES.map((s) => <option key={s}>{s}</option>)}</select></Field>
       </div>
+      {meta && (
+        <div style={{ padding: "10px 12px", background: meta.direct ? "#ecfdf5" : "#F8FAFC", border: `1px solid ${meta.direct ? "#a7f3d0" : "var(--line,#E7EBF0)"}`, borderRadius: 8, fontSize: 12.5, marginTop: 4, lineHeight: 1.5 }}>
+          <b>{meta.direct ? "Direct physical supply" : "A licensed supplier remains in the chain"}</b> — {meta.note}
+        </div>
+      )}
+      {pwBlocked && (
+        <div style={{ padding: "10px 12px", background: "#fff1f2", border: "1px solid #fecdd3", borderRadius: 8, fontSize: 12.5, marginTop: 8, lineHeight: 1.5 }}>
+          {gen.name} is not marked as offering a private wire. Without a physical connection to the site this must be sleeved, virtual or supplier-matched.
+        </div>
+      )}
       {annual != null && (
         <div style={{ padding: "10px 12px", background: "var(--subtle,#F8FAFC)", border: "1px solid var(--line,#E7EBF0)", borderRadius: 8, fontSize: 13, marginTop: 4 }}>
-          Indicative annual value: <b>{money(annual)}</b> <span className="sub">({Number(f.volume_mwh).toLocaleString()} MWh × {f.price_p_kwh}p/kWh)</span>
+          Indicative annual value: <b>{money(annual)}</b>
+          <span className="sub"> ({Number(f.volume_mwh).toLocaleString()} MWh × {delivered}p/kWh delivered
+          {sleeve ? ` — ${f.price_p_kwh}p generator + ${sleeve}p sleeving` : ""})</span>
         </div>
       )}
       <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)" }} /></Field>
@@ -339,20 +392,28 @@ function Deals() {
       {!rows ? <Spinner /> : (
         <div className="table-wrap">
           <table className="tbl">
-            <thead><tr><th>Customer</th><th>Generator</th><th>Area</th><th>Volume</th><th>Price</th><th>Term</th><th>Annual Value</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Customer</th><th>Generator</th><th>Structure</th><th>Area</th><th>Volume</th><th>Delivered</th><th>Annual Value</th><th>Status</th><th></th></tr></thead>
             <tbody>
               {rows.length === 0 && <tr><td colSpan={9} className="sub" style={{ padding: 16, textAlign: "center" }}>No deals yet — buy from a generator to create one.</td></tr>}
               {rows.map((d) => (
                 <tr key={d.id}>
                   <td className="name">{d.business_name || "—"}</td>
                   <td>{d.generator_name || "—"}<div className="sub" style={{ fontSize: 11 }}>{d.technology || ""}</div></td>
+                  <td>
+                    <Badge tone={d.structure === "Private Wire" ? "green" : "slate"}>{d.structure || "Sleeved"}</Badge>
+                    {d.sleeving_supplier_name && <div className="sub" style={{ fontSize: 10.5 }}>via {d.sleeving_supplier_name}</div>}
+                  </td>
                   <td style={{ fontSize: 12 }}>
                     {d.region || "—"}
-                    {d.locality === "Local" && <div><Badge tone="green"><MapPin size={10} style={{ verticalAlign: "-1px" }} /> Local</Badge></div>}
+                    {d.locality && d.locality !== "Elsewhere" && (
+                      <div><Badge tone={d.locality.startsWith("Local") ? "green" : "slate"}>
+                        <MapPin size={10} style={{ verticalAlign: "-1px" }} /> {d.locality}</Badge></div>
+                    )}
                   </td>
                   <td className="mono">{Number(d.volume_mwh).toLocaleString()} MWh</td>
-                  <td className="mono">{d.price_p_kwh}p</td>
-                  <td className="mono">{d.term_months ? `${d.term_months}m` : "—"}</td>
+                  <td className="mono">{d.total_delivered_p_kwh ?? d.price_p_kwh}p
+                    {d.sleeving_fee_p_kwh ? <div className="sub" style={{ fontSize: 10.5 }}>incl {d.sleeving_fee_p_kwh}p sleeve</div> : null}
+                  </td>
                   <td className="name">{money(d.annual_value)}</td>
                   <td>
                     <select value={d.status} onChange={(e) => setDealStatus(d, e.target.value)}

@@ -18,6 +18,31 @@ const UNITS = {
  * hold — no postcode lookup or geocoding needed. A generator sharing that code sits on the
  * same local distribution network as the customer, which is what "local" means here.
  */
+/**
+ * PPA structures, and what each one actually means in GB.
+ * Supplying a third party over the public network requires a supply licence, which a
+ * generator does not hold. Only a private wire is therefore a genuinely direct physical
+ * supply; the others keep a licensed supplier in the chain.
+ */
+export const PPA_STRUCTURES = {
+  "Private Wire": {
+    direct: true, needsSupplier: false,
+    note: "Physical connection from generator to site, bypassing the public network. The only structure where the customer genuinely buys direct.",
+  },
+  "Sleeved": {
+    direct: false, needsSupplier: true,
+    note: "Customer contracts the generator for power and a licensed supplier to sleeve it — shaping, balancing and settlement. A sleeving fee applies.",
+  },
+  "Virtual (CfD)": {
+    direct: false, needsSupplier: false,
+    note: "A financial contract for difference against a reference price. No power is delivered to the site; the existing supply contract is unchanged. Certificates usually transfer separately.",
+  },
+  "Supplier-matched": {
+    direct: false, needsSupplier: true,
+    note: "The supplier buys from the generator and sells a matched product. Simplest to arrange, least direct commercially.",
+  },
+};
+
 export const DIST_AREAS = {
   10: "Eastern England", 11: "East Midlands", 12: "London",
   13: "North Wales, Merseyside & Cheshire", 14: "West Midlands",
@@ -42,6 +67,10 @@ function distIdForBusiness(businessId) {
   }
   return null;
 }
+
+r.get("/structures", (_req, res) => {
+  res.json({ data: Object.entries(PPA_STRUCTURES).map(([name, m]) => ({ name, ...m })) });
+});
 
 r.get("/areas", (_req, res) => {
   res.json({ data: Object.entries(DIST_AREAS).map(([id, name]) => ({ dist_id: Number(id), name })) });
@@ -93,7 +122,7 @@ r.post("/generators", (req, res) => {
   const cols = ["name", "operator", "technology", "utility", "certification", "injection_point",
     "dist_id", "region", "postcode", "capacity_mw",
     "annual_output_mwh", "available_mwh", "price_p_kwh", "min_volume_mwh", "term_months_min",
-    "term_months_max", "commissioned_year", "rego_accredited", "status", "notes"];
+    "term_months_max", "commissioned_year", "rego_accredited", "private_wire_available", "status", "notes"];
   const region = b.region || (b.dist_id ? DIST_AREAS[Number(b.dist_id)] : null);
   const vals = cols.map((c) => (c === "region" ? region : b[c] ?? null));
   const info = db.prepare(`INSERT INTO generators (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).run(...vals);
@@ -106,7 +135,7 @@ const updGen = (req, res) => {
   const allowed = ["name", "operator", "technology", "utility", "certification", "injection_point",
     "dist_id", "region", "postcode", "capacity_mw",
     "annual_output_mwh", "available_mwh", "price_p_kwh", "min_volume_mwh", "term_months_min",
-    "term_months_max", "commissioned_year", "rego_accredited", "status", "notes"];
+    "term_months_max", "commissioned_year", "rego_accredited", "private_wire_available", "status", "notes"];
   const cols = allowed.filter((c) => b[c] !== undefined);
   if (!cols.length) return res.status(400).json({ error: "No valid fields" });
   const info = db.prepare(`UPDATE generators SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
@@ -130,12 +159,14 @@ r.get("/deals", (req, res) => {
   if (req.query.business_id) { where.push("d.business_id = ?"); params.push(req.query.business_id); }
   if (req.query.status) { where.push("d.status = ?"); params.push(req.query.status); }
   if (req.query.utility) { where.push("COALESCE(d.utility,'Power') = ?"); params.push(req.query.utility); }
+  if (req.query.structure) { where.push("d.structure = ?"); params.push(req.query.structure); }
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
   res.json({
     data: db.prepare(`SELECT d.*, b.business_name, g.region, g.dist_id, g.postcode, g.certification
                       FROM ppa_deals d
                       LEFT JOIN businesses b ON b.id = d.business_id
                       LEFT JOIN generators g ON g.id = d.generator_id
+                      LEFT JOIN suppliers s ON s.id = d.sleeving_supplier_id
                       ${w} ORDER BY d.created_at DESC`).all(...params),
   });
 });
@@ -161,21 +192,45 @@ r.post("/deals", (req, res) => {
   const price = b.price_p_kwh != null ? Number(b.price_p_kwh) : gen?.price_p_kwh;
   if (price == null) return res.status(400).json({ error: "price_p_kwh is required when no generator is selected" });
   // volume is MWh, price is p/kWh: 1 MWh = 1000 kWh, /100 to convert pence to pounds.
-  const annualValue = round2((volume * 1000 * price) / 100);
+  // Annual value uses the DELIVERED price: for a sleeved deal the sleeving fee is a real
+  // cost of the arrangement, and excluding it would understate what the customer pays.
+  const annualValue = round2((volume * 1000 * (price + (Number(b.sleeving_fee_p_kwh) || 0))) / 100);
 
   const custDist = distIdForBusiness(b.business_id);
-  const locality = gen && custDist && gen.dist_id === custDist ? "Local" : gen ? "Elsewhere" : null;
+  const structure = b.structure || "Sleeved";
+  const meta = PPA_STRUCTURES[structure];
+  if (!meta) return res.status(400).json({ error: `Unknown PPA structure "${structure}"` });
+  if (structure === "Private Wire" && gen && !gen.private_wire_available) {
+    return res.status(400).json({
+      error: `${gen.name} is not marked as offering a private wire connection. A private wire needs a physical connection to the site; without one the deal must be sleeved, virtual or supplier-matched.`,
+    });
+  }
+  if (meta.needsSupplier && !b.sleeving_supplier_id) {
+    return res.status(400).json({
+      error: `A ${structure} PPA needs a licensed supplier in the chain — select the sleeving supplier.`,
+    });
+  }
+  // Only a private wire delivers power directly, so only there does sharing a distribution
+  // area mean the customer is physically supplied locally. For every other structure the
+  // generator's location is provenance, not physical supply.
+  const sameArea = gen && custDist && gen.dist_id === custDist;
+  const locality = !gen ? null : (meta.direct && sameArea) ? "Local (private wire)"
+    : sameArea ? "Same area" : "Elsewhere";
+  const sleeve = Number(b.sleeving_fee_p_kwh) || 0;
+  const delivered = round2(price + sleeve);
 
   const tx = db.transaction(() => {
     const info = db.prepare(`INSERT INTO ppa_deals
       (business_id, generator_id, generator_name, technology, utility, volume_mwh, price_p_kwh, term_months,
-       annual_value, start_date, end_date, locality, reference, status, notes)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+       annual_value, start_date, end_date, locality, reference, status, notes,
+       structure, sleeving_supplier_id, sleeving_fee_p_kwh, total_delivered_p_kwh)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(b.business_id, b.generator_id || null, b.generator_name ?? gen?.name ?? null,
         b.technology ?? gen?.technology ?? null, b.utility ?? gen?.utility ?? "Power",
         volume, price, b.term_months ?? null,
         annualValue, b.start_date || null, b.end_date || null, locality,
-        b.reference || null, b.status || "Enquiry", b.notes || null);
+        b.reference || null, b.status || "Enquiry", b.notes || null,
+        structure, b.sleeving_supplier_id ?? null, sleeve || null, delivered);
 
     if (gen && gen.available_mwh != null) {
       const remaining = round2(gen.available_mwh - volume);
@@ -191,15 +246,19 @@ r.post("/deals", (req, res) => {
 const updDeal = (req, res) => {
   const b = req.body || {};
   const allowed = ["volume_mwh", "price_p_kwh", "term_months", "start_date", "end_date",
-    "reference", "status", "notes", "generator_name", "technology"];
+    "reference", "status", "notes", "generator_name", "technology",
+    "structure", "sleeving_supplier_id", "sleeving_fee_p_kwh"];
   const cols = allowed.filter((c) => b[c] !== undefined);
   if (!cols.length) return res.status(400).json({ error: "No valid fields" });
   const info = db.prepare(`UPDATE ppa_deals SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
     .run(...cols.map((c) => b[c]), req.params.id);
   if (!info.changes) return res.status(404).json({ error: "not found" });
   const row = db.prepare("SELECT * FROM ppa_deals WHERE id=?").get(req.params.id);
-  if (b.volume_mwh !== undefined || b.price_p_kwh !== undefined) {
-    const v = round2((row.volume_mwh * 1000 * row.price_p_kwh) / 100);
+  if (b.volume_mwh !== undefined || b.price_p_kwh !== undefined || b.sleeving_fee_p_kwh !== undefined) {
+    const delivered = round2((row.price_p_kwh || 0) + (row.sleeving_fee_p_kwh || 0));
+    db.prepare("UPDATE ppa_deals SET total_delivered_p_kwh=? WHERE id=?").run(delivered, row.id);
+    row.total_delivered_p_kwh = delivered;
+    const v = round2((row.volume_mwh * 1000 * delivered) / 100);
     db.prepare("UPDATE ppa_deals SET annual_value=? WHERE id=?").run(v, row.id);
     row.annual_value = v;
   }
