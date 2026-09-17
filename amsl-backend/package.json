@@ -1,7 +1,7 @@
 {
   "name": "amsl-broker-backend",
   "version": "1.0.0",
-  "description": "REST API backend for the Utility X energy-brokerage portal (leads, quotes, contracts, suppliers, products, agencies, agents, tickets, supplier payments, dashboard).",
+  "description": "REST API backend for the Utility Live energy-brokerage portal (leads, quotes, contracts, suppliers, products, agencies, agents, tickets, supplier payments, dashboard).",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

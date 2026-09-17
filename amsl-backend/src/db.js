@@ -203,16 +203,16 @@ export const JOURNEY_STAGES = [
 export function migrate() {
   const addCol = (sql) => { try { db.exec(sql); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; } };
 
-  // Rebrand AMSL -> Utility X for databases seeded before the rename. Code defaults only
+  // Rebrand AMSL -> Utility Live for databases seeded before the rename. Code defaults only
   // apply to a fresh install, so without this an existing deployment would keep showing
   // the old name and, more importantly, keep writing commission rows against a level
   // called "AMSL" that no longer matches the split definition — quietly breaking payouts.
   // Every statement is idempotent, so this is safe to run on each boot.
   try {
-    db.prepare("UPDATE commission_splits SET level='Utility X' WHERE level='AMSL'").run();
-    db.prepare("UPDATE agencies SET name='Utility X Portal' WHERE name='AMSL broker portal'").run();
-    db.prepare("UPDATE app_settings SET value='Utility X' WHERE key='brand_name' AND value='AMSL Broker'").run();
-    db.prepare("UPDATE app_settings SET value='/utility-x-mark.svg' WHERE key='logo_url' AND (value IS NULL OR value='')").run();
+    db.prepare("UPDATE commission_splits SET level='Utility Live' WHERE level IN ('AMSL','Utility X')").run();
+    db.prepare("UPDATE agencies SET name='Utility Live Portal' WHERE name IN ('AMSL broker portal','Utility X Portal')").run();
+    db.prepare("UPDATE app_settings SET value='Utility Live' WHERE key='brand_name' AND value IN ('AMSL Broker','Utility X')").run();
+    db.prepare("UPDATE app_settings SET value='/utility-live-mark.svg' WHERE key='logo_url' AND (value IS NULL OR value='' OR value='/utility-x-mark.svg')").run();
   } catch (e) { /* tables may not exist yet on a brand-new database — seeding covers those */ }
   addCol("ALTER TABLE businesses ADD COLUMN journey_stage    TEXT");
   addCol("ALTER TABLE businesses ADD COLUMN fuel             TEXT");   // ELEC | GAS | DUAL
@@ -277,7 +277,7 @@ export function migrate() {
    "corporate_login_email TEXT",
    "mm_name TEXT", "mm_email TEXT", "mm_password TEXT", "mm_mobile TEXT", "mm_landline TEXT", "mm_threshold INTEGER",
    "ind_name TEXT", "ind_email TEXT", "ind_password TEXT", "ind_mobile TEXT", "ind_landline TEXT", "ind_threshold INTEGER",
-   "contract_agent_id TEXT"   // V1.7-14: the Agent ID this supplier issues to Utility X — gets
+   "contract_agent_id TEXT"   // V1.7-14: the Agent ID this supplier issues to Utility Live — gets
                               // auto-published onto every contract generated for them.
   ].forEach(sc);
   // Contract generation fields (match production contract/generate form)
@@ -508,7 +508,7 @@ export function migrate() {
     CREATE TABLE IF NOT EXISTS commission_splits (
       id        INTEGER PRIMARY KEY AUTOINCREMENT,
       record_id INTEGER NOT NULL REFERENCES commission_records(id) ON DELETE CASCADE,
-      level     TEXT NOT NULL,   -- Utility X | Master Broker | Agent
+      level     TEXT NOT NULL,   -- Utility Live | Master Broker | Agent
       pct       REAL NOT NULL,
       amount    REAL NOT NULL
     );
@@ -528,8 +528,8 @@ export function migrate() {
       note       TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    -- Agency payouts: what Utility X owes each agency once the supplier has actually paid us.
-    -- Separate from commission_records (what the supplier owes Utility X) because the two sides
+    -- Agency payouts: what Utility Live owes each agency once the supplier has actually paid us.
+    -- Separate from commission_records (what the supplier owes Utility Live) because the two sides
     -- settle independently — a supplier can pay us before we pay the agency, and the
     -- payout can go out by a completely different method.
     -- Cryptocurrency payouts capture the extra detail a bank transfer doesn't need: which
@@ -795,7 +795,7 @@ export function migrate() {
     );
     -- REGO (Renewable Energy Guarantees of Origin) certificates.
     -- rego_offers is the catalogue: what's currently available to buy, across the
-    -- different marketplaces/registries Utility X sources from. One REGO = 1 MWh of certified
+    -- different marketplaces/registries Utility Live sources from. One REGO = 1 MWh of certified
     -- renewable generation, so everything is priced and traded per MWh.
     CREATE TABLE IF NOT EXISTS rego_offers (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1064,8 +1064,8 @@ export function migrate() {
     );
   `);
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
-  setDef.run("brand_name", "Utility X");
-  setDef.run("logo_url", "/utility-x-mark.svg");
+  setDef.run("brand_name", "Utility Live");
+  setDef.run("logo_url", "/utility-live-mark.svg");
   setDef.run("primary_color", "#0E7C7B");
   setDef.run("logo_url", "");
 }
@@ -1142,7 +1142,7 @@ export function seedPlatform() {
   else if (after > before) console.log(`Added ${after - before} new config_lookups value(s) for categories introduced since last deploy.`);
   if (db.prepare("SELECT COUNT(*) c FROM tutorials").get().c === 0) {
     const ins = db.prepare("INSERT INTO tutorials (title,kind,category,url,file_type) VALUES (?,?,?,?,?)");
-    ins.run("Getting started with Utility X", "video", "Onboarding", "https://example.com/getting-started.mp4", "MP4");
+    ins.run("Getting started with Utility Live", "video", "Onboarding", "https://example.com/getting-started.mp4", "MP4");
     ins.run("Creating a quote & comparison", "video", "Quotes", "https://example.com/quotes.mp4", "MP4");
     ins.run("Module Walkthroughs (PDF)", "document", "Reference", "https://example.com/walkthroughs.pdf", "PDF");
   }

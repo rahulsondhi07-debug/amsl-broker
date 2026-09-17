@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Utility Live">
+<defs>
+    <linearGradient id="ul-tile" gradientUnits="userSpaceOnUse" x1="16" y1="16" x2="184" y2="184">
+      <stop offset="0%" stop-color="#0E7C7B"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+    <linearGradient id="ul-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0E7C7B"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+  </defs>
+<g id="mark">
+    <rect x="16" y="16" width="168" height="168" rx="44" fill="url(#ul-tile)"/>
+    <!-- the trace -->
+    <path d="M52 132 L82 104 L106 118 L142 68" fill="none" stroke="#fff" stroke-width="16"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- live pulse at the head of the line -->
+    <circle cx="142" cy="68" r="19" fill="#fff" opacity="0.28"/>
+    <circle cx="142" cy="68" r="10" fill="#fff"/>
+  </g>
+</svg>

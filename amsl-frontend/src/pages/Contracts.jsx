@@ -7,7 +7,7 @@ const money = (n) => "£" + Number(n||0).toLocaleString("en-GB",{minimumFraction
 // V1.6-15: download a contract summary (client-side, no backend file needed)
 function downloadContract(r) {
   const lines = [
-    "UTILITY X — CONTRACT SUMMARY", "".padEnd(40, "="), "",
+    "UTILITY LIVE — CONTRACT SUMMARY", "".padEnd(40, "="), "",
     `Contract ID:   ${r.contract_no || "—"}`,
     `Business:      ${r.business_name || "—"}`,
     `Supplier:      ${r.supplier_name || "—"}`,
@@ -22,7 +22,7 @@ function downloadContract(r) {
   const blob = new Blob([lines.join("\n")], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url; a.download = `Contract-${r.contract_no || r.id || "Utility X"}.txt`;
+  a.href = url; a.download = `Contract-${r.contract_no || r.id || "Utility Live"}.txt`;
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 

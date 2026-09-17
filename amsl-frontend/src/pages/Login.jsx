@@ -8,8 +8,8 @@ export default function Login() {
   const { login } = useAuth();
   const nav = useNavigate();
   const loc = useLocation();
-  const [email, setEmail] = useState("admin@brokerportal.com");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [brand, setBrand] = useState(null);
@@ -33,7 +33,7 @@ export default function Login() {
               ? <img src={brand.logo_url} alt={brand.brand_name || "logo"} style={{ width: "100%", height: "100%", objectFit: "contain" }} onError={(e) => { e.target.style.display = "none"; }} />
               : (brand?.brand_name || "AB").slice(0, 2).toUpperCase()}
           </div>
-          <h2 style={{ fontSize: 20 }}>{brand?.brand_name || "Utility X"}</h2>
+          <h2 style={{ fontSize: 20 }}>{brand?.brand_name || "Utility Live"}</h2>
           <div style={{ color: "var(--slate-400)", fontSize: 13, marginTop: 2 }}>Sign in to the broker portal</div>
         </div>
 
@@ -51,12 +51,6 @@ export default function Login() {
         <button className="btn primary" style={{ width: "100%", justifyContent: "center" }} disabled={busy}>
           <LogIn size={16} /> {busy ? "Signing in…" : "Sign in"}
         </button>
-
-        <div style={{ marginTop: 16, padding: 12, background: "var(--slate-50)", borderRadius: 10, fontSize: 12, color: "var(--slate-500)" }}>
-          <b>Demo accounts</b>
-          <div style={{ marginTop: 4 }}>admin@brokerportal.com · admin123 <span className="badge indigo">Admin</span></div>
-          <div style={{ marginTop: 2 }}>lawrence.nadar@azentratech.com · changeme <span className="badge slate">Super User</span></div>
-        </div>
       </form>
     </div>
   );

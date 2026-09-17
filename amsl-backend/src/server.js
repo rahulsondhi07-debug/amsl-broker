@@ -65,7 +65,7 @@ app.use((req, _res, next) => { console.log(`${req.method} ${req.url}`); next(); 
 const api = express.Router();
 api.get("/", (_req, res) =>
   res.json({
-    name: "Utility X API",
+    name: "Utility Live API",
     version: "1.0.0",
     endpoints: [
       "GET  /api/dashboard", "GET  /api/dashboard/stats?period=monthly|total",
@@ -150,5 +150,5 @@ const PORT = process.env.PORT || 4000;
 export default app;
 import { fileURLToPath } from "url";
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  app.listen(PORT, () => console.log(`\nUtility X API running → http://localhost:${PORT}/api\n`));
+  app.listen(PORT, () => console.log(`\nUtility Live API running → http://localhost:${PORT}/api\n`));
 }

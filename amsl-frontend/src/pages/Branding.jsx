@@ -61,7 +61,7 @@ export default function Branding() {
               {b.logo_url
                 ? <img src={b.logo_url} alt="logo" style={{ height: 26, borderRadius: 4 }} onError={(e) => { e.target.style.display = "none"; }} />
                 : <span style={{ width: 30, height: 30, borderRadius: 8, background: "rgba(255,255,255,.2)", display: "grid", placeItems: "center", fontWeight: 800 }}>{(b.brand_name || "AB").slice(0, 2).toUpperCase()}</span>}
-              <strong>{b.brand_name || "Utility X"}</strong>
+              <strong>{b.brand_name || "Utility Live"}</strong>
             </div>
             <div style={{ padding: 16, fontSize: 13 }}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Sample content</div>

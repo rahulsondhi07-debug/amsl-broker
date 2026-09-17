@@ -1,4 +1,4 @@
-# Render Blueprint — deploys the Utility X app as a single web service.
+# Render Blueprint — deploys the Utility Live app as a single web service.
 # The backend builds + serves the React UI and the API together on Render's $PORT.
 # Docs: https://render.com/docs/blueprint-spec
 services:
