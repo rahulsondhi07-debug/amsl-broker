@@ -1,15 +1,26 @@
 import { useState, useEffect, useCallback } from "react";
-import { Plus, Pencil, Trash2, MapPin, Wind, Sun, Droplets, Leaf, Factory, ShoppingCart, RotateCcw } from "lucide-react";
+import { Plus, Pencil, Trash2, MapPin, Wind, Sun, Droplets, Leaf, Factory, ShoppingCart, RotateCcw, Flame, Zap, Recycle } from "lucide-react";
 import { api } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
 
-const TECHS = ["Wind (Onshore)", "Wind (Offshore)", "Solar PV", "Hydro", "Anaerobic Digestion", "Biomass"];
+// Technologies differ by fuel: you cannot buy a wind farm's output as gas, or biomethane
+// as electricity, so the technology list follows the selected fuel.
+const TECHS_BY_FUEL = {
+  Power: ["Wind (Onshore)", "Wind (Offshore)", "Solar PV", "Hydro", "Anaerobic Digestion", "Biomass"],
+  Gas: ["Biomethane (Anaerobic Digestion)", "Biomethane (Food Waste)", "Biomethane (Sewage Gas)",
+        "Biomethane (Landfill Gas)", "Bio-SNG (Gasification)"],
+};
+const ALL_TECHS = [...TECHS_BY_FUEL.Power, ...TECHS_BY_FUEL.Gas];
+const CERTS = ["REGO", "RGGO", "Green Gas Certification Scheme", "None"];
 const STATUSES = ["Available", "Fully Contracted", "Offline"];
 const DEAL_STATUSES = ["Enquiry", "Offer Sent", "Contracted", "Live", "Ended"];
 
 const ICONS = {
   "Wind (Onshore)": Wind, "Wind (Offshore)": Wind, "Solar PV": Sun,
   Hydro: Droplets, "Anaerobic Digestion": Leaf, Biomass: Factory,
+  "Biomethane (Anaerobic Digestion)": Leaf, "Biomethane (Food Waste)": Recycle,
+  "Biomethane (Sewage Gas)": Droplets, "Biomethane (Landfill Gas)": Recycle,
+  "Bio-SNG (Gasification)": Factory,
 };
 const money = (n) => (n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { maximumFractionDigits: 0 }));
 const num = (v) => (v === "" || v == null ? null : Number(v));
@@ -38,7 +49,7 @@ function Generators() {
   const [meta, setMeta] = useState({});
   const [err, setErr] = useState(null);
   const [businesses, setBusinesses] = useState([]);
-  const [f, setF] = useState({ business_id: "", dist_id: "", technology: "", max_price: "", available_only: "1" });
+  const [f, setF] = useState({ business_id: "", utility: "", dist_id: "", technology: "", max_price: "", available_only: "1" });
   const [areas, setAreas] = useState([]);
   const [editing, setEditing] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -61,7 +72,7 @@ function Generators() {
   };
 
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const active = f.business_id || f.dist_id || f.technology || f.max_price;
+  const active = f.business_id || f.utility || f.dist_id || f.technology || f.max_price;
   const sel = { padding: "9px 12px", borderRadius: 9, border: "1px solid var(--line,#E7EBF0)" };
 
   return (
@@ -71,20 +82,28 @@ function Generators() {
           <option value="">Locality: no customer selected</option>
           {businesses.map((b) => <option key={b.id} value={b.id}>{b.business_name}</option>)}
         </select>
+        <div className="toggle">
+          {[["", "All fuels"], ["Power", "Power"], ["Gas", "Green Gas"]].map(([v, l]) => (
+            <button key={l} className={f.utility === v ? "active" : ""}
+              onClick={() => setF({ ...f, utility: v, technology: "" })}>
+              {l}{meta.counts && v && ` (${meta.counts[v] ?? 0})`}
+            </button>
+          ))}
+        </div>
         <select value={f.dist_id} onChange={set("dist_id")} style={sel}>
           <option value="">All areas</option>
           {areas.map((a) => <option key={a.dist_id} value={a.dist_id}>{a.dist_id} — {a.name}</option>)}
         </select>
         <select value={f.technology} onChange={set("technology")} style={sel}>
           <option value="">All technologies</option>
-          {TECHS.map((t) => <option key={t}>{t}</option>)}
+          {(f.utility ? TECHS_BY_FUEL[f.utility] : ALL_TECHS).map((t) => <option key={t}>{t}</option>)}
         </select>
         <input placeholder="Max p/kWh" value={f.max_price} onChange={set("max_price")} style={{ ...sel, width: 120 }} />
         <select value={f.available_only} onChange={set("available_only")} style={sel}>
           <option value="1">Available only</option>
           <option value="">All statuses</option>
         </select>
-        {active && <button className="btn ghost" onClick={() => setF({ business_id: "", dist_id: "", technology: "", max_price: "", available_only: "1" })}><RotateCcw size={14} /> Reset</button>}
+        {active && <button className="btn ghost" onClick={() => setF({ business_id: "", utility: "", dist_id: "", technology: "", max_price: "", available_only: "1" })}><RotateCcw size={14} /> Reset</button>}
         <button className="btn primary" style={{ marginLeft: "auto" }} onClick={() => setShowAdd(true)}><Plus size={15} /> Add Generator</button>
       </div>
 
@@ -104,11 +123,11 @@ function Generators() {
         <div className="table-wrap">
           <table className="tbl">
             <thead><tr>
-              <th>Generator</th><th>Technology</th><th>Area</th><th>Capacity</th>
-              <th>Available</th><th>Price</th><th>Min</th><th>Status</th><th></th>
+              <th>Generator</th><th>Fuel</th><th>Technology</th><th>Area</th><th>Capacity</th>
+              <th>Available</th><th>Price</th><th>Cert</th><th>Status</th><th></th>
             </tr></thead>
             <tbody>
-              {rows.length === 0 && <tr><td colSpan={9} className="sub" style={{ padding: 16, textAlign: "center" }}>No generators match these filters.</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={10} className="sub" style={{ padding: 16, textAlign: "center" }}>No generators match these filters.</td></tr>}
               {rows.map((g) => {
                 const Icon = ICONS[g.technology] || Wind;
                 return (
@@ -118,6 +137,12 @@ function Generators() {
                         <span className="name">{g.name}</span></span>
                       <div className="sub" style={{ fontSize: 11 }}>{g.operator || "—"}{g.postcode ? ` · ${g.postcode}` : ""}</div>
                     </td>
+                    <td>
+                      <Badge tone={g.utility === "Gas" ? "amber" : "indigo"}>
+                        {g.utility === "Gas" ? <Flame size={10} style={{ verticalAlign: "-1px" }} /> : <Zap size={10} style={{ verticalAlign: "-1px" }} />}
+                        {" "}{g.utility === "Gas" ? "Green Gas" : "Power"}
+                      </Badge>
+                    </td>
                     <td style={{ fontSize: 12 }}>{g.technology || "—"}</td>
                     <td style={{ fontSize: 12 }}>
                       {g.region || "—"}
@@ -126,7 +151,7 @@ function Generators() {
                     <td className="mono">{g.capacity_mw != null ? `${g.capacity_mw} MW` : "—"}</td>
                     <td className="mono">{g.available_mwh != null ? `${Number(g.available_mwh).toLocaleString()} MWh` : "—"}</td>
                     <td className="mono">{g.price_p_kwh != null ? `${g.price_p_kwh}p` : "—"}</td>
-                    <td className="mono">{g.min_volume_mwh != null ? `${g.min_volume_mwh}` : "—"}</td>
+                    <td style={{ fontSize: 11.5 }}>{g.certification ? <Badge tone="green">{g.certification}</Badge> : <span className="sub">—</span>}</td>
                     <td><Badge tone={g.status === "Available" ? "green" : g.status === "Offline" ? "rose" : "amber"}>{g.status}</Badge></td>
                     <td style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                       {g.status === "Available" && <button className="btn primary sm" onClick={() => setBuying(g)}><ShoppingCart size={13} /> Buy</button>}
@@ -157,6 +182,7 @@ function Generators() {
 function GeneratorForm({ gen, areas, onClose, onSaved }) {
   const [f, setF] = useState({
     name: gen?.name || "", operator: gen?.operator || "", technology: gen?.technology || "Solar PV",
+    utility: gen?.utility || "Power", certification: gen?.certification || "REGO", injection_point: gen?.injection_point || "",
     dist_id: gen?.dist_id ?? "", postcode: gen?.postcode || "", capacity_mw: gen?.capacity_mw ?? "",
     annual_output_mwh: gen?.annual_output_mwh ?? "", available_mwh: gen?.available_mwh ?? "",
     price_p_kwh: gen?.price_p_kwh ?? "", min_volume_mwh: gen?.min_volume_mwh ?? "",
@@ -191,7 +217,23 @@ function GeneratorForm({ gen, areas, onClose, onSaved }) {
       <div className="grid cols-2">
         <Field label="Generator Name *"><input value={f.name} onChange={set("name")} /></Field>
         <Field label="Operator"><input value={f.operator} onChange={set("operator")} /></Field>
-        <Field label="Technology"><select value={f.technology} onChange={set("technology")}>{TECHS.map((t) => <option key={t}>{t}</option>)}</select></Field>
+        <Field label="Fuel">
+          <select value={f.utility} onChange={(e) => {
+            const u = e.target.value;
+            // Switching fuel resets technology and certification to that fuel's defaults,
+            // so a gas producer can't be left tagged as wind with a REGO.
+            setF({ ...f, utility: u, technology: TECHS_BY_FUEL[u][0], certification: u === "Gas" ? "RGGO" : "REGO" });
+          }}>
+            <option value="Power">Power</option><option value="Gas">Green Gas</option>
+          </select>
+        </Field>
+        <Field label="Technology"><select value={f.technology} onChange={set("technology")}>
+          {TECHS_BY_FUEL[f.utility].map((t) => <option key={t}>{t}</option>)}</select></Field>
+        <Field label="Certification"><select value={f.certification} onChange={set("certification")}>
+          {CERTS.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        {f.utility === "Gas" && (
+          <Field label="Grid Injection Point"><input value={f.injection_point} onChange={set("injection_point")} placeholder="e.g. Poundbury Entry" /></Field>
+        )}
         <Field label="Distribution Area">
           <select value={f.dist_id} onChange={set("dist_id")}>
             <option value="">—</option>

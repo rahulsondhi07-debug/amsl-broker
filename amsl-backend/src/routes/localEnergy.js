@@ -4,6 +4,14 @@ import { db } from "../db.js";
 const r = Router();
 const round2 = (n) => Math.round(n * 100) / 100;
 
+// Power generation is sized in MW and certified by REGO; green gas is injected into the
+// grid, sized by annual gas volume, and certified by RGGO. Keeping the labels beside the
+// data stops a gas offer being read as if it were electricity.
+const UNITS = {
+  Power: { capacity: "MW", volume: "MWh", price: "p/kWh", cert: "REGO" },
+  Gas:   { capacity: "MW (thermal)", volume: "MWh gas", price: "p/kWh", cert: "RGGO" },
+};
+
 /**
  * UK electricity distribution areas. The two-digit code is the first pair of digits of an
  * MPAN, so a customer's distribution area is already derivable from the meter number we
@@ -49,6 +57,7 @@ r.get("/generators", (req, res) => {
   const q = req.query;
   const where = [];
   const params = [];
+  if (q.utility) { where.push("utility = ?"); params.push(q.utility); }
   if (q.dist_id) { where.push("dist_id = ?"); params.push(Number(q.dist_id)); }
   if (q.technology) { where.push("technology = ?"); params.push(q.technology); }
   if (q.max_price) { where.push("price_p_kwh <= ?"); params.push(Number(q.max_price)); }
@@ -65,15 +74,24 @@ r.get("/generators", (req, res) => {
       .sort((a, b) => (a.locality === b.locality ? a.price_p_kwh - b.price_p_kwh : a.locality === "Local" ? -1 : 1));
   }
   res.json({
-    data: rows,
-    meta: { customer_dist_id: custDist, customer_area: custDist ? DIST_AREAS[custDist] : null, total: rows.length },
+    data: rows.map((g) => ({ ...g, units: UNITS[g.utility || "Power"] })),
+    meta: {
+      customer_dist_id: custDist, customer_area: custDist ? DIST_AREAS[custDist] : null,
+      total: rows.length,
+      counts: {
+        Power: rows.filter((g) => (g.utility || "Power") === "Power").length,
+        Gas: rows.filter((g) => g.utility === "Gas").length,
+      },
+      units: UNITS,
+    },
   });
 });
 
 r.post("/generators", (req, res) => {
   const b = req.body || {};
   if (!b.name) return res.status(400).json({ error: "name is required" });
-  const cols = ["name", "operator", "technology", "dist_id", "region", "postcode", "capacity_mw",
+  const cols = ["name", "operator", "technology", "utility", "certification", "injection_point",
+    "dist_id", "region", "postcode", "capacity_mw",
     "annual_output_mwh", "available_mwh", "price_p_kwh", "min_volume_mwh", "term_months_min",
     "term_months_max", "commissioned_year", "rego_accredited", "status", "notes"];
   const region = b.region || (b.dist_id ? DIST_AREAS[Number(b.dist_id)] : null);
@@ -85,7 +103,8 @@ r.post("/generators", (req, res) => {
 const updGen = (req, res) => {
   const b = req.body || {};
   if (b.dist_id !== undefined && b.region === undefined) b.region = DIST_AREAS[Number(b.dist_id)] || null;
-  const allowed = ["name", "operator", "technology", "dist_id", "region", "postcode", "capacity_mw",
+  const allowed = ["name", "operator", "technology", "utility", "certification", "injection_point",
+    "dist_id", "region", "postcode", "capacity_mw",
     "annual_output_mwh", "available_mwh", "price_p_kwh", "min_volume_mwh", "term_months_min",
     "term_months_max", "commissioned_year", "rego_accredited", "status", "notes"];
   const cols = allowed.filter((c) => b[c] !== undefined);
@@ -110,9 +129,10 @@ r.get("/deals", (req, res) => {
   const params = [];
   if (req.query.business_id) { where.push("d.business_id = ?"); params.push(req.query.business_id); }
   if (req.query.status) { where.push("d.status = ?"); params.push(req.query.status); }
+  if (req.query.utility) { where.push("COALESCE(d.utility,'Power') = ?"); params.push(req.query.utility); }
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
   res.json({
-    data: db.prepare(`SELECT d.*, b.business_name, g.region, g.dist_id, g.postcode
+    data: db.prepare(`SELECT d.*, b.business_name, g.region, g.dist_id, g.postcode, g.certification
                       FROM ppa_deals d
                       LEFT JOIN businesses b ON b.id = d.business_id
                       LEFT JOIN generators g ON g.id = d.generator_id
@@ -148,11 +168,12 @@ r.post("/deals", (req, res) => {
 
   const tx = db.transaction(() => {
     const info = db.prepare(`INSERT INTO ppa_deals
-      (business_id, generator_id, generator_name, technology, volume_mwh, price_p_kwh, term_months,
+      (business_id, generator_id, generator_name, technology, utility, volume_mwh, price_p_kwh, term_months,
        annual_value, start_date, end_date, locality, reference, status, notes)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(b.business_id, b.generator_id || null, b.generator_name ?? gen?.name ?? null,
-        b.technology ?? gen?.technology ?? null, volume, price, b.term_months ?? null,
+        b.technology ?? gen?.technology ?? null, b.utility ?? gen?.utility ?? "Power",
+        volume, price, b.term_months ?? null,
         annualValue, b.start_date || null, b.end_date || null, locality,
         b.reference || null, b.status || "Enquiry", b.notes || null);
 

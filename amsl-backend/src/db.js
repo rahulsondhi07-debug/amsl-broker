@@ -1063,6 +1063,20 @@ export function migrate() {
       created_at        TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // Green gas (biomethane) sits alongside power generation but is a different product:
+  // it is injected into the gas grid and certified by RGGO, not REGO. Keeping both in one
+  // table with a utility flag means one marketplace and one deal flow, filtered by fuel,
+  // rather than a duplicate set of screens.
+  addCol("ALTER TABLE generators ADD COLUMN utility       TEXT DEFAULT 'Power'");   // Power | Gas
+  addCol("ALTER TABLE generators ADD COLUMN certification TEXT");                   // REGO | RGGO | Green Gas Certification Scheme
+  addCol("ALTER TABLE generators ADD COLUMN injection_point TEXT");                 // gas only: the grid entry point
+  addCol("ALTER TABLE ppa_deals  ADD COLUMN utility       TEXT DEFAULT 'Power'");
+  // Existing rows pre-date the column, so make the default explicit rather than leaving
+  // nulls that would drop out of a fuel filter.
+  try { db.prepare("UPDATE generators SET utility='Power' WHERE utility IS NULL").run(); } catch (e) {}
+  try { db.prepare("UPDATE ppa_deals SET utility='Power' WHERE utility IS NULL").run(); } catch (e) {}
+  try { db.prepare("UPDATE generators SET certification='REGO' WHERE certification IS NULL AND rego_accredited=1").run(); } catch (e) {}
   const setDef = db.prepare("INSERT OR IGNORE INTO app_settings (key,value) VALUES (?,?)");
   setDef.run("brand_name", "Utility Live");
   setDef.run("logo_url", "/utility-live-mark.svg");
@@ -1174,8 +1188,8 @@ export function seedPlatform() {
     const gi = db.prepare(`INSERT INTO generators
       (name, operator, technology, dist_id, region, postcode, capacity_mw, annual_output_mwh,
        available_mwh, price_p_kwh, min_volume_mwh, term_months_min, term_months_max,
-       commissioned_year, rego_accredited, status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'Available')`);
+       commissioned_year, rego_accredited, utility, certification, status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,'Power','REGO','Available')`);
     [
       ["Whitelee Wind Farm", "ScottishPower Renewables", "Wind (Onshore)", 18, "Southern Scotland", "G76 0QQ", 539, 1300000, 40000, 8.20, 500, 24, 120, 2009],
       ["Pen y Cymoedd", "Vattenfall", "Wind (Onshore)", 21, "South Wales", "CF44 9RU", 228, 700000, 25000, 8.05, 500, 24, 120, 2017],
@@ -1189,6 +1203,27 @@ export function seedPlatform() {
       ["Tees Renewable Plant", "MGT Power", "Biomass", 15, "North East England", "TS2 1UD", 299, 2000000, 18000, 9.95, 500, 24, 120, 2020],
     ].forEach((v) => gi.run(...v));
     console.log("Seeded 10 sample generators for the local energy marketplace.");
+  }
+  // Green gas producers. Biomethane is injected into the gas grid rather than generating
+  // electricity, so volumes are gas kWh and certification is RGGO. Prices and volumes are
+  // illustrative and should be maintained by an admin.
+  if (db.prepare("SELECT COUNT(*) c FROM generators WHERE utility='Gas'").get().c === 0) {
+    const gg = db.prepare(`INSERT INTO generators
+      (name, operator, technology, utility, certification, dist_id, region, postcode, injection_point,
+       capacity_mw, annual_output_mwh, available_mwh, price_p_kwh, min_volume_mwh,
+       term_months_min, term_months_max, commissioned_year, rego_accredited, status)
+      VALUES (?,?,?,'Gas','RGGO',?,?,?,?,?,?,?,?,?,?,?,?,0,'Available')`);
+    [
+      ["Rainbarrow Farm Biomethane", "Future Biogas", "Biomethane (Anaerobic Digestion)", 22, "South West England", "DT2 8QH", "Poundbury Entry", 5.0, 42000, 9000, 6.85, 250, 12, 84, 2012],
+      ["Adnams Bio Energy", "Adnams / BioGroup", "Biomethane (Anaerobic Digestion)", 10, "Eastern England", "IP18 6JW", "Southwold Entry", 4.8, 38000, 7500, 7.10, 200, 12, 60, 2010],
+      ["Severn Trent Stoke Bardolph", "Severn Trent Green Power", "Biomethane (Sewage Gas)", 11, "East Midlands", "NG14 5HP", "Stoke Bardolph Entry", 6.2, 52000, 12000, 6.40, 500, 24, 96, 2014],
+      ["Barkip Biogas", "Bio Capital", "Biomethane (Anaerobic Digestion)", 18, "Southern Scotland", "KA24 4LG", "Barkip Entry", 5.5, 45000, 10000, 6.95, 250, 12, 84, 2016],
+      ["ReFood Doncaster", "ReFood UK", "Biomethane (Food Waste)", 23, "Yorkshire", "DN4 5JS", "Doncaster Entry", 7.0, 58000, 14000, 6.60, 400, 24, 96, 2015],
+      ["Gorst Energy Landfill Gas", "Gorst Energy", "Biomethane (Landfill Gas)", 13, "North Wales, Merseyside & Cheshire", "CH7 6HE", "Flint Entry", 3.2, 26000, 5000, 6.20, 150, 12, 60, 2013],
+      ["Wyke Farms Green Gas", "Wyke Farms", "Biomethane (Anaerobic Digestion)", 22, "South West England", "BA4 4NL", "Bruton Entry", 4.0, 33000, 6500, 7.35, 150, 12, 60, 2018],
+      ["Cadent Bio-SNG Pilot", "Cadent / Advanced Biofuel", "Bio-SNG (Gasification)", 14, "West Midlands", "B70 0TU", "Swan Village Entry", 2.5, 18000, 3000, 9.80, 100, 24, 60, 2021],
+    ].forEach((v) => gg.run(...v));
+    console.log("Seeded 8 green gas producers.");
   }
   // Flexibility schemes a business can be paid through for shifting load off peak. Rates
   // are indicative starting points only — real rates are set per season/auction and must be
