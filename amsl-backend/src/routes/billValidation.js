@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { db } from "../db.js";
+import { parseElecRows, reconcile, compareToReference, resolveDno, N, CHARGES } from "../lib/billReconcile.js";
 
 const r = Router();
 const all = (sql, ...p) => db.prepare(sql).all(...p);
@@ -559,6 +560,64 @@ r.get("/claim-stages", (_req, res) => {
 });
 
 /* GET one */
+
+/* ---- Non-commodity reconciliation ----
+   Separate from validateBill above: that compares a bill to the customer's CONTRACT,
+   this checks the bill against itself (arithmetic) and against the published network
+   and levy schedules. Either can surface a claim; together they corroborate. */
+
+r.get("/reference/meta", (_req, res) => {
+  res.json({ data: { dnos: N.DNOS, years: N.YEARS, charges: CHARGES.map((c) => ({ key: c.key, label: c.label, unit: c.unit })) } });
+});
+
+/** Turn raw bill text into structured rows without judging them. */
+r.post("/reconcile/parse", (req, res) => {
+  const text = req.body?.text;
+  if (!text || typeof text !== "string") return res.status(400).json({ error: "text is required" });
+  const rows = parseElecRows(text);
+  res.json({ data: { rows, parsed: rows.length } });
+});
+
+/**
+ * Full reconciliation. Accepts either raw text or an already-parsed bill object.
+ * DNO is resolved from the MPAN top line where not supplied, since the distribution
+ * area decides which published DUoS schedule applies.
+ */
+r.post("/reconcile", (req, res) => {
+  const b = req.body || {};
+  let bill = b.bill;
+  if (!bill && b.text) bill = { ...b, rows: parseElecRows(b.text) };
+  if (!bill || !Array.isArray(bill.rows)) {
+    return res.status(400).json({ error: "Provide either bill text or a bill object with rows" });
+  }
+  const dno = resolveDno(b.dno_id || b.mpan_prefix || bill.mpan_prefix || b.postcode || "");
+  const year = b.tariff_year || bill.tariff_year || null;
+
+  const arithmetic = reconcile(bill);
+  const reference = (dno && year)
+    ? compareToReference(bill, dno.id, year, { site: b.site, band: b.band })
+    : [];
+
+  // The overall verdict takes the worse of the two methods, so a bill that reconciles
+  // internally but is billed off-schedule still surfaces.
+  // Only evidential mismatches (firm reference, not an assumption) can drive a red.
+  const refWorst = reference.some((c) => c.evidential) ? "red"
+    : reference.some((c) => c.status === "amber" || c.status === "review") ? "amber" : "green";
+  const rank = { green: 0, amber: 1, red: 2 };
+  const verdict = rank[arithmetic.verdict] >= rank[refWorst] ? arithmetic.verdict : refWorst;
+
+  res.json({
+    data: {
+      dno: dno ? { id: dno.id, name: dno.name, operator: dno.op } : null,
+      tariff_year: year,
+      arithmetic, reference, verdict,
+      note: !dno || !year
+        ? "Reference comparison skipped — supply an MPAN top line (or postcode) and a tariff year to compare against published schedules."
+        : null,
+    },
+  });
+});
+
 r.get("/:id", (req, res) => {
   const row = one(`SELECT bv.*, c.contract_no FROM bill_validations bv LEFT JOIN contracts c ON c.id = bv.contract_id WHERE bv.id=?`, req.params.id);
   if (!row) return res.status(404).json({ error: "Validation not found" });

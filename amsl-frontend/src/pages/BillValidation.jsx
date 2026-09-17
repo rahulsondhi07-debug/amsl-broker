@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Plus, ShieldCheck, AlertTriangle, CheckCircle2, FileWarning, FileText, Send, Trash2 } from "lucide-react";
+import { Plus, ShieldCheck, AlertTriangle, CheckCircle2, FileWarning, FileText, Send, Trash2, Calculator } from "lucide-react";
 import { api } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
 
@@ -22,6 +22,7 @@ const emptyForm = {
 };
 
 export default function BillValidation() {
+  const [showReconcile, setShowReconcile] = useState(false);
   const [rows, setRows] = useState(null);
   const [totals, setTotals] = useState(null);
   const [contracts, setContracts] = useState([]);
@@ -216,6 +217,7 @@ export default function BillValidation() {
 
   return (
     <>
+      {showReconcile && <ReconcileModal onClose={() => setShowReconcile(false)} />}
       <div className="page-head">
         <div>
           <h2>Bill Validation &amp; Energy Claims</h2>
@@ -224,6 +226,9 @@ export default function BillValidation() {
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={() => setBatchModal({ shared: { business_name: "", responsible_person: "", phone: "", supplier_name: "", relief_pct: "", utility: "ELECTRICITY" }, sites: [emptySite()], results: null })}>
             <FileText size={16} /> Batch PP11 (multi-site)
+          </button>
+          <button className="btn" onClick={() => setShowReconcile(true)}>
+            <Calculator size={16} /> Reconcile Bill
           </button>
           <button className="btn primary" onClick={() => { setForm(emptyForm); setPreview(null); setCertMatch(undefined); setSicMatch(undefined); setBillFile(null); setShowAdd(true); }}>
             <Plus size={16} /> New Validation
@@ -733,5 +738,151 @@ function StatBox({ label, value, highlight }) {
       <div className="sub" style={{ fontSize: 11 }}>{label}</div>
       <div style={{ fontSize: 20, fontWeight: 800, color: highlight ? "#E11D48" : undefined }}>{value}</div>
     </div>
+  );
+}
+
+
+/* ---------------------------------------------------------------------------
+   Non-commodity reconciliation.
+   Distinct from the contract validation above: this checks a bill against itself
+   (arithmetic) and against the published DUoS/TNUoS/levy schedules. The arithmetic
+   half needs no reference data at all, which is what makes it defensible.
+--------------------------------------------------------------------------- */
+const SAMPLE_BILL = `Distribution Fixed Charge 31 days 140.0000 p/day 43.40 8.68 52.08
+Day Unit 2182.90 kWh 23.4340 p/kWh 511.58 102.32 613.90
+Night Unit 495.50 kWh 19.3260 p/kWh 95.76 19.15 114.91
+Transmission Fixed Charge 31 days 1151.1840 p/day 356.87 71.37 428.24
+Capacity Charge 100 kVA 6.92 p/kVA/day 214.52 42.90 257.42
+Reactive Capacity Charge 24.07 kVArh 0.1730 p/kVArh 0.04 0.01 0.05
+Nuclear RAB Levy 2678.40 kWh 0.5000 p/kWh 13.39 2.68 16.07
+Network Charging Compensation 2678.40 kWh 0.1500 p/kWh 4.02 0.00 4.02
+Climate Change Levy 2678.40 kWh 0.80100 p/kWh 21.45 4.29 25.74`;
+
+function ReconcileModal({ onClose }) {
+  const [meta, setMeta] = useState(null);
+  const [text, setText] = useState("");
+  const [f, setF] = useState({ mpan_prefix: "", tariff_year: "", billDays: "", vat_rate: 20,
+    day_kwh: "", night_kwh: "", consumption_kwh: "", subtotal: "", vat_total: "", total: "" });
+  const [result, setResult] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { api.bvReferenceMeta().then((r) => setMeta(r.data)).catch(() => {}); }, []);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const n = (v) => (v === "" || v == null ? null : Number(v));
+
+  const run = async () => {
+    if (!text.trim()) return setErr("Paste the bill's charge lines first");
+    setBusy(true); setErr(null);
+    try {
+      const { data } = await api.bvReconcile({
+        text, mpan_prefix: f.mpan_prefix || null, tariff_year: f.tariff_year || null,
+        billDays: n(f.billDays), vat_rate: n(f.vat_rate),
+        day_kwh: n(f.day_kwh), night_kwh: n(f.night_kwh), consumption_kwh: n(f.consumption_kwh),
+        subtotal: n(f.subtotal), vat_total: n(f.vat_total), total: n(f.total),
+      });
+      setResult(data);
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const tone = (v) => (v === "red" ? "rose" : v === "amber" || v === "review" ? "amber" : v === "green" ? "green" : "slate");
+
+  return (
+    <Modal title="Reconcile a Non-Commodity Bill" onClose={onClose} wide
+      footer={<><button className="btn" onClick={onClose}>Close</button>
+        <button className="btn primary" disabled={busy} onClick={run}>{busy ? "Checking…" : "Reconcile"}</button></>}>
+      {err && <ErrorBanner error={err} />}
+      <p className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
+        Paste the charge lines from the bill. Each line should read label, quantity, rate with its unit, then subtotal, VAT and total.
+        Arithmetic checks run with no reference data; add an MPAN top line and tariff year to also compare against published schedules.
+      </p>
+      <div className="grid cols-4" style={{ marginBottom: 10 }}>
+        <Field label="MPAN top line / postcode"><input value={f.mpan_prefix} onChange={set("mpan_prefix")} placeholder="16" /></Field>
+        <Field label="Tariff Year">
+          <select value={f.tariff_year} onChange={set("tariff_year")}>
+            <option value="">—</option>
+            {(meta?.years || []).map((y) => <option key={y}>{y}</option>)}
+          </select>
+        </Field>
+        <Field label="Billing Days"><input type="number" value={f.billDays} onChange={set("billDays")} /></Field>
+        <Field label="VAT %"><input type="number" step="0.1" value={f.vat_rate} onChange={set("vat_rate")} /></Field>
+        <Field label="Day kWh"><input type="number" step="0.01" value={f.day_kwh} onChange={set("day_kwh")} /></Field>
+        <Field label="Night kWh"><input type="number" step="0.01" value={f.night_kwh} onChange={set("night_kwh")} /></Field>
+        <Field label="Levy kWh"><input type="number" step="0.01" value={f.consumption_kwh} onChange={set("consumption_kwh")} /></Field>
+        <Field label="Stated Subtotal"><input type="number" step="0.01" value={f.subtotal} onChange={set("subtotal")} /></Field>
+        <Field label="Stated VAT"><input type="number" step="0.01" value={f.vat_total} onChange={set("vat_total")} /></Field>
+        <Field label="Stated Total"><input type="number" step="0.01" value={f.total} onChange={set("total")} /></Field>
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={8}
+        placeholder="Distribution Fixed Charge 31 days 140.0000 p/day 43.40 8.68 52.08…"
+        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)", fontFamily: "monospace", fontSize: 12 }} />
+      <button className="btn ghost sm" style={{ marginTop: 6 }} onClick={() => {
+        setText(SAMPLE_BILL);
+        setF({ ...f, mpan_prefix: "16", tariff_year: "2026/27", billDays: 31, vat_rate: 20,
+          day_kwh: 2182.90, night_kwh: 495.50, consumption_kwh: 2678.40, subtotal: 1261.03, vat_total: 251.40, total: 1512.43 });
+      }}>Load worked example</button>
+
+      {result && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <Badge tone={tone(result.verdict)}>{result.verdict.toUpperCase()}</Badge>
+            {result.dno && <span className="sub" style={{ fontSize: 12 }}>DNO {result.dno.id} — {result.dno.name} ({result.dno.operator}) · {result.tariff_year}</span>}
+          </div>
+          {result.note && <div className="sub" style={{ fontSize: 11.5, marginBottom: 10 }}>{result.note}</div>}
+
+          <h4 style={{ fontSize: 13, margin: "12px 0 6px" }}>Arithmetic findings — no reference data used</h4>
+          {result.arithmetic.findings.length === 0 ? (
+            <div className="sub" style={{ fontSize: 12 }}>Every line reconciles and the totals sum correctly.</div>
+          ) : (
+            <>
+              <table className="tbl">
+                <thead><tr><th>Severity</th><th>Line</th><th>Issue</th><th style={{ textAlign: "right" }}>Impact</th></tr></thead>
+                <tbody>
+                  {result.arithmetic.findings.map((x, i) => (
+                    <tr key={i}>
+                      <td><Badge tone={tone(x.severity)}>{x.severity}</Badge></td>
+                      <td className="name" style={{ fontSize: 12 }}>{x.line}</td>
+                      <td style={{ fontSize: 12 }}>{x.detail}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{x.impact != null ? money(x.impact) : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="sub" style={{ fontSize: 11.5, marginTop: 6 }}>
+                Net arithmetic impact <b>{money(result.arithmetic.total_impact)}</b> — defects proven from the bill's own figures.
+              </div>
+            </>
+          )}
+
+          {result.reference.length > 0 && (
+            <>
+              <h4 style={{ fontSize: 13, margin: "16px 0 6px" }}>Against published schedules</h4>
+              <table className="tbl">
+                <thead><tr><th>Charge</th><th style={{ textAlign: "right" }}>Billed</th><th style={{ textAlign: "right" }}>Reference</th><th style={{ textAlign: "right" }}>Variance</th><th>Status</th></tr></thead>
+                <tbody>
+                  {result.reference.map((c) => (
+                    <tr key={c.key}>
+                      <td style={{ fontSize: 12 }}>{c.label}<div className="sub" style={{ fontSize: 10.5 }}>{c.unit}{c.source ? ` · ${c.source}` : ""}</div></td>
+                      <td className="mono" style={{ textAlign: "right" }}>{c.billed ?? "—"}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{c.reference ?? "—"}</td>
+                      <td className="mono" style={{ textAlign: "right" }}>{c.variance ?? "—"}</td>
+                      <td>
+                        <Badge tone={tone(c.status)}>{c.status}</Badge>
+                        {c.evidential && <div className="sub" style={{ fontSize: 10 }}>evidential</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="sub" style={{ fontSize: 11, marginTop: 8, lineHeight: 1.5 }}>
+                Only items marked evidential rest on a firm published rate. Anything shown as review or amber depends on an assumed
+                capacity band or an estimated schedule and must be confirmed against the supplier's own statement before it forms part of a claim.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }
