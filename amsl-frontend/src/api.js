@@ -94,6 +94,7 @@ export const api = {
   bvReferenceMeta: () => request(`/bill-validation/reference/meta`),
   bvReconcile: (body) => request(`/bill-validation/reconcile`, { method: "POST", body }),
   bvParseBill: (text) => request(`/bill-validation/reconcile/parse`, { method: "POST", body: { text } }),
+  bvReconcilePdf: (file_base64, filename) => request(`/bill-validation/reconcile/pdf`, { method: "POST", body: { file_base64, filename } }),
   fvfList: (params) => request(`/fixed-vs-flex`, { params }),
   fvfCreate: (body) => request(`/fixed-vs-flex`, { method: "POST", body }),
   fvfUpdate: (id, body) => request(`/fixed-vs-flex/${id}`, { method: "PUT", body }),

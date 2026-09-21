@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { db } from "../db.js";
-import { parseElecRows, reconcile, compareToReference, resolveDno, N, CHARGES } from "../lib/billReconcile.js";
+import { parseElecRows, reconcile, compareToReference, resolveDno, N, CHARGES, extractBillFields } from "../lib/billReconcile.js";
+// pdfjs-dist is used directly rather than pdf-parse: pdf-parse bundles a 2017 pdf.js that
+// leaks state between documents, so one upload could corrupt the parse of the next.
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const r = Router();
 const all = (sql, ...p) => db.prepare(sql).all(...p);
@@ -568,6 +571,104 @@ r.get("/claim-stages", (_req, res) => {
 
 r.get("/reference/meta", (_req, res) => {
   res.json({ data: { dnos: N.DNOS, years: N.YEARS, charges: CHARGES.map((c) => ({ key: c.key, label: c.label, unit: c.unit })) } });
+});
+
+
+
+/**
+ * Extract a PDF's text with real spacing. A naive join glues a bill's Subtotal | VAT | Total
+ * columns "43.40", "8.68", "52.08" into "43.408.6852.08", which parses as wrong amounts and
+ * produces false claims. Each item's position is used instead: a new line where the
+ * vertical position changes, a space wherever there is a horizontal gap.
+ */
+async function extractPdfText(buf) {
+  // pdf.js takes ownership of the array it is given, so hand it a copy.
+  const doc = await getDocument({
+    data: new Uint8Array(buf), isEvalSupported: false, disableFontFace: true, useSystemFonts: false,
+  }).promise;
+  try {
+    let out = "";
+    for (let p = 1; p <= doc.numPages; p++) {
+      const tc = await (await doc.getPage(p)).getTextContent();
+      let lastY = null, lastXEnd = null;
+      for (const item of tc.items) {
+        if (typeof item.str !== "string") continue;
+        const x = item.transform[4], y = item.transform[5];
+        if (lastY !== null && Math.abs(y - lastY) > 2) { out += "\n"; lastXEnd = null; }
+        else if (lastXEnd !== null && x - lastXEnd > 0.5) out += " ";
+        out += item.str;
+        lastY = y;
+        lastXEnd = x + (item.width || 0);
+      }
+      out += "\n";
+    }
+    return { text: out, pages: doc.numPages };
+  } finally {
+    await doc.destroy();   // release the document so memory does not grow per upload
+  }
+}
+
+/**
+ * Read a PDF bill directly. Extracts the text, pulls out the bill fields and charge rows,
+ * then runs the same reconciliation as the paste route.
+ *
+ * Only text-based PDFs can be read this way. A scanned bill is an image with no text layer,
+ * so it is detected and reported rather than returning an empty, misleadingly clean result.
+ */
+r.post("/reconcile/pdf", async (req, res) => {
+  const b64 = req.body?.file_base64;
+  if (!b64) return res.status(400).json({ error: "file_base64 is required" });
+  let buf;
+  try { buf = Buffer.from(b64, "base64"); } catch { return res.status(400).json({ error: "The file could not be decoded" }); }
+  if (buf.subarray(0, 5).toString() !== "%PDF-") {
+    return res.status(400).json({ error: "That file is not a PDF" });
+  }
+
+  let text = "";
+  let pages = 0;
+  try {
+    ({ text, pages } = await extractPdfText(buf));
+  } catch (e) {
+    const locked = /password/i.test(e?.name || "") || /password/i.test(e?.message || "");
+    return res.status(422).json({
+      error: locked
+        ? "This PDF is password-protected. Remove the password and upload it again."
+        : "The PDF could not be read — the file may be damaged.",
+    });
+  }
+  const chars = text.replace(/\s/g, "").length;
+  if (chars < 40) {
+    return res.status(422).json({
+      error: "This PDF has no readable text — it is most likely a scanned image. Scanned bills need to be keyed in manually or converted to a text PDF first.",
+      scanned: true, pages,
+    });
+  }
+
+  const fields = extractBillFields(text);
+  const bill = { ...fields, rows: fields.rows };
+  const dno = resolveDno(fields.mpan_prefix || "");
+  const year = fields.tariff_year || null;
+  const arithmetic = reconcile(bill);
+  const reference = dno && year ? compareToReference(bill, dno.id, year) : [];
+  const refWorst = reference.some((c) => c.evidential) ? "red"
+    : reference.some((c) => c.status === "amber" || c.status === "review") ? "amber" : "green";
+  const rank = { green: 0, amber: 1, red: 2 };
+  const verdict = rank[arithmetic.verdict] >= rank[refWorst] ? arithmetic.verdict : refWorst;
+
+  res.json({
+    data: {
+      pages, fields, text,
+      dno: dno ? { id: dno.id, name: dno.name, operator: dno.op } : null,
+      tariff_year: year, arithmetic, reference, verdict,
+      // Parsing a real bill is imperfect; surface what was and was not found so a person
+      // checks the extraction before any finding is relied on.
+      warnings: [
+        ...(fields.rows.length === 0 ? ["No charge lines were recognised — the bill layout may not be supported yet."] : []),
+        ...(fields.missing.length ? [`Not found on the bill, please enter manually: ${fields.missing.join(", ")}.`] : []),
+        ...(fields.fuel === "gas" ? ["Gas bill detected — only the reconciliation totals apply; line-by-line parsing is electricity only."] : []),
+      ],
+    },
+  });
 });
 
 /** Turn raw bill text into structured rows without judging them. */

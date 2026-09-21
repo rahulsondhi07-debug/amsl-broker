@@ -181,12 +181,22 @@ export function reconcile(bill) {
 
   const checked = rows.map((row) => {
     const exp = expectedSubtotal(row, bill);
-    const subOk = exp == null || row.subtotal == null ? null : Math.abs(exp - row.subtotal) <= TOL;
+    const diff = exp == null || row.subtotal == null ? null : Math.abs(exp - row.subtotal);
+    const subOk = diff == null ? null : diff <= TOL;
     if (subOk === false) {
+      // HH bills are built from ~1,500 half-hourly amounts each rounded to the penny, so a
+      // few pence of drift on a large line is expected. That is noted as rounding, not
+      // asserted as a defect — mixing trivial rounding into a claim beside a genuine error
+      // (like a zero-VAT line) weakens the credible finding.
+      const rounding = diff <= Math.max(0.10, Math.abs(row.subtotal) * 0.0005);
       findings.push({
-        severity: "red", type: "rate-quantity mismatch", line: row.label,
-        detail: `Printed subtotal £${row.subtotal} but ${row.quantity ?? "?"} × ${row.rate}${row.rateUnit} works out at £${exp}.`,
-        impact: round2((row.subtotal ?? 0) - exp),
+        severity: rounding ? "amber" : "red",
+        type: rounding ? "rounding difference" : "rate-quantity mismatch",
+        line: row.label,
+        detail: rounding
+          ? `Printed £${row.subtotal} vs £${exp} from ${row.quantity} × ${row.rate}${row.rateUnit} — a ${round2(diff * 100)}p difference, consistent with half-hourly rounding.`
+          : `Printed subtotal £${row.subtotal} but ${row.quantity ?? "?"} × ${row.rate}${row.rateUnit} works out at £${exp}.`,
+        impact: rounding ? null : round2((row.subtotal ?? 0) - exp),
       });
     }
     // VAT is checked per line: a subtotal with no VAT is the classic defect.
@@ -278,4 +288,114 @@ export function compareToReference(bill, dnoId, year, opt = {}) {
       evidential: status === "red" && !ref.isEstimate,
     };
   }).filter((c) => c.billed != null || c.reference != null);
+}
+
+/**
+ * Pull the bill-level fields out of raw bill text: fuel, MPAN top line, billing days,
+ * day/night kWh, capacity and the stated totals. Ported from the handoff's parseBillText.
+ *
+ * Every field it cannot find is left null rather than guessed, and the caller is told
+ * which fields were found, because an extracted figure that is silently wrong would feed
+ * straight into a reconciliation finding.
+ */
+export function extractBillFields(raw) {
+  const T = (" " + String(raw || "") + " ").replace(/\s+/g, " ");
+  const out = { fuel: null, rows: [] };
+
+  const isGas = /MPRN/i.test(T) || /\bm3\b|m³/.test(T)
+    || /cadent|wales *& *west|northern gas|\bsgn\b|national grid gas|scotia gas/i.test(T);
+  out.fuel = isGas ? "gas" : "elec";
+
+  // Tariff year: an explicit "2026/27", else the charging year a bill date falls in.
+  // Charging years run April to March, so a January 2027 bill belongs to 2026/27.
+  let m = T.match(/\b(20\d\d\s?\/\s?\d{2})\b/);
+  if (m) out.tariff_year = m[1].replace(/\s/g, "");
+  else {
+    m = T.match(/(\d{2})\/(\d{2})\/(20\d\d)/);
+    if (m) {
+      const y = +m[3], mo = +m[2];
+      const start = mo >= 4 ? y : y - 1;
+      out.tariff_year = `${start}/${String((start + 1) % 100).padStart(2, "0")}`;
+    }
+  }
+
+  // Billing period. An explicit "period ... to ..." is used first: a bill also carries an
+  // invoice date and a due date, and taking the earliest and latest dates on the page
+  // stretches a 31-day period to include them. Counted inclusively (1st–31st = 31 days).
+  const toDate = (d, mo, y) => new Date(Date.UTC(+y, +mo - 1, +d));
+  const pm = T.match(/(?:supply period|billing period|period|from)[^0-9]{0,20}(\d{2})\/(\d{2})\/(20\d\d)\s*(?:to|-|–|until)\s*(\d{2})\/(\d{2})\/(20\d\d)/i);
+  if (pm) {
+    const a = toDate(pm[1], pm[2], pm[3]), z = toDate(pm[4], pm[5], pm[6]);
+    const dd = Math.round((z - a) / 86400000) + 1;
+    if (dd > 0 && dd <= 400) {
+      out.billDays = dd;
+      out.period_from = a.toISOString().slice(0, 10);
+      out.period_to = z.toISOString().slice(0, 10);
+    }
+  }
+  const dts = [...T.matchAll(/(\d{2})\/(\d{2})\/(20\d\d)/g)]
+    .map((x) => new Date(Date.UTC(+x[3], +x[2] - 1, +x[1])))
+    .filter((d) => !Number.isNaN(d.getTime()))
+    .sort((a, b) => a - b);
+  if (out.billDays == null && dts.length >= 2) {
+    const first = dts[0], last = dts[dts.length - 1];
+    const dd = Math.round((last - first) / 86400000) + 1;
+    if (dd >= 25 && dd <= 40) {
+      out.billDays = dd;
+      out.period_from = first.toISOString().slice(0, 10);
+      out.period_to = last.toISOString().slice(0, 10);
+    }
+  }
+
+  if (isGas) {
+    m = T.match(/MPRN[^0-9]{0,10}(\d{6,11})/i);
+    if (m) out.mprn = m[1];
+    const km = T.match(/=\s*([\d,]+\.?\d*)\s*kWh/i);
+    out.consumption_kwh = km ? num(km[1]) : null;
+  } else {
+    // MPAN top line: the two-digit distribution id that decides which DUoS schedule applies.
+    m = T.match(/\b(\d{2}\s?\d{4}\s?\d{4}\s?\d{3})\b/);
+    if (m) out.mpan_prefix = m[1].replace(/\D/g, "").slice(0, 2);
+    else {
+      m = T.match(/MPAN[^0-9]{0,10}(\d[\d ]{10,24}\d)/i);
+      if (m) out.mpan_prefix = m[1].replace(/\D/g, "").slice(-13, -11);
+    }
+    out.rows = parseElecRows(T);
+
+    // Day and night volumes come from their own charge rows where present, which is more
+    // reliable than a loose "day ... kWh" match that can catch a header or a total.
+    const dayRow = out.rows.find((r) => r.key === "day_unit" && r.qtyUnit === "kwh");
+    const nightRow = out.rows.find((r) => r.key === "night_unit" && r.qtyUnit === "kwh");
+    out.day_kwh = dayRow ? dayRow.quantity : null;
+    out.night_kwh = nightRow ? nightRow.quantity : null;
+
+    // Levy kWh: the quantity the per-kWh levies are charged on. Taken from a levy row so
+    // the day+night cross-check compares two genuinely independent numbers.
+    const levy = out.rows.find((r) => ["nuclear_rab", "ncc_eii", "ccl", "ro", "bsuos"].includes(r.key) && r.qtyUnit === "kwh");
+    out.consumption_kwh = levy ? levy.quantity
+      : (out.day_kwh != null && out.night_kwh != null ? round2(out.day_kwh + out.night_kwh) : null);
+
+    if (out.billDays == null) {
+      const dr = out.rows.find((r) => r.qtyUnit === "day");
+      if (dr) out.billDays = dr.quantity;
+    }
+    const am = T.match(/(?:agreed supply capacity|supply capacity|\basc\b)[^0-9]{0,12}([\d,]+\.?\d*)\s*kVA/i);
+    if (am) out.asc_kva = num(am[1]);
+  }
+
+  // Totals. Prefer explicit "total VAT" phrasing: a bare "VAT" usually matches the column
+  // header first and would read the next row's number as the VAT total.
+  const sm = T.match(/sub[- ]?total[^0-9£]{0,12}£?\s?([\d,]+\.\d{2})/i);
+  if (sm) out.subtotal = num(sm[1]);
+  const vm = T.match(/(?:total vat|vat total|vat amount|vat @\s*\d+%)[^0-9£]{0,12}£?\s?([\d,]+\.\d{2})/i);
+  if (vm) out.vat_total = num(vm[1]);
+  const tm = T.match(/(?:period total|invoice total|total amount due|total due|total payable|amount due)[^0-9£]{0,12}£?\s?([\d,]+\.\d{2})/i);
+  if (tm) out.total = num(tm[1]);
+  const vr = T.match(/vat[^0-9]{0,12}(\d{1,2}(?:\.\d+)?)\s*%/i) || T.match(/(\d{1,2}(?:\.\d+)?)\s*%\s*vat/i);
+  out.vat_rate = vr ? num(vr[1]) : 20;
+
+  const fields = ["mpan_prefix", "tariff_year", "billDays", "day_kwh", "night_kwh", "consumption_kwh", "subtotal", "vat_total", "total"];
+  out.found = fields.filter((k) => out[k] != null);
+  out.missing = fields.filter((k) => out[k] == null && !(isGas && ["mpan_prefix", "day_kwh", "night_kwh"].includes(k)));
+  return out;
 }

@@ -766,8 +766,43 @@ function ReconcileModal({ onClose }) {
   const [result, setResult] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pdfName, setPdfName] = useState(null);
+  const [warnings, setWarnings] = useState([]);
 
   useEffect(() => { api.bvReferenceMeta().then((r) => setMeta(r.data)).catch(() => {}); }, []);
+
+  /**
+   * Read the PDF on the server, then drop everything it found into the form and run the
+   * check. The fields stay editable, because a real bill's layout can defeat the parser
+   * and a person should confirm the extraction before relying on any finding.
+   */
+  const onPdf = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) return setErr("That PDF is over 10MB — please upload a smaller file.");
+    setBusy(true); setErr(null); setResult(null); setWarnings([]); setPdfName(file.name);
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).split(",")[1] || "");
+        r.onerror = () => reject(new Error("Could not read the file"));
+        r.readAsDataURL(file);
+      });
+      const { data } = await api.bvReconcilePdf(b64, file.name);
+      const x = data.fields;
+      const v = (n) => (n == null ? "" : n);
+      setF({
+        mpan_prefix: v(x.mpan_prefix), tariff_year: v(x.tariff_year), billDays: v(x.billDays),
+        vat_rate: v(x.vat_rate ?? 20), day_kwh: v(x.day_kwh), night_kwh: v(x.night_kwh),
+        consumption_kwh: v(x.consumption_kwh), subtotal: v(x.subtotal), vat_total: v(x.vat_total), total: v(x.total),
+      });
+      setText(data.text || "");
+      setWarnings(data.warnings || []);
+      setResult(data);
+    } catch (e2) { setErr(e2.message); }
+    setBusy(false);
+  };
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const n = (v) => (v === "" || v == null ? null : Number(v));
 
@@ -793,8 +828,25 @@ function ReconcileModal({ onClose }) {
       footer={<><button className="btn" onClick={onClose}>Close</button>
         <button className="btn primary" disabled={busy} onClick={run}>{busy ? "Checking…" : "Reconcile"}</button></>}>
       {err && <ErrorBanner error={err} />}
+      <label style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", marginBottom: 12,
+        border: "2px dashed var(--line,#CBD5E1)", borderRadius: 10, cursor: busy ? "wait" : "pointer", background: "#F8FAFC" }}>
+        <FileText size={22} style={{ color: "var(--brand,#0E7C7B)" }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5 }}>{busy && pdfName ? `Reading ${pdfName}…` : "Upload a PDF bill"}</div>
+          <div className="sub" style={{ fontSize: 11.5 }}>
+            {pdfName && !busy ? `Loaded ${pdfName} — check the fields below, then Reconcile again if you change anything.`
+              : "Text-based PDFs from the supplier's portal. Scanned or photographed bills can't be read automatically."}
+          </div>
+        </div>
+        <input type="file" accept="application/pdf,.pdf" onChange={onPdf} disabled={busy} style={{ display: "none" }} />
+      </label>
+      {warnings.length > 0 && (
+        <div style={{ padding: "10px 12px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, fontSize: 12, marginBottom: 10, lineHeight: 1.5 }}>
+          {warnings.map((w, i) => <div key={i}>{w}</div>)}
+        </div>
+      )}
       <p className="sub" style={{ fontSize: 12, marginBottom: 10 }}>
-        Paste the charge lines from the bill. Each line should read label, quantity, rate with its unit, then subtotal, VAT and total.
+        Or paste the charge lines from the bill. Each line should read label, quantity, rate with its unit, then subtotal, VAT and total.
         Arithmetic checks run with no reference data; add an MPAN top line and tariff year to also compare against published schedules.
       </p>
       <div className="grid cols-4" style={{ marginBottom: 10 }}>
