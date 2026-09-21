@@ -23,6 +23,7 @@ import Tutorials from "./pages/Tutorials.jsx";
 import Settings from "./pages/Settings.jsx";
 import Commission from "./pages/Commission.jsx";
 import BillValidation from "./pages/BillValidation.jsx";
+import WaterValidation from "./pages/WaterValidation.jsx";
 import EiiCertificates from "./pages/EiiCertificates.jsx";
 import RegoCertificates from "./pages/RegoCertificates.jsx";
 import LocalEnergy from "./pages/LocalEnergy.jsx";
@@ -84,6 +85,7 @@ export default function App() {
               <Route path="settings" element={<Settings />} />
               <Route path="commission" element={<Commission />} />
               <Route path="bill-validation" element={<BillValidation />} />
+              <Route path="water-validation" element={<WaterValidation />} />
               <Route path="eii-certificates" element={<EiiCertificates />} />
               <Route path="rego-certificates" element={<RegoCertificates />} />
               <Route path="local-energy" element={<LocalEnergy />} />

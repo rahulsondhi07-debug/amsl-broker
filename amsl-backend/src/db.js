@@ -814,6 +814,60 @@ export function migrate() {
       sort_order  INTEGER NOT NULL DEFAULT 0
     );
 
+    -- Water bill verification and claim-back. Water bills go wrong in different places from
+    -- energy bills: volume billed against actual reads, the share of water assumed to go to
+    -- sewer, surface water drainage charged on sites that do not drain to the public sewer,
+    -- and trade effluent strengths. Findings are split into CONFIRMED (provable from the
+    -- bill and actual reads) and POTENTIAL (needs evidence such as a drainage survey or
+    -- sub-meter data) so an unproven assumption is never presented as money owed.
+    CREATE TABLE IF NOT EXISTS water_validations (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      ref                  TEXT,
+      business_id          INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+      business_name        TEXT,
+      retailer             TEXT,
+      wholesaler           TEXT,
+      spid                 TEXT,           -- supply point id
+      period               TEXT,
+      days                 INTEGER,
+      bill_read_type       TEXT,           -- Actual | Estimated (how the bill was read)
+      read_start           REAL,           -- actual meter readings obtained as evidence, m3
+      read_end             REAL,
+      billed_m3            REAL,
+      water_rate_billed    REAL,           -- GBP per m3
+      water_rate_expected  REAL,
+      water_standing_billed   REAL,        -- GBP per day
+      water_standing_expected REAL,
+      sewer_rate_billed    REAL,           -- GBP per m3
+      sewer_rate_expected  REAL,
+      sewer_standing_billed   REAL,
+      sewer_standing_expected REAL,
+      rts_billed_pct       REAL,           -- share of water charged as returned to sewer
+      rts_actual_pct       REAL,           -- share actually returned, from evidence
+      rts_evidence         TEXT,
+      swd_charged          REAL,           -- surface water drainage charged this period, GBP
+      swd_drainage         TEXT,           -- Full | Partial | None | Unknown
+      swd_connected_pct    REAL,           -- for Partial: share of site area draining to sewer
+      swd_correct_charge   REAL,           -- correct charge if the site is in the wrong band
+      te_volume_m3         REAL,           -- trade effluent (Mogden)
+      te_ot REAL, te_st REAL, te_os REAL, te_ss REAL,
+      te_r REAL, te_v REAL, te_b REAL, te_s REAL,
+      te_charged           REAL,
+      net_total            REAL,
+      vat_charged          REAL,
+      vat_rate_expected    REAL,
+      backdate_years       REAL,
+      findings             TEXT,
+      confirmed_claim      REAL NOT NULL DEFAULT 0,
+      potential_claim      REAL NOT NULL DEFAULT 0,
+      status               TEXT NOT NULL DEFAULT 'Draft', -- Draft | Evidence Gathering | Submitted | Agreed | Refunded | Rejected
+      submitted_on         TEXT,
+      agreed_amount        REAL,
+      refunded_amount      REAL,
+      notes                TEXT,
+      created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS flex_curve (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       basket_id     INTEGER NOT NULL REFERENCES flex_baskets(id) ON DELETE CASCADE,
@@ -1428,6 +1482,7 @@ export const MENU_CATALOG = [
   { key: "/master", label: "Master Management" },
   { key: "/tickets", label: "Tickets" }, { key: "/permissions", label: "Permissions" },
   { key: "/commission", label: "Commission" }, { key: "/bill-validation", label: "Bill Validation" },
+  { key: "/water-validation", label: "Water Validation" },
   { key: "/eii-certificates", label: "EII Certificates" },
   { key: "/rego-certificates", label: "REGO Certificates" },
   { key: "/local-energy", label: "Local Energy Marketplace" },
@@ -1456,7 +1511,7 @@ export const FEATURE_CATALOG = [
 export const PERMISSION_GROUPS = [
   {
     name: "Compliance",
-    keys: ["/bill-validation", "/eii-certificates", "/rego-certificates", "/local-energy",
+    keys: ["/bill-validation", "/water-validation", "/eii-certificates", "/rego-certificates", "/local-energy",
            "/vpp", "/carbon", "/network-charges"],
   },
   { name: "Flexible Purchasing", keys: ["feature:flex-purchasing", "/flex-position", "/fixed-vs-flex"] },
