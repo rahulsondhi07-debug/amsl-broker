@@ -124,12 +124,15 @@ function AddProduct({ product, onClose, onSaved }) {
   const [f, setF] = useState(product ? {
     name: product.name || "", supplier_id: product.supplier_id || "", segment: product.segment || "SME", utility: product.utility || "NHH",
     standing_charge_type: product.standing_charge_type || "Pence", fuel_mix: product.fuel_mix || "Green",
+    carbon_offset_available: product.carbon_offset_available ? "1" : "0",
+    carbon_offset_premium: product.carbon_offset_premium ?? "", carbon_offset_standard: product.carbon_offset_standard || "",
     max_commission: product.max_commission ?? "", commission_increment: product.commission_increment ?? "", commission_banded: product.commission_banded || "No", standing_charge: product.standing_charge || "No",
     payment_method: product.payment_method || "Cash/Cheque/Bacs", payment_mode: product.payment_mode || "Upfront Recon yearly", initial: product.initial || "", final: product.final || "", dd_discount: product.dd_discount ?? "",
     valid_from: product.valid_from || "", valid_till: product.valid_till || "", price_book_status: product.price_book_status || "Pending", acq_renewal: product.acq_renewal || "Acquisition",
     min_start_days: product.min_start_days ?? "", min_start_date: product.min_start_date ?? "", max_start_date: product.max_start_date ?? "", status: product.status || "Active",
   } : {
     name: "", supplier_id: "", segment: "SME", utility: "NHH", standing_charge_type: "Pence", fuel_mix: "Green",
+    carbon_offset_available: "0", carbon_offset_premium: "", carbon_offset_standard: "Verra VCS",
     max_commission: "", commission_increment: "", commission_banded: "No", standing_charge: "No",
     payment_method: "Cash/Cheque/Bacs", payment_mode: "Upfront Recon yearly", initial: "", final: "", dd_discount: "",
     valid_from: "", valid_till: "", price_book_status: "Pending", acq_renewal: "Acquisition",
@@ -138,7 +141,7 @@ function AddProduct({ product, onClose, onSaved }) {
   const [err, setErr] = useState(null); const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   useEffect(() => { api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {}); }, []);
-  const nums = ["max_commission", "commission_increment", "dd_discount", "min_start_days", "min_start_date", "max_start_date"];
+  const nums = ["max_commission", "commission_increment", "dd_discount", "min_start_days", "min_start_date", "max_start_date", "carbon_offset_available", "carbon_offset_premium"];
   const save = async () => {
     if (!f.name.trim()) return setErr("Product Name is required");
     if (!f.supplier_id) return setErr("Current Supplier is required");
@@ -160,6 +163,22 @@ function AddProduct({ product, onClose, onSaved }) {
         <Field label="Corporate / SME *"><select value={f.segment} onChange={set("segment")}>{SEGMENT.map((s) => <option key={s}>{s}</option>)}</select></Field>
         <Field label="Utility *"><select value={f.utility} onChange={set("utility")}>{UTILITY.map((s) => <option key={s}>{s}</option>)}</select></Field>
         <Field label="Fuel Mix"><select value={f.fuel_mix} onChange={set("fuel_mix")}>{FUEL_MIX.map((s) => <option key={s}>{s}</option>)}</select></Field>
+        <Field label="Carbon Offset Premium Offered">
+          <select value={f.carbon_offset_available} onChange={set("carbon_offset_available")}>
+            <option value="0">No</option><option value="1">Yes</option>
+          </select>
+        </Field>
+        {f.carbon_offset_available === "1" && (
+          <Field label="Offset Premium (p/kWh)"><input type="number" step="0.001" value={f.carbon_offset_premium} onChange={set("carbon_offset_premium")} /></Field>
+        )}
+        {f.carbon_offset_available === "1" && (
+          <Field label="Carbon Standard">
+            <select value={f.carbon_offset_standard} onChange={set("carbon_offset_standard")}>
+              <option>Verra VCS</option><option>Gold Standard</option><option>Woodland Carbon Code</option>
+              <option>Peatland Code</option><option>American Carbon Registry</option><option>Other</option>
+            </select>
+          </Field>
+        )}
         <Field label="Standing Charge Type"><select value={f.standing_charge_type} onChange={set("standing_charge_type")}>{SC_TYPE.map((s) => <option key={s}>{s}</option>)}</select></Field>
       </Section>
       <Section title="Commission">

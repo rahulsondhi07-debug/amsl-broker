@@ -87,7 +87,8 @@ export const products = (() => {
     columns: ["name", "supplier_id", "utility", "segment", "acq_renewal", "valid_from", "valid_till", "status",
               "standing_charge_type", "fuel_mix", "max_commission", "commission_increment", "commission_banded",
               "standing_charge", "payment_method", "payment_mode", "initial", "final", "dd_discount",
-              "price_book_status", "min_start_days", "min_start_date", "max_start_date", "product_type"],
+              "price_book_status", "min_start_days", "min_start_date", "max_start_date", "product_type",
+              "carbon_offset_available", "carbon_offset_premium", "carbon_offset_standard"],
     searchColumns: ["name"],
     listSql: `SELECT p.*, s.name AS supplier_name
               FROM products p LEFT JOIN suppliers s ON s.id = p.supplier_id`,
@@ -272,7 +273,8 @@ export const quotes = crudRouter({
   columns: ["quote_no","business_id","business_name","agent_id","utility","meter_number","eac","start_date",
             "supplier_id","term_months","unit_rate","standing_charge","annual_cost","commission","status",
             "bespoke","meter_point","meter_details","distribution_charge","transmission_charge","product_name",
-            "acq_renewal","business_type","topline","uplift"],
+            "acq_renewal","business_type","topline","uplift",
+            "carbon_offset","carbon_offset_premium","carbon_offset_standard"],
   searchColumns: ["quote_no","business_name","meter_number"],
   listSql: `SELECT q.*, a.name AS broker, s.name AS supplier_name
             FROM quotes q LEFT JOIN agents a ON a.id = q.agent_id

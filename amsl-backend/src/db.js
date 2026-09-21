@@ -355,6 +355,17 @@ export function migrate() {
   addCol("ALTER TABLE meters ADD COLUMN topline             TEXT");
   addCol("ALTER TABLE quotes ADD COLUMN topline             TEXT");
   addCol("ALTER TABLE quotes ADD COLUMN uplift              REAL");
+  // Carbon Offset Premium. A supplier offers it per product at a p/kWh premium, with
+  // credits sourced from a named standard (e.g. Verra VCS). When a customer opts in,
+  // quoted prices are INCLUSIVE of the premium, so the quote records both the flag and
+  // the premium applied — otherwise an offset quote cannot be told apart from a plain
+  // one after the fact.
+  addCol("ALTER TABLE products ADD COLUMN carbon_offset_available  INTEGER NOT NULL DEFAULT 0");
+  addCol("ALTER TABLE products ADD COLUMN carbon_offset_premium    REAL");     // p/kWh
+  addCol("ALTER TABLE products ADD COLUMN carbon_offset_standard   TEXT");     // e.g. Verra VCS
+  addCol("ALTER TABLE quotes ADD COLUMN carbon_offset              INTEGER NOT NULL DEFAULT 0");
+  addCol("ALTER TABLE quotes ADD COLUMN carbon_offset_premium      REAL");
+  addCol("ALTER TABLE quotes ADD COLUMN carbon_offset_standard     TEXT");
 
   // V1.7-11: Quote Price History — retains every price a quote has ever shown, so a
   // superseded price can be flagged Invalid rather than silently disappearing, and the

@@ -43,7 +43,7 @@ const first2Digits = (v) => {
  * a dist_id/profile AND the caller supplied an MPAN/topline that disagrees with it — rows
  * without that data (e.g. older manually-entered rows) are never filtered out by this.
  */
-export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct }) {
+export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct, carbon_offset }) {
   const u = String(utility || "").toUpperCase().startsWith("G") ? "GAS" : "ELECTRICITY";
   const kwh = Number(eac) || 0;
   const requested = Math.max(0, Number(uplift) || 0);
@@ -67,7 +67,8 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
   // window is set, today falls inside it. Pending/unreleased price books are filtered
   // out here, before pricing — they never reach the ranked offer list.
   const productSql = `
-    SELECT p.id, p.supplier_id, p.utility, p.acq_renewal, p.fuel_mix, p.payment_method, s.name AS supplier_name,
+    SELECT p.id, p.supplier_id, p.utility, p.acq_renewal, p.fuel_mix, p.payment_method,
+           p.carbon_offset_available, p.carbon_offset_premium, p.carbon_offset_standard, s.name AS supplier_name,
            s.max_broker_comm_electric AS cap_e, s.max_broker_comm_gas AS cap_g
     FROM products p JOIN suppliers s ON s.id = p.supplier_id
     WHERE COALESCE(p.price_book_status, p.status) = 'Released'
@@ -100,11 +101,17 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
         return rate != null && row.standing_charge != null;
       });
 
+      // Carbon offset: when requested, only products that actually offer it qualify, and
+      // the premium is added to every rate period so prices are shown INCLUSIVE of it.
+      const wantsOffset = carbon_offset === true || carbon_offset === "true" || carbon_offset === 1 || carbon_offset === "1";
+      if (wantsOffset && !p.carbon_offset_available) continue;
+      const offsetPremium = wantsOffset ? (Number(p.carbon_offset_premium) || 0) : 0;
+
       for (const row of rows) {
         const baseRate = row.day_rate ?? row.unit_rate;
         const cap = capFor(u === "GAS" ? p.cap_g : p.cap_e);
         const appliedUplift = Math.min(requested, cap);
-        const customerUnit = round2(baseRate + appliedUplift);
+        const customerUnit = round2(baseRate + appliedUplift + offsetPremium);
         const termMonths = row.term_months || term || 12;
         const years = termMonths / 12;
 
@@ -119,8 +126,8 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
         const eveShare = eveBase != null ? Math.min(Math.max(eveWkndPct ?? 0, 0), 100) / 100 : 0;
         const dayShare = Math.max(0, 1 - nightShare - eveShare);
 
-        const nightUnit = nightBase != null ? round2(nightBase + appliedUplift) : null;
-        const eveUnit = eveBase != null ? round2(eveBase + appliedUplift) : null;
+        const nightUnit = nightBase != null ? round2(nightBase + appliedUplift + offsetPremium) : null;
+        const eveUnit = eveBase != null ? round2(eveBase + appliedUplift + offsetPremium) : null;
         const energyCost = (customerUnit * kwh * dayShare)
           + (nightUnit != null ? nightUnit * kwh * nightShare : 0)
           + (eveUnit != null ? eveUnit * kwh * eveShare : 0);
@@ -136,6 +143,11 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
           base_unit_rate: baseRate,
           uplift: round2(appliedUplift),
           unit_rate: customerUnit,
+          carbon_offset: wantsOffset,
+          carbon_offset_premium: wantsOffset ? offsetPremium : null,
+          carbon_offset_standard: wantsOffset ? (p.carbon_offset_standard || null) : null,
+          // Offer this so the form can say how many offers exist either way.
+          carbon_offset_available: !!p.carbon_offset_available,
           night_rate: nightUnit,
           eve_wknd_rate: eveUnit,
           // true when this offer was actually costed across more than one rate period
@@ -177,10 +189,10 @@ export function compare({ utility, eac, term, uplift = 1.0, current_supplier_id,
 
 // POST /api/comparison  { utility, eac, term?, uplift?, current_supplier_id?, meter_number?, topline? }
 r.post("/", (req, res) => {
-  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct } = req.body || {};
+  const { utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct, carbon_offset } = req.body || {};
   if (!utility) return res.status(400).json({ error: "utility is required" });
   if (!eac || Number(eac) <= 0) return res.status(400).json({ error: "eac (annual consumption) is required" });
-  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct }) });
+  res.json({ data: compare({ utility, eac, term, uplift, current_supplier_id, meter_number, topline, night_pct, eve_wknd_pct, carbon_offset }) });
 });
 
 // GET /api/comparison/tariffs?utility=ELECTRICITY  — inspect the raw tariff book

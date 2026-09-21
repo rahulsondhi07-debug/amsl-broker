@@ -30,6 +30,8 @@ export default function NewQuote() {
   const [fuelFilter, setFuelFilter] = useState("");      // "" | Green | Brown | Mix
   const [paymentFilter, setPaymentFilter] = useState(""); // "" or one of PAY_METHODS
   const [nightPct, setNightPct] = useState("");           // % of consumption on the night rate
+  // Carbon Offset Premium — opt-in per quote. Prices come back inclusive of the premium.
+  const [carbonOffset, setCarbonOffset] = useState(false);
   const [flexCfg, setFlexCfg] = useState({});
   // Flexible purchasing is permissioned per agency/agent, so the route is hidden entirely
   // for anyone without it rather than shown and then refused on submit.
@@ -189,6 +191,7 @@ export default function NewQuote() {
         meter_number: form.meter_number || undefined,
         topline: form.topline || undefined,
         night_pct: nightPct === "" ? undefined : Number(nightPct),
+        carbon_offset: carbonOffset,
       });
       setResult(data);
     } catch (e) { setErr(e.message); }
@@ -209,6 +212,9 @@ export default function NewQuote() {
         unit_rate: o.unit_rate, standing_charge: o.standing_charge,
         annual_cost: o.annual_cost, commission: o.total_commission,
         uplift: o.uplift,
+        carbon_offset: o.carbon_offset ? 1 : 0,
+        carbon_offset_premium: o.carbon_offset_premium ?? null,
+        carbon_offset_standard: o.carbon_offset_standard ?? null,
         status: "Quoted",
       });
       setSaved({ quote_no: q.data.quote_no, supplier: o.supplier });
@@ -377,6 +383,24 @@ export default function NewQuote() {
           </div>
         )}
         <div style={{ marginTop: 16 }}>
+          {mode === "market" && (
+            <label style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "12px 14px", marginBottom: 12,
+              border: `1px solid ${carbonOffset ? "#a7f3d0" : "var(--line,#E7EBF0)"}`, background: carbonOffset ? "#ecfdf5" : "transparent",
+              borderRadius: 10, cursor: "pointer" }}>
+              <input type="checkbox" checked={carbonOffset} onChange={(e) => setCarbonOffset(e.target.checked)}
+                style={{ width: 17, height: 17, marginTop: 2, accentColor: "var(--brand,#0E7C7B)" }} />
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13.5 }}>
+                  Carbon Offset Premium {form.utility === "Gas" ? "Gas" : "Electricity"}?
+                </div>
+                <div className="sub" style={{ fontSize: 12, lineHeight: 1.5, marginTop: 2 }}>
+                  Tick this box to offset your carbon emissions through certified projects.
+                  {form.utility === "Gas" && " Carbon credits are sourced from projects and programmes registered with Verra's Verified Carbon Standard Program."}
+                  {" "}Prices are inclusive of Carbon Offset Premium.
+                </div>
+              </div>
+            </label>
+          )}
           {mode === "bespoke" ? (
             <button className="btn primary" onClick={saveBespoke} disabled={saving === "bespoke"}>
               <Search size={15} /> {saving === "bespoke" ? "Saving…" : "Save Bespoke Quote"}
@@ -477,6 +501,11 @@ export default function NewQuote() {
                         <td style={{ fontSize: 12 }}>{o.payment_method || <span className="sub">—</span>}</td>
                         <td className="mono">
                           {o.unit_rate}p
+                          {o.carbon_offset && (
+                            <div style={{ fontSize: 10.5, color: "#0E7C7B", fontWeight: 600 }}>
+                              incl. {o.carbon_offset_premium}p offset{o.carbon_offset_standard ? ` · ${o.carbon_offset_standard}` : ""}
+                            </div>
+                          )}
                           {o.dual_rate && o.night_rate != null && (
                             <div className="sub" style={{ fontSize: 10.5 }}>night {o.night_rate}p · {o.night_split_pct}%</div>
                           )}
