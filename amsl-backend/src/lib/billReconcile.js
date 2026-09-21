@@ -171,90 +171,52 @@ function expectedSubtotal(row, bill) {
 
 /**
  * Arithmetic reconciliation — no reference data required.
- * Finds supplier arithmetic errors such as a line with a subtotal but zero VAT.
+ * Built on arithmeticFindings(), the same rules the saved validation uses, so the
+ * Reconcile tool and the booked claim can never disagree.
  */
 export function reconcile(bill) {
   const rows = bill.rows || [];
-  const vatRate = (bill.vat_rate ?? 20) / 100;
-  const findings = [];
-  const TOL = 0.02;   // rounding tolerance in pounds
-
-  const checked = rows.map((row) => {
-    const exp = expectedSubtotal(row, bill);
-    const diff = exp == null || row.subtotal == null ? null : Math.abs(exp - row.subtotal);
-    const subOk = diff == null ? null : diff <= TOL;
-    if (subOk === false) {
-      // HH bills are built from ~1,500 half-hourly amounts each rounded to the penny, so a
-      // few pence of drift on a large line is expected. That is noted as rounding, not
-      // asserted as a defect — mixing trivial rounding into a claim beside a genuine error
-      // (like a zero-VAT line) weakens the credible finding.
-      const rounding = diff <= Math.max(0.10, Math.abs(row.subtotal) * 0.0005);
-      findings.push({
-        severity: rounding ? "amber" : "red",
-        type: rounding ? "rounding difference" : "rate-quantity mismatch",
-        line: row.label,
-        detail: rounding
-          ? `Printed £${row.subtotal} vs £${exp} from ${row.quantity} × ${row.rate}${row.rateUnit} — a ${round2(diff * 100)}p difference, consistent with half-hourly rounding.`
-          : `Printed subtotal £${row.subtotal} but ${row.quantity ?? "?"} × ${row.rate}${row.rateUnit} works out at £${exp}.`,
-        impact: rounding ? null : round2((row.subtotal ?? 0) - exp),
-      });
-    }
-    // VAT is checked per line: a subtotal with no VAT is the classic defect.
-    let vatOk = null;
-    if (row.subtotal != null && row.vat != null) {
-      const expVat = round2(row.subtotal * vatRate);
-      vatOk = Math.abs(expVat - row.vat) <= TOL;
-      if (!vatOk) {
-        findings.push({
-          severity: "red", type: "VAT on line wrong", line: row.label,
-          detail: `£${row.subtotal} at ${bill.vat_rate ?? 20}% should carry £${expVat} VAT, but £${row.vat} was charged.`,
-          impact: round2(row.vat - expVat),
-        });
-      }
-    }
-    return { ...row, expected_subtotal: exp, subtotal_ok: subOk, vat_ok: vatOk };
+  const base = arithmeticFindings({
+    rows, days: bill.billDays, vat_rate: bill.vat_rate ?? 20,
+    subtotal: bill.subtotal, vat_total: bill.vat_total, total: bill.total,
+  });
+  const findings = base.map((f) => {
+    const isSubtotal = /subtotal$/.test(f.field);
+    // An overcharge is claimable; an undercharged line is worth noting but not claiming.
+    // VAT and totals errors are genuine supplier defects even though they carry no claim.
+    const severity = isSubtotal ? (f.amount > 0 ? "red" : "amber") : "red";
+    return {
+      severity,
+      type: isSubtotal ? (f.amount > 0 ? "overcharge" : "undercharge") : (/VAT/.test(f.field) ? "VAT error" : "totals error"),
+      line: f.field === "stated VAT" ? "Stated VAT" : f.field === "invoice total" ? "Invoice total"
+        : f.field.replace(/ (subtotal|VAT)$/, ""),
+      detail: f.detail,
+      impact: f.amount,
+    };
   });
 
-  /* ---- Totals block ---- */
-  const sum = (f) => round2(rows.reduce((a, r) => a + (f(r) ?? 0), 0));
-  const sumSub = sum((r) => r.subtotal), sumVat = sum((r) => r.vat);
-  if (bill.subtotal != null && Math.abs(sumSub - bill.subtotal) > TOL) {
-    findings.push({ severity: "red", type: "totals do not sum", line: "Subtotal",
-      detail: `Lines add to £${sumSub} but the bill states £${bill.subtotal}.`, impact: round2(bill.subtotal - sumSub) });
-  }
-  if (bill.vat_total != null && Math.abs(sumVat - bill.vat_total) > TOL) {
-    findings.push({ severity: "red", type: "totals do not sum", line: "VAT",
-      detail: `Line VAT adds to £${sumVat} but the bill states £${bill.vat_total}.`, impact: round2(bill.vat_total - sumVat) });
-  }
-  if (bill.subtotal != null && bill.vat_total != null && bill.total != null) {
-    const t = round2(bill.subtotal + bill.vat_total);
-    if (Math.abs(t - bill.total) > TOL) {
-      findings.push({ severity: "red", type: "totals do not sum", line: "Total",
-        detail: `Subtotal plus VAT is £${t} but the bill states £${bill.total}.`, impact: round2(bill.total - t) });
-    }
-  }
-  /* ---- Period and volume cross-checks ---- */
+  /* ---- Cross-checks that need no claim amount ---- */
   if (bill.period_from && bill.period_to && bill.billDays != null) {
-    const d = Math.round((new Date(bill.period_to) - new Date(bill.period_from)) / 86400000);
+    const d = Math.round((new Date(bill.period_to) - new Date(bill.period_from)) / 86400000) + 1;
     if (Number.isFinite(d) && Math.abs(d - bill.billDays) > 1) {
       findings.push({ severity: "amber", type: "days do not match period", line: "Billing period",
-        detail: `Billed ${bill.billDays} days but the period ${bill.period_from} to ${bill.period_to} is ${d} days.` });
+        detail: `Billed ${bill.billDays} days but the period ${bill.period_from} to ${bill.period_to} is ${d} days.`, impact: 0 });
     }
   }
   if (bill.day_kwh != null && bill.night_kwh != null && bill.consumption_kwh != null) {
     const dn = round2(bill.day_kwh + bill.night_kwh);
     if (Math.abs(dn - bill.consumption_kwh) > 1) {
       findings.push({ severity: "amber", type: "levy kWh does not match day + night", line: "Consumption",
-        detail: `Day plus night is ${dn} kWh but levies are charged on ${bill.consumption_kwh} kWh.` });
+        detail: `Day plus night is ${dn} kWh but levies are charged on ${bill.consumption_kwh} kWh.`, impact: 0 });
     }
   }
 
-  const reds = findings.filter((f) => f.severity === "red");
+  const checkedRows = rows.map((row) => ({ ...row, expected_subtotal: expectedSubtotal(row, bill) }));
   return {
-    rows: checked, findings,
-    verdict: reds.length ? "red" : findings.length ? "amber" : "green",
-    // Only arithmetic defects carry a defensible cash figure; amber items need review.
-    total_impact: round2(reds.reduce((a, f) => a + (f.impact ?? 0), 0)),
+    rows: checkedRows, findings,
+    verdict: findings.some((f) => f.severity === "red") ? "red" : findings.length ? "amber" : "green",
+    // Only overcharges carry money; every amount is already floored at zero.
+    total_impact: round2(findings.reduce((a, f) => a + (f.impact || 0), 0)),
   };
 }
 
@@ -355,7 +317,10 @@ export function extractBillFields(raw) {
   } else {
     // MPAN top line: the two-digit distribution id that decides which DUoS schedule applies.
     m = T.match(/\b(\d{2}\s?\d{4}\s?\d{4}\s?\d{3})\b/);
-    if (m) out.mpan_prefix = m[1].replace(/\D/g, "").slice(0, 2);
+    // Keep the full 13-digit core as well as the 2-digit distribution id. The id picks the
+    // DUoS schedule; the full number is what goes in the meter field, which the validator
+    // format-checks as 13 digits — the prefix alone would raise a false Meter Data finding.
+    if (m) { out.mpan = m[1].replace(/\D/g, ""); out.mpan_prefix = out.mpan.slice(0, 2); }
     else {
       m = T.match(/MPAN[^0-9]{0,10}(\d[\d ]{10,24}\d)/i);
       if (m) out.mpan_prefix = m[1].replace(/\D/g, "").slice(-13, -11);
@@ -398,4 +363,106 @@ export function extractBillFields(raw) {
   out.found = fields.filter((k) => out[k] != null);
   out.missing = fields.filter((k) => out[k] == null && !(isGas && ["mpan_prefix", "day_kwh", "night_kwh"].includes(k)));
   return out;
+}
+
+/**
+ * Arithmetic findings in the Phase 2 shape, shared by validateBill (the saved validation
+ * and its claim) and the Reconcile tool — one set of rules, so the two can never disagree.
+ *
+ * Claim rules, deliberately asymmetric:
+ *   - A line subtotal ABOVE qty × rate is an overcharge: amount = charged − expected, and
+ *     it counts toward the claim.
+ *   - A subtotal BELOW qty × rate is not claimable — the customer was not overcharged.
+ *   - VAT and totals mismatches are supplier errors: surfaced at £0 so they appear on the
+ *     report without inflating the claim. (A zero-VAT line is an UNDER-charge of VAT; it
+ *     must never show up as money owed to the customer.)
+ * Tolerance on a line subtotal is max(2p, 0.5%) — wide enough to absorb half-hourly
+ * rounding on large lines, tight enough to catch a genuine rate or quantity error.
+ */
+export function arithmeticFindings({ rows = [], days, vat_rate, subtotal, vat_total, total }) {
+  const findings = [];
+  const d = Number(days) || 0;
+  const lineVat = Number.isFinite(Number(vat_rate)) && vat_rate !== null && vat_rate !== "" ? Number(vat_rate) : 20;
+  const fmt = (n) => Number(n).toFixed(2);
+
+  for (const raw of Array.isArray(rows) ? rows : []) {
+    if (!raw || typeof raw !== "object") continue;
+    const unit = String(raw.rateUnit || "").toLowerCase();
+    const rate = raw.rate, qty = raw.quantity, sub = raw.subtotal, vat = raw.vat;
+    const label = raw.label || raw.key || "line";
+
+    let expSub = null;
+    if (unit === "p/kwh" || unit === "p/kvarh") expSub = qty != null && rate != null ? (qty * rate) / 100 : null;
+    else if (unit === "p/day" || unit === "p/site/day") expSub = rate != null ? ((qty ?? d) * rate) / 100 : null;
+    else if (unit === "p/kva/day") expSub = qty != null && rate != null ? (qty * rate * d) / 100 : null;
+
+    if (expSub != null && sub != null && Math.abs(expSub - sub) > Math.max(0.02, Math.abs(expSub) * 0.005)) {
+      findings.push({
+        check: "Arithmetic", field: `${label} subtotal`, key: raw.key || null,
+        detail: `${label}: subtotal £${fmt(sub)} but qty × rate = £${fmt(expSub)}`,
+        amount: Math.max(0, round2(sub - expSub)),
+      });
+    }
+    if (sub != null && vat != null) {
+      const expVat = (sub * lineVat) / 100;
+      if (Math.abs(expVat - vat) > 0.02) {
+        findings.push({
+          check: "Arithmetic", field: `${label} VAT`, key: raw.key || null,
+          detail: `${label}: VAT £${fmt(vat)} but ${lineVat}% of £${fmt(sub)} = £${fmt(expVat)} (supplier error)`,
+          amount: 0,
+        });
+      }
+    }
+  }
+
+  // Bill-level checks. Stated VAT is tested against the VAT rate applied to the stated
+  // subtotal — independent of the line VATs, so a zero-VAT line that makes the lines add
+  // up to the stated total is still caught here.
+  if (subtotal != null && vat_total != null && Math.abs(vat_total - (subtotal * lineVat) / 100) > 0.02) {
+    findings.push({
+      check: "Arithmetic", field: "stated VAT",
+      detail: `Stated VAT £${fmt(vat_total)} ≠ ${lineVat}% of subtotal £${fmt(subtotal)}`,
+      amount: 0,
+    });
+  }
+  if (subtotal != null && vat_total != null && total != null && Math.abs(subtotal + vat_total - total) > 0.05) {
+    findings.push({
+      check: "Arithmetic", field: "invoice total",
+      detail: `Subtotal + VAT £${fmt(subtotal + vat_total)} ≠ stated total £${fmt(total)}`,
+      amount: 0,
+    });
+  }
+  return findings;
+}
+
+/**
+ * Capacity trio for half-hourly sites. Only an overcharge is claimable, and only above a
+ * 50p floor so rounding on the day count never becomes a finding.
+ *   Capacity = ASC kVA × p/kVA/day × days ÷ 100
+ *   Excess   = excess kVA × p/kVA/day × days ÷ 100
+ *   Reactive = kVArh × p/kVArh ÷ 100
+ */
+export function capacityFindings(b, days) {
+  const findings = [];
+  const d = Number(days) || 0;
+  const n = (v) => Number(v) || 0;
+  const spec = [
+    ["capacity", "Capacity", "asc_kva", "capacity_rate", "capacity_charged", "ASC kVA × p/kVA/day × days"],
+    ["excess", "Excess capacity", "excess_kva", "excess_rate", "excess_charged", "excess kVA × p/kVA/day × days"],
+    ["reactive", "Reactive power", "reactive_kvarh", "reactive_rate", "reactive_charged", "kVArh × p/kVArh"],
+  ];
+  for (const [kind, label, qk, rk, ck, note] of spec) {
+    const qty = n(b[qk]), rate = n(b[rk]), charged = n(b[ck]);
+    if (!(charged > 0 && qty > 0 && rate > 0)) continue;
+    const expected = kind === "reactive" ? round2((qty * rate) / 100) : round2((qty * rate * d) / 100);
+    const over = Math.max(0, round2(charged - expected));
+    if (over > 0.5) {
+      findings.push({
+        check: label, field: `${kind}_charge`,
+        detail: `${label}: expected £${expected.toFixed(2)} (${note}) vs charged £${charged.toFixed(2)}`,
+        amount: over,
+      });
+    }
+  }
+  return findings;
 }

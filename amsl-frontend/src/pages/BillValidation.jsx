@@ -5,7 +5,8 @@ import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/u
 
 const money = (n) => (n == null ? "—" : "£" + Number(n).toLocaleString("en-GB", { minimumFractionDigits: 2 }));
 const stTone = (s) => (/claim/i.test(s || "") ? "indigo" : /discrep/i.test(s || "") ? "rose" : /pass/i.test(s || "") ? "green" : "slate");
-const checkTone = (c) => ({ Rate: "amber", Meter: "amber", VAT: "indigo", TNUoS: "indigo", DUoS: "indigo", NCC: "green", CCL: "indigo", EII: "green", Volume: "rose", Duplicate: "rose", "Meter Data": "rose" }[c] || "slate");
+const checkTone = (c) => ({ Rate: "amber", Meter: "amber", VAT: "indigo", TNUoS: "indigo", DUoS: "indigo", NCC: "green", CCL: "indigo", EII: "green", Volume: "rose", Duplicate: "rose", "Meter Data": "rose",
+  Capacity: "amber", "Excess capacity": "amber", "Reactive power": "amber", Arithmetic: "rose" }[c] || "slate");
 
 const emptyForm = {
   contract_id: "", business_name: "", supplier_name: "", utility: "ELECTRICITY", meter_mpan_mpr: "",
@@ -19,6 +20,11 @@ const emptyForm = {
   eac: "", tolerance_pct: 20, notes: "",
   client_name: "", client_address: "", client_company_reg: "",
   business_activity: "", sic_code: "",
+  // Capacity trio (HH sites) and the parsed bill lines for arithmetic reconciliation.
+  asc_kva: "", capacity_rate: "", capacity_charged: "",
+  excess_kva: "", excess_rate: "", excess_charged: "",
+  reactive_kvarh: "", reactive_rate: "", reactive_charged: "",
+  rows_json: "",
 };
 
 export default function BillValidation() {
@@ -108,6 +114,82 @@ export default function BillValidation() {
       ...f, business_activity: activityName,
       eii_eligible: scheme === "EII" || scheme === "BOTH" ? true : f.eii_eligible,
     }));
+  };
+
+  /**
+   * Prefill the form from a PDF bill. Mapping follows the Phase 2 handoff with two
+   * deliberate corrections:
+   *  - The "Published TNUoS/DUoS rate" fields take the PUBLISHED schedule rate, not the
+   *    rate printed on the bill. Comparing a bill with its own rate can never find an
+   *    overcharge, so the handoff's mapping would have silently disabled that check.
+   *    Where there is no firm published rate the field is left for a person to fill.
+   *  - The meter field takes the full 13-digit MPAN, not the 2-digit prefix, which would
+   *    fail the validator's format check and raise a false Meter Data finding.
+   * Contracted rates are never prefilled: they come from the contract/LOA and are the
+   * basis of the comparison.
+   */
+  const [prefill, setPrefill] = useState(null);   // { busy, name, msg, warnings, filled }
+  const prefillFromPdf = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) return setPrefill({ msg: "That PDF is over 10MB." });
+    setPrefill({ busy: true, name: file.name });
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).split(",")[1] || "");
+        r.onerror = () => reject(new Error("Could not read the file"));
+        r.readAsDataURL(file);
+      });
+      const { data } = await api.bvReconcilePdf(b64, file.name);
+      const x = data.fields;
+      const rows = x.rows || [];
+      const row = (k) => rows.find((r) => r.key === k) || {};
+      const ref = (k) => (data.reference || []).find((c) => c.key === k);
+      // Only a firm, non-zero published rate is usable as the comparison basis.
+      const firm = (k) => { const c = ref(k); return c && c.reference && !c.isEstimate ? c.reference : null; };
+      const v = (n) => (n == null || !Number.isFinite(Number(n)) ? undefined : Math.round(Number(n) * 1000) / 1000);
+      const period = x.period_from
+        ? new Date(x.period_from).toLocaleDateString("en-GB", { month: "short", year: "numeric" }) : undefined;
+
+      const patch = {
+        utility: x.fuel === "gas" ? "GAS" : "ELECTRICITY",
+        meter_mpan_mpr: x.mpan || x.mprn || undefined,
+        period, days: v(x.billDays), billed_consumption: v(x.consumption_kwh),
+        vat_rate: v(x.vat_rate),
+        billed_unit_rate: v(row("day_unit").rate),
+        // Standing charge and DUoS are separate rows — keeping them apart stops the
+        // distribution fixed charge being counted twice.
+        billed_standing_charge: v(row("standing").rate),
+        duos_charged: v(row("dist_fixed").subtotal), duos_rate: v(firm("dist_fixed")),
+        tnuos_charged: v(row("tnuos_fixed").subtotal), tnuos_rate: v(firm("tnuos_fixed")),
+        bsuos_charged: v(row("bsuos").subtotal),
+        ccl_charged: v(row("ccl").subtotal),
+        asc_kva: v(row("capacity").quantity ?? x.asc_kva), capacity_rate: v(row("capacity").rate), capacity_charged: v(row("capacity").subtotal),
+        excess_kva: v(row("excess_capacity").quantity), excess_rate: v(row("excess_capacity").rate), excess_charged: v(row("excess_capacity").subtotal),
+        reactive_kvarh: v(row("reactive_capacity").quantity), reactive_rate: v(row("reactive_capacity").rate), reactive_charged: v(row("reactive_capacity").subtotal),
+      };
+      const filled = Object.entries(patch).filter(([, val]) => val !== undefined && val !== "");
+      setForm((f) => ({
+        ...f,
+        ...Object.fromEntries(filled),
+        rows_json: JSON.stringify({ rows, subtotal: x.subtotal, vat_total: x.vat_total, total: x.total, billDays: x.billDays }),
+      }));
+      const noPublished = [];
+      if (row("dist_fixed").rate != null && !firm("dist_fixed")) noPublished.push("DUoS");
+      if (row("tnuos_fixed").rate != null && !firm("tnuos_fixed")) noPublished.push("TNUoS");
+      setPrefill({
+        name: file.name, filled: filled.length,
+        msg: `Prefilled ${filled.length} field(s) and ${rows.length} bill line(s) for arithmetic checks. Now add the contracted rates from the contract or LOA, then Validate.`,
+        warnings: [
+          ...(data.warnings || []),
+          ...(noPublished.length ? [`No firm published rate for ${noPublished.join(" and ")} — enter it from the DNO/NESO statement, or that pass-through check will be skipped.`] : []),
+        ],
+      });
+    } catch (err) {
+      setPrefill({ name: file.name, msg: `Could not read the PDF: ${err.message}` });
+    }
   };
 
   const runPreview = async () => {
@@ -230,7 +312,7 @@ export default function BillValidation() {
           <button className="btn" onClick={() => setShowReconcile(true)}>
             <Calculator size={16} /> Reconcile Bill
           </button>
-          <button className="btn primary" onClick={() => { setForm(emptyForm); setPreview(null); setCertMatch(undefined); setSicMatch(undefined); setBillFile(null); setShowAdd(true); }}>
+          <button className="btn primary" onClick={() => { setForm(emptyForm); setPreview(null); setCertMatch(undefined); setSicMatch(undefined); setBillFile(null); setPrefill(null); setShowAdd(true); }}>
             <Plus size={16} /> New Validation
           </button>
         </div>
@@ -287,13 +369,31 @@ export default function BillValidation() {
             {[
               ["sec-meter", "Meter Reading"], ["sec-vat", "VAT"], ["sec-passthrough", "TNUoS/DUoS"],
               ["sec-activity", "Activity"], ["sec-upload", "Upload"], ["sec-ccl", "CCL"],
-              ["sec-eii", "EII"], ["sec-volume", "Volume"], ["sec-client", "Client / LOA"],
+              ["sec-capacity", "Capacity"], ["sec-eii", "EII"], ["sec-volume", "Volume"], ["sec-client", "Client / LOA"],
             ].map(([id, label]) => (
               <button key={id} className="btn ghost sm" onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
                 {label}
               </button>
             ))}
           </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", marginBottom: 12,
+            border: "2px dashed var(--line,#CBD5E1)", borderRadius: 10, cursor: prefill?.busy ? "wait" : "pointer", background: "#F8FAFC" }}>
+            <FileText size={20} style={{ color: "var(--brand,#0E7C7B)" }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>
+                {prefill?.busy ? `Reading ${prefill.name}…` : "Prefill from a PDF bill"}
+              </div>
+              <div className="sub" style={{ fontSize: 11.5 }}>
+                {prefill?.msg || "Fills the billed figures, capacity charges and bill lines. Contracted rates still come from the contract or LOA."}
+              </div>
+            </div>
+            <input type="file" accept="application/pdf,.pdf" onChange={prefillFromPdf} disabled={prefill?.busy} style={{ display: "none" }} />
+          </label>
+          {prefill?.warnings?.length > 0 && (
+            <div style={{ padding: "9px 12px", background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, fontSize: 12, marginBottom: 12, lineHeight: 1.5 }}>
+              {prefill.warnings.map((w, k) => <div key={k}>{w}</div>)}
+            </div>
+          )}
           <div className="grid cols-3">
             <Field label="Contract (optional — auto-fills contracted rates)">
               <select value={form.contract_id} onChange={(e) => onContractChange(e.target.value)}>
@@ -333,6 +433,23 @@ export default function BillValidation() {
             <Field label="DUoS charged on bill (£)"><input type="number" step="0.01" value={form.duos_charged} onChange={set("duos_charged")} /></Field>
             <Field label="Published DUoS rate (p/day)"><input type="number" step="0.0001" value={form.duos_rate} onChange={set("duos_rate")} /></Field>
             <Field label="BSUoS charged on bill (£, optional — for Network Charging Compensation)"><input type="number" step="0.01" value={form.bsuos_charged} onChange={set("bsuos_charged")} /></Field>
+
+            <div id="sec-capacity" className="form-section-title">Capacity Charges (HH sites — ASC / excess / reactive)</div>
+            <Field label="ASC (kVA)"><input type="number" step="0.01" value={form.asc_kva} onChange={set("asc_kva")} /></Field>
+            <Field label="Capacity rate (p/kVA/day)"><input type="number" step="0.0001" value={form.capacity_rate} onChange={set("capacity_rate")} /></Field>
+            <Field label="Capacity charged (£)"><input type="number" step="0.01" value={form.capacity_charged} onChange={set("capacity_charged")} /></Field>
+            <Field label="Excess capacity (kVA)"><input type="number" step="0.01" value={form.excess_kva} onChange={set("excess_kva")} /></Field>
+            <Field label="Excess rate (p/kVA/day)"><input type="number" step="0.0001" value={form.excess_rate} onChange={set("excess_rate")} /></Field>
+            <Field label="Excess charged (£)"><input type="number" step="0.01" value={form.excess_charged} onChange={set("excess_charged")} /></Field>
+            <Field label="Reactive (kVArh)"><input type="number" step="0.01" value={form.reactive_kvarh} onChange={set("reactive_kvarh")} /></Field>
+            <Field label="Reactive rate (p/kVArh)"><input type="number" step="0.0001" value={form.reactive_rate} onChange={set("reactive_rate")} /></Field>
+            <Field label="Reactive charged (£)"><input type="number" step="0.01" value={form.reactive_charged} onChange={set("reactive_charged")} /></Field>
+            {form.rows_json && (
+              <div className="sub" style={{ gridColumn: "1 / -1", fontSize: 11.5 }}>
+                {(() => { try { return `${JSON.parse(form.rows_json).rows.length} bill lines attached — each will be checked for quantity × rate and per-line VAT.`; } catch { return "Bill lines attached."; } })()}
+                {" "}<button className="btn ghost sm" onClick={() => setForm((f) => ({ ...f, rows_json: "" }))}>Remove</button>
+              </div>
+            )}
 
             <div id="sec-activity" className="form-section-title">Qualifying Activity (OOOM Energy Reference Guide)</div>
             <Field label="Business activity">

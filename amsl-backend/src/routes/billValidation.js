@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db } from "../db.js";
-import { parseElecRows, reconcile, compareToReference, resolveDno, N, CHARGES, extractBillFields } from "../lib/billReconcile.js";
+import { parseElecRows, reconcile, compareToReference, resolveDno, N, CHARGES, extractBillFields, arithmeticFindings, capacityFindings } from "../lib/billReconcile.js";
 // pdfjs-dist is used directly rather than pdf-parse: pdf-parse bundles a 2017 pdf.js that
 // leaks state between documents, so one upload could corrupt the parse of the next.
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -29,6 +29,8 @@ const nextRef = () => {
  *   6. CCL exemption/rebate, EII relief, Volume tolerance (as before)
  * All recoverable amounts aggregate into a single total_claim.
  */
+const numOrNull = (v) => (v === "" || v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+
 function validateBill(b, contract, opts = {}) {
   const days = Math.max(1, Number(b.days) || 30);
   const consumption = Number(b.billed_consumption) || 0;
@@ -85,7 +87,9 @@ function validateBill(b, contract, opts = {}) {
   const tnuosCharged = Number(b.tnuos_charged) || 0;
   const tnuosRate = Number(b.tnuos_rate) || 0; // p/day, published rate
   const tnuosExpected = Math.round(((tnuosRate * days) / 100) * 100) / 100;
-  const tnuosOvercharge = tnuosCharged > 0 ? Math.max(0, Math.round((tnuosCharged - tnuosExpected) * 100) / 100) : 0;
+  // Both figures are required. A missing published rate is not a rate of zero: treating it
+  // as zero claimed the ENTIRE transmission charge back as an overcharge.
+  const tnuosOvercharge = tnuosCharged > 0 && tnuosRate > 0 ? Math.max(0, Math.round((tnuosCharged - tnuosExpected) * 100) / 100) : 0;
   if (tnuosOvercharge > 0.5) {
     findings.push({
       check: "TNUoS", field: "transmission_charge",
@@ -97,7 +101,8 @@ function validateBill(b, contract, opts = {}) {
   const duosCharged = Number(b.duos_charged) || 0;
   const duosRate = Number(b.duos_rate) || 0; // p/day, published rate
   const duosExpected = Math.round(((duosRate * days) / 100) * 100) / 100;
-  const duosOvercharge = duosCharged > 0 ? Math.max(0, Math.round((duosCharged - duosExpected) * 100) / 100) : 0;
+  // As for TNUoS: without a published rate there is nothing to compare against.
+  const duosOvercharge = duosCharged > 0 && duosRate > 0 ? Math.max(0, Math.round((duosCharged - duosExpected) * 100) / 100) : 0;
   if (duosOvercharge > 0.5) {
     findings.push({
       check: "DUoS", field: "distribution_charge",
@@ -200,8 +205,54 @@ function validateBill(b, contract, opts = {}) {
     }
   }
 
+  /* ---- Capacity trio (HH sites): ASC, excess capacity, reactive power ---- */
+  const capFindings = capacityFindings(b, days);
+  findings.push(...capFindings);
+  const capacityOvercharge = capFindings.reduce((a, f) => a + (f.amount || 0), 0);
+
+  /* ---- Arithmetic reconciliation from the parsed bill lines ----
+     Needs no reference data. rows_json carries { rows, subtotal, vat_total, total, billDays }
+     as captured from the PDF. A malformed value is skipped rather than failing the whole
+     validation — the contract checks above still stand on their own. */
+  let arithOvercharge = 0;
+  let parsed = null;
+  try {
+    parsed = typeof b.rows_json === "string" ? (b.rows_json.trim() ? JSON.parse(b.rows_json) : null) : (b.rows_json || null);
+  } catch { parsed = null; }
+  if (parsed) {
+    const meta = Array.isArray(parsed) ? { rows: parsed } : parsed;
+    const aFindings = arithmeticFindings({
+      rows: meta.rows || [], days, vat_rate: b.vat_rate ?? 20,
+      subtotal: meta.subtotal, vat_total: meta.vat_total, total: meta.total,
+    });
+    // A line's printed subtotal can be claimed only once. DUoS, TNUoS and the capacity
+    // trio already claim their printed subtotal against the published/expected figure,
+    // which includes any arithmetic error on that line — so the arithmetic finding for
+    // those lines is kept on the report but carries no money.
+    const claimedElsewhere = {
+      dist_fixed: duosCharged > 0 && duosRate > 0 ? "DUoS" : null,
+      tnuos_fixed: tnuosCharged > 0 && tnuosRate > 0 ? "TNUoS" : null,
+      capacity: Number(b.capacity_charged) > 0 && Number(b.asc_kva) > 0 && Number(b.capacity_rate) > 0 ? "Capacity" : null,
+      excess_capacity: Number(b.excess_charged) > 0 && Number(b.excess_kva) > 0 && Number(b.excess_rate) > 0 ? "Excess capacity" : null,
+      reactive_capacity: Number(b.reactive_charged) > 0 && Number(b.reactive_kvarh) > 0 && Number(b.reactive_rate) > 0 ? "Reactive power" : null,
+    };
+    for (const f of aFindings) {
+      const via = f.key ? claimedElsewhere[f.key] : null;
+      if (via && f.amount > 0) {
+        f.detail += ` — claimed under the ${via} check, not counted twice`;
+        f.amount = 0;
+      }
+    }
+    findings.push(...aFindings);
+    arithOvercharge = aFindings.reduce((a, f) => a + (f.amount || 0), 0);
+  }
+
+  // Capacity and arithmetic overcharges join the claim. Neither double-counts the checks
+  // above: capacity lines are not part of the unit-rate/standing-charge variance, and the
+  // arithmetic check tests each line against its OWN printed rate, not the contract rate.
   const totalClaim = Math.round((
     Math.max(0, variance) + meterReadOvercharge + vatOvercharge + tnuosOvercharge + duosOvercharge + cclRebate + eiiRelief + nccCompensation
+    + capacityOvercharge + arithOvercharge
   ) * 100) / 100;
   const status = findings.length ? "Discrepancy" : "Pass";
 
@@ -218,6 +269,8 @@ function validateBill(b, contract, opts = {}) {
     ncc: { bsuosCharged, networkCosts: nccNetworkCosts, compensation: nccCompensation },
     volume: { eac, tolerancePct, annualised, status: volumeStatus },
     duplicate_flag: duplicateFlag, meter_data_flag: meterDataFlag,
+    capacity: { overcharge: Math.round(capacityOvercharge * 100) / 100, findings: capFindings.length },
+    arithmetic: { overcharge: Math.round(arithOvercharge * 100) / 100, checked: !!parsed },
     total_claim: totalClaim,
   };
 }
@@ -748,7 +801,9 @@ r.post("/", (req, res) => {
      client_name, client_address, client_company_reg,
      meter_reading_start, meter_reading_end, vat_rate_expected,
      tnuos_charged, tnuos_rate, duos_charged, duos_rate, duplicate_flag, meter_data_flag, sic_code,
-     bsuos_charged, ncc_compensation)
+     bsuos_charged, ncc_compensation,
+     rows_json, asc_kva, capacity_rate, capacity_charged, excess_kva, excess_rate, excess_charged,
+     reactive_kvarh, reactive_rate, reactive_charged)
     VALUES (@ref,@contract_id,@business_id,@business_name,@supplier_id,@supplier_name,@utility,@meter,
      @period,@days,@consumption,@bStand,@bUnit,@billed,@vat,@cStand,@cUnit,@expected,@variance,@status,0,@findings,@notes,
      @cclCharged,@cclRate,@cclReliefPct,@cclExempt,@cclRebate,
@@ -756,7 +811,9 @@ r.post("/", (req, res) => {
      @clientName,@clientAddress,@clientRegNo,
      @meterStart,@meterEnd,@vatExpected,
      @tnuosCharged,@tnuosRate,@duosCharged,@duosRate,@duplicateFlag,@meterDataFlag,@sicCode,
-     @bsuosCharged,@nccCompensation)`)
+     @bsuosCharged,@nccCompensation,
+     @rowsJson,@ascKva,@capacityRate,@capacityCharged,@excessKva,@excessRate,@excessCharged,
+     @reactiveKvarh,@reactiveRate,@reactiveCharged)`)
     .run({
       ref,
       contract_id: b.contract_id || null,
@@ -782,6 +839,10 @@ r.post("/", (req, res) => {
       duplicateFlag: v.duplicate_flag ? 1 : 0, meterDataFlag: v.meter_data_flag ? 1 : 0,
       sicCode: b.sic_code || null,
       bsuosCharged: v.ncc.bsuosCharged, nccCompensation: v.ncc.compensation,
+      rowsJson: b.rows_json ? (typeof b.rows_json === "string" ? b.rows_json : JSON.stringify(b.rows_json)) : null,
+      ascKva: numOrNull(b.asc_kva), capacityRate: numOrNull(b.capacity_rate), capacityCharged: numOrNull(b.capacity_charged),
+      excessKva: numOrNull(b.excess_kva), excessRate: numOrNull(b.excess_rate), excessCharged: numOrNull(b.excess_charged),
+      reactiveKvarh: numOrNull(b.reactive_kvarh), reactiveRate: numOrNull(b.reactive_rate), reactiveCharged: numOrNull(b.reactive_charged),
     });
 
   res.status(201).json({ data: withParsed(one("SELECT * FROM bill_validations WHERE id=?", info.lastInsertRowid)) });

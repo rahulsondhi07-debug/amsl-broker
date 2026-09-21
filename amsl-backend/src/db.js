@@ -1126,6 +1126,19 @@ export function migrate() {
     );
   `);
 
+  // Bill validation phase 2: the parsed bill lines (for arithmetic reconciliation) and the
+  // half-hourly capacity trio (ASC, excess capacity, reactive power).
+  addCol("ALTER TABLE bill_validations ADD COLUMN rows_json        TEXT");
+  addCol("ALTER TABLE bill_validations ADD COLUMN asc_kva          REAL");
+  addCol("ALTER TABLE bill_validations ADD COLUMN capacity_rate    REAL");   // p/kVA/day
+  addCol("ALTER TABLE bill_validations ADD COLUMN capacity_charged REAL");   // £
+  addCol("ALTER TABLE bill_validations ADD COLUMN excess_kva       REAL");
+  addCol("ALTER TABLE bill_validations ADD COLUMN excess_rate      REAL");
+  addCol("ALTER TABLE bill_validations ADD COLUMN excess_charged   REAL");
+  addCol("ALTER TABLE bill_validations ADD COLUMN reactive_kvarh   REAL");
+  addCol("ALTER TABLE bill_validations ADD COLUMN reactive_rate    REAL");   // p/kVArh
+  addCol("ALTER TABLE bill_validations ADD COLUMN reactive_charged REAL");
+
   // Green gas (biomethane) sits alongside power generation but is a different product:
   // it is injected into the gas grid and certified by RGGO, not REGO. Keeping both in one
   // table with a utility flag means one marketplace and one deal flow, filtered by fuel,
