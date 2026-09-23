@@ -247,6 +247,7 @@ function ImportGroup({ onClose, onDone }) {
   const [kind, setKind] = useState("Group");
   const [mode, setMode] = useState("perBusiness");
   const [businessId, setBusinessId] = useState("");
+  const [newBusiness, setNewBusiness] = useState("");
   const [businesses, setBusinesses] = useState([]);
   const [name, setName] = useState("");
   const [parsed, setParsed] = useState(null);
@@ -255,7 +256,17 @@ function ImportGroup({ onClose, onDone }) {
   const [err, setErr] = useState(null);
   const [result, setResult] = useState(null);
 
-  useEffect(() => { api.list("leads", { limit: 300 }).then((r) => setBusinesses(r.data)).catch(() => {}); }, []);
+  // Both leads and customers: a multi-site group may belong to either, and listing only
+  // leads left the picker empty with no way forward.
+  useEffect(() => {
+    Promise.all([
+      api.list("leads", { limit: 200 }).catch(() => ({ data: [] })),
+      api.list("customers", { limit: 200 }).catch(() => ({ data: [] })),
+    ]).then(([l, c]) => setBusinesses([
+      ...l.data.map((b) => ({ ...b, kind: "Lead" })),
+      ...c.data.map((b) => ({ ...b, kind: "Customer" })),
+    ]));
+  }, []);
 
   const onFile = async (e) => {
     const file = e.target.files?.[0];
@@ -278,7 +289,9 @@ function ImportGroup({ onClose, onDone }) {
 
   const run = async () => {
     if (!parsed?.rows?.length) return setErr("Upload a completed group or basket file first");
-    if (mode === "attach" && !businessId) return setErr("Choose the business these sites belong to");
+    if (mode === "attach" && !businessId && !newBusiness.trim()) {
+      return setErr("Choose an existing business, or type a name to create one");
+    }
     setBusy(true); setErr(null);
     try {
       const { data: q } = await api.groupQuoteCreate({
@@ -287,7 +300,9 @@ function ImportGroup({ onClose, onDone }) {
         business_id: mode === "attach" ? Number(businessId) : null,
         terms: [], sites: parsed.rows, source_filename: filename, status: "Draft",
       });
-      const { data } = await api.groupQuoteCreateLeads(q.id, mode === "attach" ? { attach_to_business_id: Number(businessId) } : {});
+      const { data } = await api.groupQuoteCreateLeads(q.id, mode === "attach"
+        ? (businessId ? { attach_to_business_id: Number(businessId) } : { attach_to_business_name: newBusiness.trim() })
+        : {});
       setResult({ ...data, ref: q.ref });
       onDone?.();
     } catch (e) { setErr(e.message); }
@@ -309,21 +324,34 @@ function ImportGroup({ onClose, onDone }) {
         </Field>
         <Field label="These sites belong to">
           <select value={mode} onChange={(e) => setMode(e.target.value)}>
-            <option value="perBusiness">Several businesses — one lead per business name</option>
-            <option value="attach">One business — attach every site to it</option>
+            <option value="perBusiness">Use the business name in the file</option>
+            <option value="attach">One business I choose</option>
           </select>
         </Field>
         {mode === "attach" ? (
           <Field label="Business *">
             <select value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
-              <option value="">Select…</option>
-              {businesses.map((b) => <option key={b.id} value={b.id}>{b.business_name}</option>)}
+              <option value="">— Create a new business —</option>
+              {businesses.map((b) => <option key={`${b.kind}-${b.id}`} value={b.id}>{b.business_name} ({b.kind})</option>)}
             </select>
           </Field>
         ) : (
           <Field label="Group name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="For your own reference" /></Field>
         )}
       </div>
+      {mode === "attach" && !businessId && (
+        <div style={{ marginTop: 8 }}>
+          <Field label="New business name *">
+            <input value={newBusiness} onChange={(e) => setNewBusiness(e.target.value)}
+              placeholder={parsed?.businesses?.[0] || "Name of the business these sites belong to"} />
+          </Field>
+          {parsed?.businesses?.length === 1 && newBusiness.trim() === "" && (
+            <button className="btn ghost sm" onClick={() => setNewBusiness(parsed.businesses[0])}>
+              Use "{parsed.businesses[0]}" from the file
+            </button>
+          )}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "10px 0 6px", flexWrap: "wrap" }}>
         <a className="btn ghost sm" href={`${API_BASE}/group-quotes/templates/${kind === "Basket" ? "basket" : "group"}`}>
           <Download size={13} /> Download {kind === "Basket" ? "basket" : "group"} template
@@ -333,6 +361,11 @@ function ImportGroup({ onClose, onDone }) {
           <input type="file" accept=".xlsx,.xls,.csv" onChange={onFile} disabled={busy} style={{ display: "none" }} />
         </label>
       </div>
+      {parsed && parsed.businesses.length === 1 && mode === "perBusiness" && (
+        <div style={{ background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, marginBottom: 8 }}>
+          Every site in this file belongs to <b>{parsed.businesses[0]}</b>, so one business will be created with all {parsed.total} sites on it.
+        </div>
+      )}
       {parsed && (
         <div style={{ fontSize: 12.5 }}>
           <b>{parsed.total - parsed.with_issues}</b> site(s) ready{parsed.with_issues > 0 && <>, <b>{parsed.with_issues}</b> with problems that will be skipped</>}

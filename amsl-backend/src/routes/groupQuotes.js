@@ -283,9 +283,26 @@ r.post("/:id/create-leads", (req, res) => {
   if (!quote) return res.status(404).json({ error: "not found" });
   const sites = db.prepare("SELECT * FROM group_quote_sites WHERE quote_id=?").all(req.params.id);
   if (!sites.length) return res.status(400).json({ error: "This quotation has no sites" });
-  const attachTo = req.body?.attach_to_business_id ? Number(req.body.attach_to_business_id) : null;
+  let attachTo = req.body?.attach_to_business_id ? Number(req.body.attach_to_business_id) : null;
   if (attachTo && !db.prepare("SELECT id FROM businesses WHERE id=?").get(attachTo)) {
     return res.status(404).json({ error: "The business to attach to was not found" });
+  }
+  // Attaching to a business that is not on the portal yet is the common case for a new
+  // multi-site client, so a name can be given instead of an id. An existing business of
+  // that name is reused rather than duplicated.
+  const newName = (req.body?.attach_to_business_name || "").trim();
+  let attachCreated = false;
+  if (!attachTo && newName) {
+    const found = db.prepare("SELECT id FROM businesses WHERE lower(business_name)=lower(?) LIMIT 1").get(newName);
+    if (found) attachTo = found.id;
+    else {
+      const anyElec = sites.some((s) => s.mpan_core), anyGas = sites.some((s) => s.mprn);
+      const fuel = anyElec && anyGas ? "DUAL" : anyGas ? "GAS" : "ELEC";
+      const ref = `L-${String(db.prepare("SELECT COUNT(*) c FROM businesses").get().c + 1).padStart(4, "0")}`;
+      attachTo = db.prepare(`INSERT INTO businesses (ref, business_name, stage, journey_stage, fuel)
+                             VALUES (?,?,'LEAD','New Lead',?)`).run(ref, newName, fuel).lastInsertRowid;
+      attachCreated = true;
+    }
   }
 
   const findByName = db.prepare("SELECT id FROM businesses WHERE lower(business_name)=lower(?) LIMIT 1");
@@ -299,7 +316,7 @@ r.post("/:id/create-leads", (req, res) => {
   const insMeter = db.prepare(`INSERT INTO meters (business_id, utility, mpan_mprn, topline, eac, aq, name, status)
                                VALUES (?,?,?,?,?,?,?,'C')`);
 
-  let createdBiz = 0, linkedBiz = 0, createdMeters = 0, skippedMeters = 0;
+  let createdBiz = attachCreated ? 1 : 0, linkedBiz = attachTo && !attachCreated ? 1 : 0, createdMeters = 0, skippedMeters = 0;
   const skipped = [];
 
   const tx = db.transaction(() => {
