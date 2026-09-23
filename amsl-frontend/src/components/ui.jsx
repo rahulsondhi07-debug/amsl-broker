@@ -30,18 +30,25 @@ export function Spinner({ label = "Loading…" }) {
 }
 
 export function ErrorBanner({ error, onRetry }) {
+  // The "is the backend running" hint only belongs on a connection failure. Showing it
+  // under every message made ordinary validation errors ("choose a business") look like
+  // the server was down, sending people to check the wrong thing.
+  const text = String(error ?? "");
+  const looksOffline = /failed to fetch|networkerror|load failed|fetch failed|ecconnrefused|econnrefused|network request failed/i.test(text);
   return (
     <div className="error-banner">
-      {String(error)}
+      {text}
       {onRetry && (
         <>
           {" "}
           <button className="btn ghost sm" onClick={onRetry}>Retry</button>
         </>
       )}
-      <div style={{ marginTop: 6, fontSize: 12, color: "#9f1239" }}>
-        Is the backend running at <code>{api.base}</code>? Start it with <code>npm start</code>.
-      </div>
+      {looksOffline && (
+        <div style={{ marginTop: 6, fontSize: 12, color: "#9f1239" }}>
+          Is the backend running at <code>{api.base}</code>? Start it with <code>npm start</code>.
+        </div>
+      )}
     </div>
   );
 }

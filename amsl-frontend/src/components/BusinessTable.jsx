@@ -283,6 +283,10 @@ function ImportGroup({ onClose, onDone }) {
       const { data } = await api.groupQuoteParse(b64, file.name);
       setParsed(data);
       if (!name) setName(file.name.replace(/\.[^.]+$/, ""));
+      // Fill the name in rather than only offering it as placeholder text: a greyed-out
+      // placeholder reads as filled, so pressing Create produced a "choose a business"
+      // error on a box that looked complete.
+      if (data.businesses?.length === 1 && !newBusiness.trim()) setNewBusiness(data.businesses[0]);
     } catch (e2) { setErr(e2.message); }
     setBusy(false);
   };
