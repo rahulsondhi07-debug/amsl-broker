@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { Plus, ArrowRightLeft, Trash2, Upload, Eye } from "lucide-react";
-import { api } from "../api.js";
+import { Plus, ArrowRightLeft, Trash2, Upload, Eye, Download, Users} from "lucide-react";
+import { api, API_BASE } from "../api.js";
 import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "./ui.jsx";
 
 const csd = (c, s, d) => `${c} | ${s} | ${d}`;
@@ -10,6 +10,7 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
   const { data, meta, loading, error, page, setPage, q, setQ, reload } = useList(resource, { limit: 10 });
   const [showAdd, setShowAdd] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showGroup, setShowGroup] = useState(false);
   const [refs, setRefs] = useState({ agencies: [], agents: [] });
   const [busy, setBusy] = useState(null);
 
@@ -33,7 +34,9 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
           <div className="search" style={{ maxWidth: 220 }}>
             <input placeholder="Search…" value={q} onChange={(e) => { setPage(1); setQ(e.target.value); }} style={{ paddingLeft: 12 }} />
           </div>
+          {isLead && <a className="btn" href={`${API_BASE}/group-quotes/templates/leads/csv`}><Download size={15} /> CSV Template</a>}
           {isLead && <button className="btn" onClick={() => setShowImport(true)}><Upload size={15} /> Import CSV</button>}
+          {isLead && <button className="btn" onClick={() => setShowGroup(true)}><Users size={15} /> Upload Group</button>}
           <button className="btn primary" onClick={() => setShowAdd(true)}><Plus size={15} /> {isLead ? "Add Lead" : "Add Customer"}</button>
         </div>
       </div>
@@ -96,6 +99,9 @@ export default function BusinessTable({ resource, title, desc, isLead }) {
 
       {showImport && (
         <ImportLeads onClose={() => setShowImport(false)} onDone={() => reload()} />
+      )}
+      {showGroup && (
+        <ImportGroup onClose={() => setShowGroup(false)} onDone={() => reload()} />
       )}
       {showAdd && (
         <AddBusiness resource={resource} refs={refs} isLead={isLead}
@@ -221,6 +227,130 @@ function ImportLeads({ onClose, onDone }) {
               )}
             </>
           )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
+/**
+ * Upload a group or basket file and turn it into leads and meters.
+ *
+ * Two ways to land the sites, because a "group" file means one of two things in practice:
+ *  - all the sites belong to ONE business (a multi-site company) → attach them to it;
+ *  - the file lists several businesses → create a lead per business name.
+ * The file is saved as a group quotation either way, so there is a record of where the
+ * sites came from rather than rows appearing with no provenance.
+ */
+function ImportGroup({ onClose, onDone }) {
+  const [kind, setKind] = useState("Group");
+  const [mode, setMode] = useState("perBusiness");
+  const [businessId, setBusinessId] = useState("");
+  const [businesses, setBusinesses] = useState([]);
+  const [name, setName] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [filename, setFilename] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => { api.list("leads", { limit: 300 }).then((r) => setBusinesses(r.data)).catch(() => {}); }, []);
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true); setErr(null); setParsed(null); setResult(null); setFilename(file.name);
+    try {
+      const b64 = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result).split(",")[1] || "");
+        r.onerror = () => reject(new Error("Could not read the file"));
+        r.readAsDataURL(file);
+      });
+      const { data } = await api.groupQuoteParse(b64, file.name);
+      setParsed(data);
+      if (!name) setName(file.name.replace(/\.[^.]+$/, ""));
+    } catch (e2) { setErr(e2.message); }
+    setBusy(false);
+  };
+
+  const run = async () => {
+    if (!parsed?.rows?.length) return setErr("Upload a completed group or basket file first");
+    if (mode === "attach" && !businessId) return setErr("Choose the business these sites belong to");
+    setBusy(true); setErr(null);
+    try {
+      const { data: q } = await api.groupQuoteCreate({
+        quote_kind: kind,
+        [kind === "Basket" ? "basket_name" : "group_name"]: name || filename || "Uploaded group",
+        business_id: mode === "attach" ? Number(businessId) : null,
+        terms: [], sites: parsed.rows, source_filename: filename, status: "Draft",
+      });
+      const { data } = await api.groupQuoteCreateLeads(q.id, mode === "attach" ? { attach_to_business_id: Number(businessId) } : {});
+      setResult({ ...data, ref: q.ref });
+      onDone?.();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const bad = parsed?.rows.filter((r) => r.issues.length) || [];
+  return (
+    <Modal title="Upload a group of sites" onClose={onClose} wide
+      footer={<><button className="btn" onClick={onClose}>Close</button>
+        <button className="btn primary" disabled={busy || !parsed} onClick={run}>{busy ? "Working…" : "Create leads and meters"}</button></>}>
+      {err && <ErrorBanner error={err} />}
+      <div className="grid cols-3">
+        <Field label="File type">
+          <select value={kind} onChange={(e) => setKind(e.target.value)}>
+            <option value="Group">Group file</option>
+            <option value="Basket">Basket file (includes CRN)</option>
+          </select>
+        </Field>
+        <Field label="These sites belong to">
+          <select value={mode} onChange={(e) => setMode(e.target.value)}>
+            <option value="perBusiness">Several businesses — one lead per business name</option>
+            <option value="attach">One business — attach every site to it</option>
+          </select>
+        </Field>
+        {mode === "attach" ? (
+          <Field label="Business *">
+            <select value={businessId} onChange={(e) => setBusinessId(e.target.value)}>
+              <option value="">Select…</option>
+              {businesses.map((b) => <option key={b.id} value={b.id}>{b.business_name}</option>)}
+            </select>
+          </Field>
+        ) : (
+          <Field label="Group name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="For your own reference" /></Field>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "10px 0 6px", flexWrap: "wrap" }}>
+        <a className="btn ghost sm" href={`${API_BASE}/group-quotes/templates/${kind === "Basket" ? "basket" : "group"}`}>
+          <Download size={13} /> Download {kind === "Basket" ? "basket" : "group"} template
+        </a>
+        <label className="btn sm" style={{ cursor: busy ? "wait" : "pointer" }}>
+          <Upload size={13} /> {filename ? `Replace (${filename})` : "Choose completed file"}
+          <input type="file" accept=".xlsx,.xls,.csv" onChange={onFile} disabled={busy} style={{ display: "none" }} />
+        </label>
+      </div>
+      {parsed && (
+        <div style={{ fontSize: 12.5 }}>
+          <b>{parsed.total - parsed.with_issues}</b> site(s) ready{parsed.with_issues > 0 && <>, <b>{parsed.with_issues}</b> with problems that will be skipped</>}
+          {mode === "perBusiness" && <> · {parsed.businesses.length} business name(s)</>}
+          {bad.length > 0 && (
+            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "8px 10px", marginTop: 8, maxHeight: 140, overflow: "auto", fontSize: 12 }}>
+              {bad.slice(0, 10).map((r) => <div key={r.row_no}>Row {r.row_no} {r.business_name || "(no name)"} — {r.issues.join("; ")}</div>)}
+              {bad.length > 10 && <div className="sub">…and {bad.length - 10} more.</div>}
+            </div>
+          )}
+        </div>
+      )}
+      {result && (
+        <div style={{ background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, marginTop: 10 }}>
+          Saved as {result.ref}. Created {result.businesses_created} business(es), matched {result.businesses_matched} existing,
+          added {result.meters_created} meter(s).
+          {result.meters_already_present > 0 && ` ${result.meters_already_present} meter(s) were already on file.`}
+          {result.rows_skipped > 0 && ` ${result.rows_skipped} row(s) skipped.`}
         </div>
       )}
     </Modal>

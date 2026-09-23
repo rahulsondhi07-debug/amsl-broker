@@ -68,6 +68,7 @@ const NAV = [
   { group: "Quotes", icon: ClipboardList, items: [
     { to: "/quotes/new", icon: FilePlus2, label: "Get Quote" },
     { to: "/quotes", icon: ClipboardList, label: "Quotes" },
+    { to: "/group-quotes", icon: Users, label: "Group Quotation" },
   ] },
   { to: "/customers", icon: UserCheck, label: "Customers" },
   { to: "/contracts", icon: FileSignature, label: "Contracts" },

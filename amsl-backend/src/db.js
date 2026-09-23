@@ -820,6 +820,56 @@ export function migrate() {
     -- and trade effluent strengths. Findings are split into CONFIRMED (provable from the
     -- bill and actual reads) and POTENTIAL (needs evidence such as a drainage survey or
     -- sub-meter data) so an unproven assumption is never presented as money owed.
+    -- Group and basket quotations. A GROUP quote covers several businesses under one
+    -- group contract; a BASKET quote covers the same businesses on individual contracts,
+    -- which is why the basket template carries a company registration number per row.
+    -- Sites are held as rows so a supplier file can be uploaded, checked and quoted as one.
+    CREATE TABLE IF NOT EXISTS group_quotes (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      ref                 TEXT,
+      quote_kind          TEXT NOT NULL DEFAULT 'Group',   -- Group | Basket
+      supplier_id         INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+      business_id         INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+      company_name        TEXT,
+      basket_name         TEXT,
+      group_name          TEXT,
+      company_reg_no      TEXT,
+      required_by         TEXT,
+      terms               TEXT,          -- JSON list of requested contract terms
+      product             TEXT,
+      monthly_variable        INTEGER NOT NULL DEFAULT 0,
+      third_party_mop         INTEGER NOT NULL DEFAULT 0,
+      third_party_dadc        INTEGER NOT NULL DEFAULT 0,
+      nominate_dadc           INTEGER NOT NULL DEFAULT 0,
+      property_managing_agent INTEGER NOT NULL DEFAULT 0,
+      green_electricity       INTEGER NOT NULL DEFAULT 0,
+      carbon_offset_gas       INTEGER NOT NULL DEFAULT 0,
+      carbon_offset_elec      INTEGER NOT NULL DEFAULT 0,
+      source_filename     TEXT,
+      notes               TEXT,
+      status              TEXT NOT NULL DEFAULT 'Draft',   -- Draft | Sent | Quoted | Won | Lost
+      created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS group_quote_sites (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      quote_id       INTEGER NOT NULL REFERENCES group_quotes(id) ON DELETE CASCADE,
+      row_no         INTEGER,
+      business_name  TEXT,
+      postcode       TEXT,
+      crn            TEXT,
+      mpan_top       TEXT,
+      mpan_core      TEXT,
+      eac_day        REAL,
+      eac_night      REAL,
+      eac_ewe        REAL,
+      mprn           TEXT,
+      aq             REAL,
+      start_date     TEXT,
+      end_date       TEXT,
+      issues         TEXT,           -- JSON list of validation problems on this row
+      business_id    INTEGER REFERENCES businesses(id) ON DELETE SET NULL
+    );
+
     CREATE TABLE IF NOT EXISTS water_validations (
       id                   INTEGER PRIMARY KEY AUTOINCREMENT,
       ref                  TEXT,
@@ -1483,6 +1533,7 @@ export const MENU_CATALOG = [
   { key: "/tickets", label: "Tickets" }, { key: "/permissions", label: "Permissions" },
   { key: "/commission", label: "Commission" }, { key: "/bill-validation", label: "Bill Validation" },
   { key: "/water-validation", label: "Water Validation" },
+  { key: "/group-quotes", label: "Group Quotation" },
   { key: "/eii-certificates", label: "EII Certificates" },
   { key: "/rego-certificates", label: "REGO Certificates" },
   { key: "/local-energy", label: "Local Energy Marketplace" },
@@ -1530,7 +1581,7 @@ export function seedPermissions() {
   // agency or agent. Without this, adding the feature key would silently withdraw Flex
   // from every existing user.
   const all = [...MENU_CATALOG.map((m) => m.key), ...FEATURE_CATALOG.map((f) => f.key)];
-  const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets",
+  const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets", "/group-quotes",
                       "feature:flex-purchasing", "/flex-position", "/fixed-vs-flex"];
   const grants = { "Admin": all, "Super User": all, "Manager": all.filter((k) => k !== "/permissions"), "Agent": agentMenus };
   const before = db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c;
