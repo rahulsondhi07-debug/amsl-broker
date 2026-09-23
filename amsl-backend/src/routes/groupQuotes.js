@@ -311,12 +311,24 @@ r.post("/:id/create-leads", (req, res) => {
   // journey stage of New Lead, and the fuel is set from what the row actually carries.
   const insBiz = db.prepare(`INSERT INTO businesses (ref, business_name, stage, journey_stage, fuel)
                              VALUES (?,?,'LEAD','New Lead',?)`);
-  const hasMeter = db.prepare("SELECT id FROM meters WHERE business_id=? AND mpan_mprn=?");
+  const hasMeter = db.prepare("SELECT id, site_id FROM meters WHERE business_id=? AND mpan_mprn=?");
+  const linkMeter = db.prepare("UPDATE meters SET site_id=?, name=COALESCE(name,?) WHERE id=?");
+  // Each row in the file is a physical site, so it gets a site record and its meters hang
+  // off it. Without this the meters loaded but the Sites count stayed at zero and the
+  // site address tab was empty, which is what a group upload is mostly for.
+  // Identity is the METER NUMBER, not the postcode: this file has 28 sites across 22
+  // postcodes (four separate supplies share one postcode), so matching on postcode would
+  // merge distinct sites and lose their meters. Matching on the meter also makes a repeat
+  // upload land on the same site instead of creating a second one.
+  const siteOfMeter = db.prepare("SELECT site_id FROM meters WHERE business_id=? AND mpan_mprn=? AND site_id IS NOT NULL LIMIT 1");
+  const siteNameTaken = db.prepare("SELECT COUNT(*) c FROM sites WHERE business_id=? AND name=?");
+  const insSite = db.prepare("INSERT INTO sites (business_id, name, address) VALUES (?,?,?)");
   // Meter status uses this schema's codes: C current, S switching, D dropped.
-  const insMeter = db.prepare(`INSERT INTO meters (business_id, utility, mpan_mprn, topline, eac, aq, name, status)
-                               VALUES (?,?,?,?,?,?,?,'C')`);
+  const insMeter = db.prepare(`INSERT INTO meters (business_id, site_id, utility, mpan_mprn, topline, eac, aq, name, status)
+                               VALUES (?,?,?,?,?,?,?,?,'C')`);
 
-  let createdBiz = attachCreated ? 1 : 0, linkedBiz = attachTo && !attachCreated ? 1 : 0, createdMeters = 0, skippedMeters = 0;
+  let createdBiz = attachCreated ? 1 : 0, linkedBiz = attachTo && !attachCreated ? 1 : 0;
+  let createdMeters = 0, skippedMeters = 0, createdSites = 0, linkedMeters = 0;
   const skipped = [];
 
   const tx = db.transaction(() => {
@@ -335,10 +347,35 @@ r.post("/:id/create-leads", (req, res) => {
           createdBiz++;
         }
       }
+      // Reuse the site this row's meters already sit on, if the file has been uploaded before.
+      let siteId = null;
+      for (const n of [s.mpan_core, s.mprn]) {
+        if (!n) continue;
+        const hit = siteOfMeter.get(bizId, n);
+        if (hit) { siteId = hit.site_id; break; }
+      }
+      if (!siteId) {
+        // Postcodes repeat across separate supplies, so a duplicate name is numbered
+        // rather than reused — otherwise four sites would look like one.
+        let siteName = s.postcode || `Site ${s.row_no}`;
+        const taken = siteNameTaken.get(bizId, siteName).c;
+        if (taken) siteName = `${siteName} (${taken + 1})`;
+        siteId = insSite.run(bizId, siteName, s.postcode || null).lastInsertRowid;
+        createdSites++;
+      }
+      const siteLabel = db.prepare("SELECT name FROM sites WHERE id=?").get(siteId)?.name || null;
+
       const add = (utility, number, eac, aq, topline) => {
         if (!number) return;
-        if (hasMeter.get(bizId, number)) { skippedMeters++; return; }
-        insMeter.run(bizId, utility, number, topline || null, eac ?? null, aq ?? null, s.postcode || null);
+        const existing = hasMeter.get(bizId, number);
+        if (existing) {
+          // Meters uploaded before sites were created have no site. Re-running the upload
+          // attaches them rather than leaving them loose beside a set of empty new sites.
+          if (!existing.site_id) { linkMeter.run(siteId, siteLabel, existing.id); linkedMeters++; }
+          else skippedMeters++;
+          return;
+        }
+        insMeter.run(bizId, siteId, utility, number, topline || null, eac ?? null, aq ?? null, siteLabel);
         createdMeters++;
       };
       // Electricity EAC is the sum of the day, night and evening/weekend figures; gas
@@ -353,7 +390,9 @@ r.post("/:id/create-leads", (req, res) => {
   res.json({
     data: {
       businesses_created: createdBiz, businesses_matched: linkedBiz,
+      sites_created: createdSites,
       meters_created: createdMeters, meters_already_present: skippedMeters,
+      meters_linked_to_sites: linkedMeters,
       rows_skipped: skipped.length, skipped,
       attached_to: attachTo,
     },
