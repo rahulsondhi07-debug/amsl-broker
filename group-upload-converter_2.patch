@@ -1,0 +1,957 @@
+From 02387d24adf598d59f5cc150d95948020b539987 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 19:39:54 +0000
+Subject: [PATCH 1/2] Convert any site-list Excel/CSV into the group/basket
+ template on upload
+
+The group quotation upload only accepted the supplier template with its exact
+headings on row 1, so other site lists failed with 'No site rows found'.
+
+A new converter (src/lib/siteConverter.js) finds the heading row on any sheet,
+recognises common alternative column names (Supply Number, Meter Point
+Reference, mixed MPAN/MPRN columns, full 21-digit MPANs, PC/MTC/LLF, Annual
+Consumption, Contract End Date, addresses with postcodes), maps them onto the
+template columns, and reports the mapping and assumptions. When a file was
+converted, the rows are written into the real template for download.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013woNdCYjEWo3YqUdF665fh
+---
+ amsl-backend/src/lib/siteConverter.js         | 479 ++++++++++++++++++
+ amsl-backend/src/routes/groupQuotes.js        | 175 ++-----
+ amsl-frontend/src/api.js                      |   2 +-
+ .../src/components/BusinessTable.jsx          |   4 +-
+ amsl-frontend/src/pages/GroupQuotes.jsx       |  65 ++-
+ 5 files changed, 568 insertions(+), 157 deletions(-)
+ create mode 100644 amsl-backend/src/lib/siteConverter.js
+
+diff --git a/amsl-backend/src/lib/siteConverter.js b/amsl-backend/src/lib/siteConverter.js
+new file mode 100644
+index 0000000..73d5f34
+--- /dev/null
++++ b/amsl-backend/src/lib/siteConverter.js
+@@ -0,0 +1,479 @@
++/**
++ * Site-list converter.
++ *
++ * People rarely send the supplier's template. They send whatever they have: a portfolio
++ * summary with a title block above the table, "Supply Number" instead of "MPAN Core", one
++ * "Meter Number" column holding both MPANs and MPRNs, a full 21-digit MPAN in one cell,
++ * "Annual Consumption" instead of EAC_DAY, separate Electricity and Gas tabs, the current
++ * contract end date rather than a preferred start date, and so on.
++ *
++ * This module reads any such workbook (or CSV) and turns it into rows in the template's
++ * shape, together with a report of how each column was mapped and every assumption made,
++ * so the person can see what happened and correct the source if a guess was wrong. It can
++ * also write those rows back into the real template file for download.
++ */
++import ExcelJS from "exceljs";
++import JSZip from "jszip";
++
++/* ------------------------------------------------------------------ cell helpers */
++
++export const cellText = (v) => {
++  if (v == null) return "";
++  if (v instanceof Date) return v.toISOString().slice(0, 10);
++  if (typeof v === "object") {
++    if (v.error) return "";
++    if (v.text != null) return String(v.text).trim();
++    if (v.result != null) return cellText(v.result);
++    if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join("").trim();
++    return "";
++  }
++  if (typeof v === "number") {
++    // Avoid "1.23e+20" for long meter numbers typed into a number-formatted column.
++    return Number.isInteger(v) ? v.toLocaleString("fullwide", { useGrouping: false }) : String(v);
++  }
++  return String(v).trim();
++};
++const raw = (v) => (v && typeof v === "object" && !(v instanceof Date) && "result" in v ? v.result : v);
++
++const numOrNull = (v) => {
++  v = raw(v);
++  if (typeof v === "number") return Number.isFinite(v) ? v : null;
++  const s = cellText(v).replace(/[,£\s]/g, "").replace(/kwh|kw|units?|p\/?kwh/gi, "");
++  if (s === "" || s === "-") return null;
++  const n = Number(s);
++  return Number.isFinite(n) ? n : null;
++};
++const digits = (v) => cellText(raw(v)).replace(/\D/g, "");
++
++/** Excel serials, dd/mm/yy(yy), yyyy-mm-dd, "1 Oct 2026", Date objects → ISO date. */
++export function toIso(v) {
++  v = raw(v);
++  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString().slice(0, 10);
++  if (typeof v === "number") {
++    if (v > 20000 && v < 80000) {                 // Excel serial day number (1954–2119)
++      const d = new Date(Date.UTC(1899, 11, 30) + Math.round(v) * 86400000);
++      return d.toISOString().slice(0, 10);
++    }
++    return null;
++  }
++  const s = cellText(v);
++  if (!s) return null;
++  let m = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/);
++  if (m) {
++    const y = m[3].length === 2 ? `20${m[3]}` : m[3];
++    const dd = +m[1], mm = +m[2];
++    if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
++    return `${y}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
++  }
++  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
++  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
++  if (/^\d+$/.test(s)) return toIso(Number(s));
++  const d = new Date(`${s} UTC`);
++  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
++  const d2 = new Date(s);
++  return Number.isNaN(d2.getTime()) ? null : new Date(Date.UTC(d2.getFullYear(), d2.getMonth(), d2.getDate())).toISOString().slice(0, 10);
++}
++const addDays = (iso, n) => {
++  const d = new Date(`${iso}T00:00:00Z`);
++  d.setUTCDate(d.getUTCDate() + n);
++  return d.toISOString().slice(0, 10);
++};
++
++const POSTCODE_RE = /\b(GIR ?0AA|[A-PR-UWYZ][A-HK-Y]?\d[A-Z\d]?) ?(\d[ABD-HJLNP-UW-Z]{2})\b/i;
++const findPostcode = (s) => {
++  const m = String(s || "").toUpperCase().match(POSTCODE_RE);
++  return m ? `${m[1]} ${m[2]}` : "";
++};
++const normPostcode = (s) => findPostcode(s) || cellText(s).toUpperCase();
++
++/* ------------------------------------------------------------------ reading */
++
++/** Remove comments/VML parts, which make the xlsx reader throw on some templates. */
++async function stripComments(buf) {
++  const zip = await JSZip.loadAsync(buf);
++  const isComment = (f) => /comments?\d*\.xml$/i.test(f) || /\.vml$/i.test(f) || /vmlDrawing/i.test(f) || /threadedComment/i.test(f);
++  const dead = Object.keys(zip.files).filter(isComment);
++  if (!dead.length) return buf;
++  dead.forEach((f) => zip.remove(f));
++  for (const name of Object.keys(zip.files)) {
++    if (/_rels\/.*\.rels$/i.test(name)) {
++      let xml = await zip.file(name).async("string");
++      xml = xml.replace(/<Relationship\b[^>]*\/>/gi, (tag) => (/comment|vml/i.test(tag) ? "" : tag));
++      zip.file(name, xml);
++    } else if (/^xl\/worksheets\/sheet\d+\.xml$/i.test(name)) {
++      let xml = await zip.file(name).async("string");
++      zip.file(name, xml.replace(/<legacyDrawing[^>]*\/>/gi, ""));
++    } else if (/^\[Content_Types\]\.xml$/i.test(name)) {
++      let xml = await zip.file(name).async("string");
++      xml = xml.replace(/<Override\b[^>]*\/>/gi, (tag) => (/comment/i.test(tag) ? "" : tag))
++               .replace(/<Default\b[^>]*Extension="vml"[^>]*\/>/gi, "");
++      zip.file(name, xml);
++    }
++  }
++  return zip.generateAsync({ type: "nodebuffer" });
++}
++
++/** RFC-4180-ish CSV: quoted fields, embedded commas/quotes/newlines, ; or tab delimiters. */
++function parseCsv(text) {
++  text = text.replace(/^﻿/, "");
++  const first = text.split(/\r?\n/, 1)[0] || "";
++  const count = (ch) => (first.match(new RegExp(`\\${ch}`, "g")) || []).length;
++  const delim = [",", ";", "\t"].sort((a, b) => count(b) - count(a))[0];
++  const rows = []; let row = [], cur = "", q = false;
++  for (let i = 0; i < text.length; i++) {
++    const c = text[i];
++    if (q) {
++      if (c === '"' && text[i + 1] === '"') { cur += '"'; i++; }
++      else if (c === '"') q = false;
++      else cur += c;
++    } else if (c === '"') q = true;
++    else if (c === delim) { row.push(cur); cur = ""; }
++    else if (c === "\n" || c === "\r") {
++      if (c === "\r" && text[i + 1] === "\n") i++;
++      row.push(cur); rows.push(row); row = []; cur = "";
++    } else cur += c;
++  }
++  if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
++  return rows.map((r) => r.map((x) => x.trim()));
++}
++
++/** Any upload → [{ name, rows: value[][] }], one entry per non-empty sheet. */
++export async function readGrids(buf, filename = "") {
++  const isZip = buf.subarray(0, 2).toString() === "PK";
++  const isOle = buf.subarray(0, 4).toString("hex") === "d0cf11e0";
++  if (isOle || (/\.xls$/i.test(filename) && !isZip)) {
++    throw new Error("This is an old-style .xls file. Open it in Excel and use Save As → Excel Workbook (.xlsx), then upload that.");
++  }
++  if (!isZip) return [{ name: filename || "CSV", rows: parseCsv(buf.toString("utf8")) }];
++
++  const wb = new ExcelJS.Workbook();
++  try { await wb.xlsx.load(buf); }
++  catch { await wb.xlsx.load(await stripComments(buf)); }
++
++  const out = [];
++  for (const ws of wb.worksheets) {
++    if (ws.state && ws.state !== "visible") continue;          // hidden lookup tabs
++    const rows = [];
++    ws.eachRow({ includeEmpty: true }, (row, r) => {
++      const vals = [];
++      row.eachCell({ includeEmpty: true }, (cell, c) => {
++        // Merged cells: ExcelJS reports the master's value on each member cell, which is
++        // what we want for a merged group heading like "Electricity" over two columns.
++        vals[c - 1] = cell.value;
++      });
++      rows[r - 1] = vals;
++    });
++    for (let i = 0; i < rows.length; i++) if (!rows[i]) rows[i] = [];
++    if (rows.some((r) => r.some((v) => cellText(v)))) out.push({ name: ws.name, rows });
++  }
++  return out;
++}
++
++/* ------------------------------------------------------------------ header recognition */
++
++const norm = (s) => cellText(s).toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
++
++/**
++ * Header rules, most specific first. A column is claimed by the first rule it matches, and
++ * each field takes the first column that matches it, so "Day EAC" goes to eac_day before
++ * the generic "EAC" rule can take it. `not` excludes look-alikes (a meter SERIAL number is
++ * not an MPAN; a "site contact" is not a site).
++ */
++const RULES = [
++  // Dates first: "contract end date" must not be read as anything else.
++  { key: "start_date", re: /\b(pref+er+ed|requested|new|proposed|desired|required)\b.*\bstart\b|\bstart\b.*\b(pref+er+ed|requested)\b/ },
++  { key: "end_date", re: /\b(pref+er+ed|requested|new|proposed|desired|required)\b.*\bend\b|\bend\b.*\b(pref+er+ed|requested)\b/ },
++  { key: "current_end", re: /\b(contract end|current end|end date|ced|expiry|expires|renewal date|contract expiry|end of contract|cont end|termination date)\b/ },
++  { key: "current_start", re: /\b(contract start|start date|live date|go live|supply start|csd)\b/ },
++
++  { key: "crn", re: /^crn$|company (reg|registration|no|number)|registration (no|number)|co reg|companies house/ },
++  { key: "postcode", re: /\bpost ?code\b|\bpostal code\b|\bzip\b|\bpcode\b/, not: /profile/ },
++
++  // Meter identifiers
++  { key: "mpan_full", re: /full mpan|mpan full|21 digit|supply number full|full supply/ },
++  { key: "mpan_top", re: /top ?line|mpan top|supplementary|mpan supp/ },
++  { key: "profile_class", re: /^pc$|profile class|^profile$/ },
++  { key: "mtc", re: /^mtc$|meter time ?switch/ },
++  { key: "llf", re: /^llf|^llfc|line loss/ },
++  // A single column holding both kinds ("Meter Point (MPAN/MPRN)", "MPXN") is split per row.
++  { key: "meter_id", re: /\bmpxn\b|mpan (or |and )?mprn|mprn (or |and )?mpan|\bmpan mprn\b/ },
++  { key: "mprn", re: /\bmprn\b|meter point reference|gas meter point|gas supply point|\bm number\b|gas mpr\b|gas meter number|gas meter ref/, not: /serial|msn/ },
++  { key: "mpan_core", re: /\bmpan\b|supply number|\bs number\b|meter point admin|elec(tricity)? meter (point|number|ref)|\bcore\b|bottom ?line/, not: /serial|msn|top ?line|mpan top|supplementary/ },
++  { key: "meter_id", re: /\bmpxn\b|mpan mprn|mprn mpan|meter point|supply point|meter (number|no|ref|reference|id)$|^meter$|^meter (number|no|ref|reference|id)\b|spid/, not: /serial|msn|type|read|make|model|location|operator/ },
++
++  // Consumption
++  { key: "eac_night", re: /\bnight\b|off ?peak|\bnt\b|eac night|night (eac|kwh|units)/ },
++  { key: "eac_ewe", re: /\bewe\b|evening|weekend|eve wk|e w e/ },
++  { key: "eac_day", re: /\bday\b|\bpeak\b|eac day|day (eac|kwh|units)|\bstandard\b|single rate/, not: /days|date|today|payday/ },
++  { key: "aq", re: /^aq\b|\baq\b|annual quantity|gas (eac|kwh|consumption|usage|volume|annual|aq)/ },
++  { key: "elec_eac", re: /(elec|electricity|power) (eac|kwh|consumption|usage|volume|annual)/ },
++  { key: "eac", re: /\beac\b|annual (consumption|usage|kwh|volume)|estimated annual|consumption|usage|\bkwh\b|volume|\bload\b|\bsoq\b/, not: /cost|spend|price|rate|charge|£|standing|p kwh/ },
++
++  { key: "fuel", re: /^(fuel|utility|commodity|energy|energy type|fuel type|utility type|supply type|product type|service|type)$/ },
++
++  // Names and addresses
++  { key: "business_name", re: /business name|company name|customer name|client name|account name|legal (name|entity)|trading name|organi[sz]ation|tenant name|^(business|company|customer|client|account|tenant|entity|occupier|registered name|landlord)$/, not: /contact|number|no\b|ref|id$|email|phone/ },
++  { key: "site_name", re: /site name|property name|premises|^site$|^property$|^location$|building|site (description|ref|reference)|^unit$|^store$|^branch$/, not: /contact|email|phone/ },
++  { key: "address", re: /address|street|line ?1|^line 2|^town$|^city$|^county$|^locality$|^area$/, not: /email|invoice|billing|correspondence/, multi: true },
++];
++
++const TEMPLATE_HEADERS = new Set(["business name", "postcode", "crn", "mpan top line", "mpan core", "eac day", "eac night",
++  "eac ewe", "mprn 10 digit", "aq", "prefered start date dd mm yyyy", "prefered end date dd mm yyyy",
++  "preferred start date dd mm yyyy", "preferred end date dd mm yyyy"]);
++
++/** Match a header row. Returns { map: key→colIndex (address → [cols]), score, used }. */
++function mapHeader(header) {
++  const map = {}, used = new Set();
++  const texts = header.map(norm);
++  for (const rule of RULES) {
++    for (let i = 0; i < texts.length; i++) {
++      const t = texts[i];
++      if (!t || used.has(i) || t.length > 60) continue;
++      if (!rule.re.test(t) || (rule.not && rule.not.test(t))) continue;
++      if (rule.multi) { (map[rule.key] ||= []).push(i); used.add(i); continue; }
++      if (map[rule.key] != null) continue;
++      map[rule.key] = i; used.add(i);
++    }
++  }
++  const has = (k) => map[k] != null;
++  const meter = has("mpan_core") || has("mprn") || has("meter_id") || has("mpan_full");
++  const consumption = ["eac_day", "eac_night", "eac_ewe", "aq", "eac", "elec_eac"].some(has);
++  const score = Object.keys(map).length + (meter ? 3 : 0) + (consumption ? 1 : 0);
++  return { map, score, meter, used };
++}
++
++/** Find the header row in a sheet: the row (or pair of rows, for two-line headings) that matches best. */
++function findHeader(rows) {
++  let best = null;
++  const limit = Math.min(rows.length, 60);
++  for (let r = 0; r < limit; r++) {
++    const row = rows[r] || [];
++    const textCells = row.filter((v) => { const s = cellText(v); return s && !/^[\d\s.,/-]+$/.test(s); });
++    if (textCells.length < 2) continue;
++    const candidates = [{ header: row, at: r, span: 1 }];
++    if (r > 0 && (rows[r - 1] || []).some((v) => cellText(v))) {
++      const above = rows[r - 1];
++      const width = Math.max(row.length, above.length);
++      const joined = Array.from({ length: width }, (_, i) => `${cellText(above[i])} ${cellText(row[i])}`.trim());
++      candidates.push({ header: joined, at: r, span: 2 });
++    }
++    for (const c of candidates) {
++      const m = mapHeader(c.header);
++      if (!m.meter) continue;
++      if (!best || m.score > best.score) best = { ...c, ...m };
++    }
++  }
++  return best;
++}
++
++/** A name for the portfolio when the file has no business-name column. */
++function documentName(grids, filename) {
++  for (const g of grids) {
++    for (const row of g.rows.slice(0, 15)) {
++      for (let i = 0; i < row.length; i++) {
++        const t = cellText(row[i]);
++        const m = t.match(/^(customer|client|company|business|account|group|portfolio|landlord|organisation)(\s*name)?\s*[:\-]\s*(.+)$/i);
++        if (m && m[3].trim()) return { name: m[3].trim(), from: `"${t}" at the top of ${g.name}` };
++        if (/^(customer|client|company|business|account|group|portfolio)(\s*name)?\s*:?$/i.test(t)) {
++          const next = row.slice(i + 1).map(cellText).find(Boolean);
++          if (next) return { name: next, from: `"${t}" at the top of ${g.name}` };
++        }
++      }
++    }
++  }
++  const stem = String(filename || "").replace(/\.[^.]+$/, "")
++    .replace(/[_]+/g, " ")
++    .replace(/\b(summary|site ?list|sites?|meters?|portfolio|data|export|report|template|group|basket|quote|tender|final|copy|v\d+|\d{1,2}[.-]\d{1,2}[.-]\d{2,4})\b/gi, "")
++    .replace(/\s{2,}/g, " ").replace(/^[\s\-–()]+|[\s\-–()]+$/g, "").trim();
++  return stem ? { name: stem, from: `the file name "${filename}"` } : null;
++}
++
++const fuelOf = (v) => {
++  const s = norm(v);
++  if (/\bgas\b/.test(s)) return "GAS";
++  if (/elec|power|\bhh\b|\bnhh\b|\be\b/.test(s)) return "ELEC";
++  return null;
++};
++
++/* ------------------------------------------------------------------ conversion */
++
++/**
++ * @returns {{ rows, report }} rows are template-shaped (no `issues`, the caller checks them).
++ * report: { converted, sheets: [{ name, header_row, columns:[{from, to}] , ignored:[] }], assumptions:[], warnings:[] }
++ */
++export function convertGrids(grids, { filename = "" } = {}) {
++  const report = { converted: false, sheets: [], assumptions: [], warnings: [] };
++  const rows = [];
++  const docName = documentName(grids, filename);
++  let usedDocName = false, usedCurrentEnd = false, splitFull = false, lostPrecision = 0, builtTop = false;
++
++  for (const g of grids) {
++    const h = findHeader(g.rows);
++    if (!h) continue;
++    const { map } = h;
++    const labelOf = (i) => cellText(h.header[i]) || `Column ${i + 1}`;
++    const LABEL = { business_name: "Business Name", site_name: "(site name)", address: "(address → postcode)",
++      postcode: "Postcode", crn: "CRN", mpan_top: "MPAN Top Line", profile_class: "MPAN Top Line (PC)",
++      mtc: "MPAN Top Line (MTC)", llf: "MPAN Top Line (LLF)", mpan_core: "MPAN Core", mpan_full: "MPAN Top Line + Core",
++      mprn: "MPRN", meter_id: "MPAN Core / MPRN (by length)", eac_day: "EAC_DAY", eac_night: "EAC_NIGHT",
++      eac_ewe: "EAC_EWE", aq: "AQ", elec_eac: "EAC_DAY", eac: "EAC_DAY / AQ (by fuel)", fuel: "(fuel)",
++      start_date: "Preferred start date", end_date: "Preferred end date",
++      current_end: "Preferred start date (day after current end)", current_start: map.current_end == null ? "Preferred start date" : "(current contract start — not used)" };
++    const columns = [];
++    for (const [k, v] of Object.entries(map)) for (const i of [].concat(v)) columns.push({ from: labelOf(i), to: LABEL[k] || k, col: i });
++    columns.sort((a, b) => a.col - b.col);
++    const ignored = h.header.map((x, i) => (cellText(x) && !h.used.has(i) ? cellText(x) : null)).filter(Boolean);
++
++    const exactTemplate = h.at === 0 && h.span === 1
++      && h.header.filter((x) => cellText(x)).every((x) => TEMPLATE_HEADERS.has(norm(x)));
++    if (!exactTemplate) report.converted = true;
++    report.sheets.push({ name: g.name, header_row: h.at + 1, columns: columns.map(({ from, to }) => ({ from, to })), ignored });
++
++    const sheetFuel = /gas/i.test(g.name) && !/elec/i.test(g.name) ? "GAS" : /elec|power/i.test(g.name) && !/gas/i.test(g.name) ? "ELEC" : null;
++    const get = (cells, k) => (map[k] == null ? null : cells[map[k]]);
++    const headerKeys = new Set(h.header.map(norm).filter(Boolean));
++    let lastBusiness = "";
++
++    for (let r = h.at + 1; r < g.rows.length; r++) {
++      const cells = g.rows[r] || [];
++      const texts = cells.map(cellText);
++      if (!texts.some(Boolean)) continue;
++      const firstText = texts.find(Boolean) || "";
++      if (/^(sub ?)?totals?\b|^grand total|^total (eac|aq|kwh|consumption|sites)/i.test(firstText)) continue;
++      if (texts.filter(Boolean).length >= 2 && texts.filter(Boolean).every((t) => headerKeys.has(norm(t)))) continue; // repeated header
++
++      const row = {
++        row_no: r + 1, sheet: grids.length > 1 ? g.name : undefined,
++        business_name: cellText(get(cells, "business_name")),
++        postcode: "", crn: cellText(get(cells, "crn")),
++        mpan_top: "", mpan_core: "", eac_day: null, eac_night: null, eac_ewe: null,
++        mprn: "", aq: null, start_date: null, end_date: null,
++      };
++      // Business names are often written once and left blank for the sites below.
++      if (map.business_name != null) {
++        if (row.business_name) lastBusiness = row.business_name; else row.business_name = lastBusiness;
++      }
++      const site = cellText(get(cells, "site_name"));
++      const address = (map.address || []).map((i) => cellText(cells[i])).filter(Boolean).join(", ");
++      row.postcode = map.postcode != null ? normPostcode(get(cells, "postcode")) : "";
++      if (!row.postcode) row.postcode = findPostcode(address) || findPostcode(site);
++
++      // Fuel for this row: explicit column, else the sheet name, else worked out from the meter number.
++      const fuel = fuelOf(get(cells, "fuel")) || sheetFuel;
++
++      // Meter numbers.
++      const takeMpan = (v, isNumber) => {
++        const d = digits(v);
++        if (!d) return;
++        if (d.length >= 21) {
++          if (isNumber) { lostPrecision++; }
++          row.mpan_top = row.mpan_top || d.slice(0, d.length - 13);
++          row.mpan_core = d.slice(-13); splitFull = true;
++        } else row.mpan_core = d;
++      };
++      const isNum = (v) => typeof raw(v) === "number";
++      if (map.mpan_full != null) takeMpan(get(cells, "mpan_full"), isNum(get(cells, "mpan_full")));
++      if (map.mpan_core != null && !row.mpan_core) takeMpan(get(cells, "mpan_core"), isNum(get(cells, "mpan_core")));
++      if (map.mprn != null) row.mprn = digits(get(cells, "mprn"));
++      if (map.meter_id != null) {
++        const v = get(cells, "meter_id"), d = digits(v);
++        if (d) {
++          if (fuel === "GAS" || (!fuel && d.length >= 6 && d.length <= 11)) { if (!row.mprn) row.mprn = d; }
++          else if (!row.mpan_core) takeMpan(v, isNum(v));
++        }
++      }
++      if (map.mpan_top != null) {
++        const t = digits(get(cells, "mpan_top"));
++        if (t) row.mpan_top = t;
++      }
++      if (!row.mpan_top && (map.profile_class != null || map.mtc != null || map.llf != null)) {
++        const pc = digits(get(cells, "profile_class")), mtc = digits(get(cells, "mtc")), llf = digits(get(cells, "llf"));
++        if (pc || mtc || llf) { row.mpan_top = `${pc.padStart(2, "0")}${mtc.padStart(3, "0")}${llf.padStart(3, "0")}`; builtTop = true; }
++      }
++      // A row with a gas fuel type but a number in the MPAN column is really a gas meter.
++      if (fuel === "GAS" && row.mpan_core && !row.mprn && row.mpan_core.length <= 11) { row.mprn = row.mpan_core; row.mpan_core = ""; }
++
++      // Consumption.
++      row.eac_day = numOrNull(get(cells, "eac_day"));
++      row.eac_night = numOrNull(get(cells, "eac_night"));
++      row.eac_ewe = numOrNull(get(cells, "eac_ewe"));
++      row.aq = numOrNull(get(cells, "aq"));
++      const elecEac = numOrNull(get(cells, "elec_eac"));
++      if (row.eac_day == null && elecEac != null) row.eac_day = elecEac;
++      const generic = numOrNull(get(cells, "eac"));
++      if (generic != null) {
++        const isGas = fuel === "GAS" || (!fuel && row.mprn && !row.mpan_core);
++        if (isGas) { if (row.aq == null) row.aq = generic; }
++        else if (row.eac_day == null && row.eac_night == null && row.eac_ewe == null) row.eac_day = generic;
++      }
++
++      // Dates.
++      row.start_date = toIso(get(cells, "start_date"));
++      row.end_date = toIso(get(cells, "end_date"));
++      if (!row.start_date && map.current_end != null) {
++        const ced = toIso(get(cells, "current_end"));
++        if (ced) { row.start_date = addDays(ced, 1); usedCurrentEnd = true; }
++      }
++      // A lone "Start Date" with no end-date column is taken as the wanted start.
++      if (!row.start_date && map.current_end == null && map.current_start != null) {
++        row.start_date = toIso(get(cells, "current_start"));
++      }
++
++      const hasMeter = row.mpan_core || row.mprn;
++      if (!hasMeter && !row.business_name && !site) continue;            // notes, footers
++      if (!hasMeter && [row.eac_day, row.aq].every((x) => x == null) && !row.postcode) continue;
++
++      if (!row.business_name && docName) { row.business_name = docName.name; usedDocName = true; }
++      row._site = site || undefined;
++      rows.push(row);
++    }
++  }
++
++  if (usedDocName) report.assumptions.push(`No business-name column, so every site was given the name "${docName.name}" (taken from ${docName.from}). Edit the Business Name column in the converted template if that is wrong.`);
++  if (usedCurrentEnd) report.assumptions.push("Preferred start date was set to the day after each site's current contract end date.");
++  if (splitFull) report.assumptions.push("Full 21-digit MPANs were split into Top Line (first 8 digits) and Core (last 13).");
++  if (builtTop) report.assumptions.push("MPAN Top Line was built from the separate Profile Class, MTC and LLF columns.");
++  if (lostPrecision) report.warnings.push(`${lostPrecision} full MPAN(s) were stored as numbers in Excel, which drops digits beyond 15. Check those MPAN Cores, or format the column as Text in the source and re-upload.`);
++  if (report.sheets.length > 1) report.assumptions.push(`Sites were combined from ${report.sheets.length} sheets: ${report.sheets.map((s) => s.name).join(", ")}.`);
++  return { rows, report };
++}
++
++/* ------------------------------------------------------------------ writing the template */
++
++/** Fill the real supplier template with converted rows and return it as a Buffer. */
++export async function writeTemplate(templatePath, rows, { basket = false } = {}) {
++  const wb = new ExcelJS.Workbook();
++  await wb.xlsx.readFile(templatePath);
++  const ws = wb.worksheets[0];
++  const header = [];
++  ws.getRow(1).eachCell({ includeEmpty: true }, (c, i) => { header[i] = norm(c.value); });
++  const col = (re) => header.findIndex((h) => h && re.test(h));
++  const cols = {
++    business_name: col(/business name/), postcode: col(/post ?code/), crn: col(/^crn$/),
++    mpan_top: col(/mpan top/), mpan_core: col(/mpan core/), eac_day: col(/eac day/), eac_night: col(/eac night/),
++    eac_ewe: col(/eac ewe/), mprn: col(/mprn/), aq: col(/^aq$/), start_date: col(/start/), end_date: col(/end/),
++  };
++  // Keep the heading row's styling for the data; clear the sample rows.
++  const styleRow = ws.getRow(2);
++  const styles = {};
++  styleRow.eachCell({ includeEmpty: true }, (c, i) => { styles[i] = { ...c.style }; });
++  for (let r = ws.rowCount; r >= 2; r--) ws.spliceRows(r, 1);
++
++  const dmy = (iso) => (iso ? iso.split("-").reverse().join("/") : null);
++  const TEXT = new Set(["mpan_top", "mpan_core", "mprn", "crn"]);
++  rows.forEach((s, n) => {
++    const row = ws.getRow(n + 2);
++    for (const [k, i] of Object.entries(cols)) {
++      if (i < 1 || (k === "crn" && !basket)) continue;
++      let v = s[k];
++      if (k === "start_date" || k === "end_date") v = dmy(v);
++      if (v == null || v === "") continue;
++      const cell = row.getCell(i);
++      if (styles[i]) cell.style = { ...styles[i] };
++      cell.value = TEXT.has(k) ? String(v) : v;
++      if (TEXT.has(k) || k.endsWith("_date")) cell.numFmt = "@";
++    }
++    row.commit();
++  });
++  return Buffer.from(await wb.xlsx.writeBuffer());
++}
+diff --git a/amsl-backend/src/routes/groupQuotes.js b/amsl-backend/src/routes/groupQuotes.js
+index 230806a..988bb12 100644
+--- a/amsl-backend/src/routes/groupQuotes.js
++++ b/amsl-backend/src/routes/groupQuotes.js
+@@ -2,8 +2,7 @@ import { Router } from "express";
+ import { fileURLToPath } from "url";
+ import path from "path";
+ import fs from "fs";
+-import ExcelJS from "exceljs";
+-import JSZip from "jszip";
++import { readGrids, convertGrids, writeTemplate } from "../lib/siteConverter.js";
+ import { db } from "../db.js";
+ 
+ const r = Router();
+@@ -13,51 +12,7 @@ const TEMPLATES = {
+   basket: { file: "TemplateBasketFile.xlsx", name: "TemplateBasketFile.xlsx" },
+ };
+ 
+-/** Columns as they appear in the supplier's templates. Basket adds CRN — a basket is a set
+- *  of INDIVIDUAL contracts, so each business needs its own company registration number. */
+-const FIELDS = [
+-  ["business_name", /business\s*name/i, true],
+-  ["postcode", /post\s*code/i, false],
+-  ["crn", /^crn$|company\s*reg/i, false],
+-  ["mpan_top", /mpan\s*top/i, false],
+-  ["mpan_core", /mpan\s*core/i, false],
+-  ["eac_day", /eac[_ ]?day/i, false],
+-  ["eac_night", /eac[_ ]?night/i, false],
+-  ["eac_ewe", /eac[_ ]?ewe/i, false],
+-  ["mprn", /mprn/i, false],
+-  ["aq", /^aq$/i, false],
+-  ["start_date", /prefer+ed\s*start/i, false],
+-  ["end_date", /prefer+ed\s*end/i, false],
+-];
+-
+-const cellText = (v) => {
+-  if (v == null) return "";
+-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+-  if (typeof v === "object") {
+-    if (v.text) return String(v.text).trim();
+-    if (v.result != null) return String(v.result).trim();
+-    if (Array.isArray(v.richText)) return v.richText.map((t) => t.text).join("").trim();
+-  }
+-  return String(v).trim();
+-};
+-const numOrNull = (v) => {
+-  const s = cellText(v).replace(/,/g, "");
+-  if (s === "") return null;
+-  const n = Number(s);
+-  return Number.isFinite(n) ? n : null;
+-};
+-const digits = (v) => cellText(v).replace(/\D/g, "");
+-
+-/** dd/mm/yyyy (as in the templates) or an Excel date, to ISO. */
+-function toIso(v) {
+-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+-  const s = cellText(v);
+-  if (!s) return null;
+-  const m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+-  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+-  const d = new Date(s);
+-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+-}
++const TEMPLATE_PATH = (kind) => path.join(HERE, "..", "templates", (TEMPLATES[kind] || TEMPLATES.group).file);
+ 
+ /**
+  * Check one row. Problems are reported per row rather than rejecting the whole file: a
+@@ -83,104 +38,24 @@ function checkRow(row) {
+ 
+ 
+ /**
+- * Remove cell comments from a workbook.
+- *
+- * Templates often carry tooltip notes on the header cells, and the spreadsheet reader
+- * throws on them ("Cannot read properties of undefined (reading 'comments')"), failing
+- * the whole upload. The comments are of no interest to us, so they are stripped and the
+- * file re-read rather than asking people to clean the file by hand.
++ * Read a group/basket upload into checked rows.
+  *
+- * An .xlsx is a zip: drop the comment and legacy-drawing parts, then remove the
+- * references to them, or the reader will complain about files that no longer exist.
++ * Any layout is accepted: the converter finds the heading row, recognises the usual
++ * alternative column names and reshapes the sites into the template's columns. The report
++ * says how each column was mapped and what was assumed, and when the file was not already
++ * the template, the rows are also written into the real template for download.
+  */
+-async function stripComments(buf) {
+-  const zip = await JSZip.loadAsync(buf);
+-  // Writers place these differently — xl/comments1.xml or xl/comments/comment1.xml — so
+-  // match on the file name rather than an exact path.
+-  const isComment = (f) => /comments?\d*\.xml$/i.test(f) || /\.vml$/i.test(f) || /vmlDrawing/i.test(f);
+-  const dead = Object.keys(zip.files).filter(isComment);
+-  if (!dead.length) return buf;
+-  dead.forEach((f) => zip.remove(f));
+-
+-  for (const name of Object.keys(zip.files)) {
+-    if (/_rels\/.*\.rels$/i.test(name)) {
+-      let xml = await zip.file(name).async("string");
+-      // Drop any relationship pointing at a comment or VML part, whatever the path style.
+-      xml = xml.replace(/<Relationship\b[^>]*\/>/gi, (tag) => (/comment|vml/i.test(tag) ? "" : tag));
+-      zip.file(name, xml);
+-    } else if (/^xl\/worksheets\/sheet\d+\.xml$/i.test(name)) {
+-      let xml = await zip.file(name).async("string");
+-      xml = xml.replace(/<legacyDrawing[^>]*\/>/gi, "");
+-      zip.file(name, xml);
+-    } else if (/^\[Content_Types\]\.xml$/i.test(name)) {
+-      let xml = await zip.file(name).async("string");
+-      xml = xml.replace(/<Override\b[^>]*\/>/gi, (tag) => (/comment/i.test(tag) ? "" : tag))
+-               .replace(/<Default\b[^>]*Extension="vml"[^>]*\/>/gi, "");
+-      zip.file(name, xml);
+-    }
++async function parseFile(buf, filename = "", kind = "group") {
++  const grids = await readGrids(buf, filename);
++  const { rows: converted, report } = convertGrids(grids, { filename });
++  const rows = converted.map((row) => ({ ...row, issues: checkRow(row) }));
++  const columns = report.sheets.flatMap((sh) => sh.columns.map((c) => c.from));
++  let template_base64 = null;
++  if (report.converted && rows.length) {
++    const buf2 = await writeTemplate(TEMPLATE_PATH(kind), rows, { basket: kind === "basket" });
++    template_base64 = buf2.toString("base64");
+   }
+-  return zip.generateAsync({ type: "nodebuffer" });
+-}
+-
+-/** Read a group/basket file (xlsx or csv) into checked rows. */
+-async function parseFile(buf, filename = "") {
+-  let header = [], body = [];
+-  if (/\.csv$/i.test(filename) || buf.subarray(0, 2).toString() !== "PK") {
+-    const lines = buf.toString("utf8").split(/\r?\n/).filter((l) => l.trim());
+-    if (!lines.length) return { rows: [], columns: [] };
+-    const split = (l) => l.split(",").map((c) => c.replace(/^"|"$/g, "").trim());
+-    header = split(lines[0]);
+-    body = lines.slice(1).map(split);
+-  } else {
+-    const wb = new ExcelJS.Workbook();
+-    try {
+-      await wb.xlsx.load(buf);
+-    } catch (e) {
+-      // Comments are the usual cause; strip them and try once more before giving up.
+-      const cleaned = await stripComments(buf);
+-      await wb.xlsx.load(cleaned);
+-    }
+-    const ws = wb.worksheets.find((w) => w.actualRowCount > 1) || wb.worksheets[0];
+-    if (!ws) return { rows: [], columns: [] };
+-    const rowsRaw = [];
+-    ws.eachRow({ includeEmpty: false }, (row) => {
+-      const vals = [];
+-      row.eachCell({ includeEmpty: true }, (cell, col) => { vals[col - 1] = cell.value; });
+-      rowsRaw.push(vals);
+-    });
+-    if (!rowsRaw.length) return { rows: [], columns: [] };
+-    header = rowsRaw[0].map(cellText);
+-    body = rowsRaw.slice(1);
+-  }
+-
+-  // Map each template column to a field by matching the header text.
+-  const idx = {};
+-  FIELDS.forEach(([key, re]) => {
+-    const i = header.findIndex((h) => re.test(String(h || "")));
+-    if (i >= 0) idx[key] = i;
+-  });
+-
+-  const rows = body.map((cells, n) => {
+-    const get = (k) => (idx[k] == null ? null : cells[idx[k]]);
+-    const row = {
+-      row_no: n + 2,           // +2: sheet row number, allowing for the header
+-      business_name: cellText(get("business_name")),
+-      postcode: cellText(get("postcode")),
+-      crn: cellText(get("crn")),
+-      mpan_top: digits(get("mpan_top")),
+-      mpan_core: digits(get("mpan_core")),
+-      eac_day: numOrNull(get("eac_day")),
+-      eac_night: numOrNull(get("eac_night")),
+-      eac_ewe: numOrNull(get("eac_ewe")),
+-      mprn: digits(get("mprn")),
+-      aq: numOrNull(get("aq")),
+-      start_date: toIso(get("start_date")),
+-      end_date: toIso(get("end_date")),
+-    };
+-    return { ...row, issues: checkRow(row) };
+-  }).filter((x) => x.business_name || x.mpan_core || x.mprn);   // drop blank trailing rows
+-
+-  return { rows, columns: header.filter(Boolean), matched: Object.keys(idx) };
++  return { rows, columns, report, template_base64 };
+ }
+ 
+ /* ---- Templates ---- */
+@@ -206,18 +81,26 @@ r.get("/templates/leads/csv", (_req, res) => {
+ 
+ /* ---- Parse an uploaded file without saving anything ---- */
+ r.post("/parse", async (req, res) => {
+-  const { file_base64, filename } = req.body || {};
++  const { file_base64, filename, kind } = req.body || {};
+   if (!file_base64) return res.status(400).json({ error: "file_base64 is required" });
+   let buf;
+   try { buf = Buffer.from(file_base64, "base64"); } catch { return res.status(400).json({ error: "The file could not be decoded" }); }
++  const k = String(kind || "group").toLowerCase() === "basket" ? "basket" : "group";
+   try {
+-    const { rows, columns, matched } = await parseFile(buf, filename || "");
++    const { rows, columns, report, template_base64 } = await parseFile(buf, filename || "", k);
+     if (!rows.length) {
+-      return res.status(422).json({ error: "No site rows found. Use the group or basket template, with a header row and one row per site." });
++      return res.status(422).json({
++        error: "No site rows found. The file needs a table with a heading row and a meter number column "
++          + "(MPAN / Supply Number or MPRN / Meter Point Reference), one row per site or meter.",
++      });
+     }
++    const stem = String(filename || "sites").replace(/\.[^.]+$/, "");
+     res.json({
+       data: {
+-        rows, columns, matched,
++        rows, columns, report,
++        converted: report.converted,
++        template_base64,
++        template_filename: template_base64 ? `${stem} - ${k === "basket" ? "Basket" : "Group"} Template.xlsx` : null,
+         total: rows.length,
+         with_issues: rows.filter((x) => x.issues.length).length,
+         businesses: [...new Set(rows.map((x) => x.business_name).filter(Boolean))],
+diff --git a/amsl-frontend/src/api.js b/amsl-frontend/src/api.js
+index 527d7fb..b3e3380 100644
+--- a/amsl-frontend/src/api.js
++++ b/amsl-frontend/src/api.js
+@@ -93,7 +93,7 @@ export const api = {
+   brandingSet: (b) => request(`/branding`, { method: "PUT", body: b }),
+   groupQuotes: (params) => request(`/group-quotes`, { params }),
+   groupQuote: (id) => request(`/group-quotes/${id}`),
+-  groupQuoteParse: (file_base64, filename) => request(`/group-quotes/parse`, { method: "POST", body: { file_base64, filename } }),
++  groupQuoteParse: (file_base64, filename, kind) => request(`/group-quotes/parse`, { method: "POST", body: { file_base64, filename, kind } }),
+   groupQuoteCreate: (body) => request(`/group-quotes`, { method: "POST", body }),
+   groupQuoteStatus: (id, status) => request(`/group-quotes/${id}/status`, { method: "PATCH", body: { status } }),
+   groupQuoteCreateLeads: (id, body) => request(`/group-quotes/${id}/create-leads`, { method: "POST", body }),
+diff --git a/amsl-frontend/src/components/BusinessTable.jsx b/amsl-frontend/src/components/BusinessTable.jsx
+index 2dc68ef..61f2547 100644
+--- a/amsl-frontend/src/components/BusinessTable.jsx
++++ b/amsl-frontend/src/components/BusinessTable.jsx
+@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
+ import { Plus, ArrowRightLeft, Trash2, Upload, Eye, Download, Users} from "lucide-react";
+ import { api, API_BASE } from "../api.js";
+ import { useList, Card, Badge, Spinner, ErrorBanner, Pager, Modal, Field } from "./ui.jsx";
++import { ConversionNotice } from "../pages/GroupQuotes.jsx";
+ 
+ const csd = (c, s, d) => `${c} | ${s} | ${d}`;
+ 
+@@ -370,13 +371,14 @@ function ImportGroup({ onClose, onDone }) {
+           Every site in this file belongs to <b>{parsed.businesses[0]}</b>, so one business will be created with all {parsed.total} sites on it.
+         </div>
+       )}
++      <ConversionNotice parsed={parsed} />
+       {parsed && (
+         <div style={{ fontSize: 12.5 }}>
+           <b>{parsed.total - parsed.with_issues}</b> site(s) ready{parsed.with_issues > 0 && <>, <b>{parsed.with_issues}</b> with problems that will be skipped</>}
+           {mode === "perBusiness" && <> · {parsed.businesses.length} business name(s)</>}
+           {bad.length > 0 && (
+             <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "8px 10px", marginTop: 8, maxHeight: 140, overflow: "auto", fontSize: 12 }}>
+-              {bad.slice(0, 10).map((r) => <div key={r.row_no}>Row {r.row_no} {r.business_name || "(no name)"} — {r.issues.join("; ")}</div>)}
++              {bad.slice(0, 10).map((r, i) => <div key={i}>{r.sheet ? `${r.sheet} ` : ""}Row {r.row_no} {r.business_name || "(no name)"} — {r.issues.join("; ")}</div>)}
+               {bad.length > 10 && <div className="sub">…and {bad.length - 10} more.</div>}
+             </div>
+           )}
+diff --git a/amsl-frontend/src/pages/GroupQuotes.jsx b/amsl-frontend/src/pages/GroupQuotes.jsx
+index 3e7499d..34c20bd 100644
+--- a/amsl-frontend/src/pages/GroupQuotes.jsx
++++ b/amsl-frontend/src/pages/GroupQuotes.jsx
+@@ -1,5 +1,5 @@
+-import { useState, useEffect, useCallback } from "react";
+-import { Plus, Download, Upload, Users, Trash2, AlertTriangle } from "lucide-react";
++import { useState, useEffect, useCallback, useMemo } from "react";
++import { Plus, Download, Upload, Users, Trash2, AlertTriangle, Wand2 } from "lucide-react";
+ import { api, API_BASE } from "../api.js";
+ import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
+ 
+@@ -98,7 +98,7 @@ export default function GroupQuotes() {
+ }
+ 
+ /** Shared uploader: reads a group/basket file and shows what was found before anything is saved. */
+-export function useSiteFile() {
++export function useSiteFile(kind = "group") {
+   const [parsed, setParsed] = useState(null);
+   const [busy, setBusy] = useState(false);
+   const [error, setError] = useState(null);
+@@ -117,7 +117,7 @@ export function useSiteFile() {
+         r.onerror = () => reject(new Error("Could not read the file"));
+         r.readAsDataURL(file);
+       });
+-      const { data } = await api.groupQuoteParse(b64, file.name);
++      const { data } = await api.groupQuoteParse(b64, file.name, kind);
+       setParsed(data);
+     } catch (e2) { setError(e2.message); }
+     setBusy(false);
+@@ -125,6 +125,51 @@ export function useSiteFile() {
+   return { parsed, setParsed, busy, error, setError, filename, onFile };
+ }
+ 
++/**
++ * Shown when an upload was not in the template layout: how each column was read, what was
++ * assumed, and a download of the same sites written into the real template.
++ */
++export function ConversionNotice({ parsed }) {
++  const url = useMemo(() => {
++    if (!parsed?.template_base64) return null;
++    const bin = atob(parsed.template_base64);
++    const bytes = new Uint8Array(bin.length);
++    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
++    return URL.createObjectURL(new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
++  }, [parsed?.template_base64]);
++  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
++  if (!parsed?.converted || !parsed.report) return null;
++  const { sheets = [], assumptions = [], warnings = [] } = parsed.report;
++  return (
++    <div style={{ background: "#eef2ff", border: "1px solid #c7d2fe", borderRadius: 8, padding: "10px 12px", fontSize: 12, marginTop: 10 }}>
++      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
++        <div style={{ fontWeight: 700 }}>
++          <Wand2 size={12} style={{ verticalAlign: "-2px" }} /> This file wasn't in the template layout, so it has been converted
++        </div>
++        {url && (
++          <a className="btn sm" href={url} download={parsed.template_filename || "Converted Template.xlsx"}>
++            <Download size={13} /> Download converted template
++          </a>
++        )}
++      </div>
++      {sheets.map((sh) => (
++        <div key={sh.name} style={{ marginBottom: 4, overflowWrap: "anywhere" }}>
++          <span className="sub">{sheets.length > 1 ? `${sh.name}, ` : ""}headings on row {sh.header_row}: </span>
++          {sh.columns.map((c, i) => (
++            <span key={i}>{i > 0 && " · "}<span style={{ whiteSpace: "nowrap" }}><b>{c.from}</b> → {c.to}</span></span>
++          ))}
++          {sh.ignored.length > 0 && <div className="sub">Not used: {sh.ignored.join(", ")}</div>}
++        </div>
++      ))}
++      {assumptions.map((a, i) => <div key={`a${i}`}>• {a}</div>)}
++      {warnings.map((w, i) => (
++        <div key={`w${i}`} style={{ color: "#b45309", fontWeight: 600 }}><AlertTriangle size={12} style={{ verticalAlign: "-2px" }} /> {w}</div>
++      ))}
++      <div className="sub" style={{ marginTop: 4 }}>Check the rows below. If something was read wrongly, fix it in the converted template and upload that instead.</div>
++    </div>
++  );
++}
++
+ export function SiteFileSummary({ parsed }) {
+   if (!parsed) return null;
+   const bad = parsed.rows.filter((r) => r.issues.length);
+@@ -138,8 +183,8 @@ export function SiteFileSummary({ parsed }) {
+       {bad.length > 0 && (
+         <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 12px", fontSize: 12, marginBottom: 8, maxHeight: 150, overflow: "auto" }}>
+           <div style={{ fontWeight: 700, marginBottom: 4 }}><AlertTriangle size={12} style={{ verticalAlign: "-2px" }} /> Rows a supplier could not price:</div>
+-          {bad.slice(0, 12).map((r) => (
+-            <div key={r.row_no}>Row {r.row_no} {r.business_name || "(no name)"} — {r.issues.join("; ")}</div>
++          {bad.slice(0, 12).map((r, i) => (
++            <div key={i}>{r.sheet ? `${r.sheet} ` : ""}Row {r.row_no} {r.business_name || "(no name)"} — {r.issues.join("; ")}</div>
+           ))}
+           {bad.length > 12 && <div className="sub">…and {bad.length - 12} more.</div>}
+         </div>
+@@ -148,8 +193,8 @@ export function SiteFileSummary({ parsed }) {
+         <table className="tbl">
+           <thead><tr><th>Row</th><th>Business</th><th>Postcode</th><th>MPAN Core</th><th>EAC</th><th>MPRN</th><th>AQ</th><th>Start</th></tr></thead>
+           <tbody>
+-            {parsed.rows.map((r) => (
+-              <tr key={r.row_no} style={r.issues.length ? { background: "#fff7ed" } : undefined}>
++            {parsed.rows.map((r, i) => (
++              <tr key={i} style={r.issues.length ? { background: "#fff7ed" } : undefined}>
+                 <td className="mono">{r.row_no}</td>
+                 <td style={{ fontSize: 12 }}>{r.business_name || "—"}</td>
+                 <td style={{ fontSize: 12 }}>{r.postcode || "—"}</td>
+@@ -173,7 +218,7 @@ function GroupForm({ onClose, onSaved }) {
+   const [businesses, setBusinesses] = useState([]);
+   const [err, setErr] = useState(null);
+   const [saving, setSaving] = useState(false);
+-  const file = useSiteFile();
++  const file = useSiteFile(f.quote_kind === "Basket" ? "basket" : "group");
+   useEffect(() => {
+     api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {});
+     api.list("customers", { limit: 300 }).then((r) => setBusinesses(r.data)).catch(() => {});
+@@ -276,9 +321,11 @@ function GroupForm({ onClose, onSaved }) {
+         </label>
+         <span className="sub" style={{ fontSize: 11.5 }}>
+           {f.quote_kind === "Basket" ? "The basket template includes a company registration number per site." : "One row per site."}
++          {" "}Any site list works — other layouts are converted to the template automatically.
+         </span>
+       </div>
+       {file.error && <ErrorBanner error={file.error} />}
++      <ConversionNotice parsed={file.parsed} />
+       <SiteFileSummary parsed={file.parsed} />
+ 
+       <Field label="Notes"><textarea value={f.notes} onChange={set("notes")} rows={2}
+-- 
+2.43.0
+
+
+From 6fb5b2d53eda336d7c1f7425b78998b99c031aef Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 19:46:41 +0000
+Subject: [PATCH 2/2] Flag rows with no usable contract end date; label
+ total-consumption fallback
+
+Tested against the real Prospect Place Summary.xlsx: all 26 meters convert.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013woNdCYjEWo3YqUdF665fh
+---
+ amsl-backend/src/lib/siteConverter.js | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/amsl-backend/src/lib/siteConverter.js b/amsl-backend/src/lib/siteConverter.js
+index 73d5f34..7b730f1 100644
+--- a/amsl-backend/src/lib/siteConverter.js
++++ b/amsl-backend/src/lib/siteConverter.js
+@@ -305,6 +305,7 @@ export function convertGrids(grids, { filename = "" } = {}) {
+   const report = { converted: false, sheets: [], assumptions: [], warnings: [] };
+   const rows = [];
+   const docName = documentName(grids, filename);
++  const noStart = [];
+   let usedDocName = false, usedCurrentEnd = false, splitFull = false, lostPrecision = 0, builtTop = false;
+ 
+   for (const g of grids) {
+@@ -316,7 +317,8 @@ export function convertGrids(grids, { filename = "" } = {}) {
+       postcode: "Postcode", crn: "CRN", mpan_top: "MPAN Top Line", profile_class: "MPAN Top Line (PC)",
+       mtc: "MPAN Top Line (MTC)", llf: "MPAN Top Line (LLF)", mpan_core: "MPAN Core", mpan_full: "MPAN Top Line + Core",
+       mprn: "MPRN", meter_id: "MPAN Core / MPRN (by length)", eac_day: "EAC_DAY", eac_night: "EAC_NIGHT",
+-      eac_ewe: "EAC_EWE", aq: "AQ", elec_eac: "EAC_DAY", eac: "EAC_DAY / AQ (by fuel)", fuel: "(fuel)",
++      eac_ewe: "EAC_EWE", aq: "AQ", elec_eac: "EAC_DAY", eac: (map.eac_day != null || map.eac_night != null || map.aq != null)
++        ? "(total — only used where the day/night figures are blank)" : "EAC_DAY / AQ (by fuel)", fuel: "(fuel)",
+       start_date: "Preferred start date", end_date: "Preferred end date",
+       current_end: "Preferred start date (day after current end)", current_start: map.current_end == null ? "Preferred start date" : "(current contract start — not used)" };
+     const columns = [];
+@@ -413,6 +415,9 @@ export function convertGrids(grids, { filename = "" } = {}) {
+       if (!row.start_date && map.current_end != null) {
+         const ced = toIso(get(cells, "current_end"));
+         if (ced) { row.start_date = addDays(ced, 1); usedCurrentEnd = true; }
++        else if (cellText(get(cells, "current_end"))) {
++          noStart.push(`${grids.length > 1 ? `${g.name} ` : ""}row ${r + 1} ("${cellText(get(cells, "current_end"))}")`);
++        }
+       }
+       // A lone "Start Date" with no end-date column is taken as the wanted start.
+       if (!row.start_date && map.current_end == null && map.current_start != null) {
+@@ -434,6 +439,7 @@ export function convertGrids(grids, { filename = "" } = {}) {
+   if (splitFull) report.assumptions.push("Full 21-digit MPANs were split into Top Line (first 8 digits) and Core (last 13).");
+   if (builtTop) report.assumptions.push("MPAN Top Line was built from the separate Profile Class, MTC and LLF columns.");
+   if (lostPrecision) report.warnings.push(`${lostPrecision} full MPAN(s) were stored as numbers in Excel, which drops digits beyond 15. Check those MPAN Cores, or format the column as Text in the source and re-upload.`);
++  if (noStart.length) report.warnings.push(`No start date could be worked out for ${noStart.join(", ")}. Add a preferred start date for these in the converted template if the supplier needs one.`);
+   if (report.sheets.length > 1) report.assumptions.push(`Sites were combined from ${report.sheets.length} sheets: ${report.sheets.map((s) => s.name).join(", ")}.`);
+   return { rows, report };
+ }
+-- 
+2.43.0
+
