@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { db } from "../db.js";
+import fs from "fs";
+import path from "path";
 import { parseElecRows, reconcile, compareToReference, resolveDno, N, CHARGES, extractBillFields, arithmeticFindings, capacityFindings } from "../lib/billReconcile.js";
 // pdfjs-dist is used directly rather than pdf-parse: pdf-parse bundles a 2017 pdf.js that
 // leaks state between documents, so one upload could corrupt the parse of the next.
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import * as pricebook from "../lib/commodityPricebook.js";
 
 const r = Router();
 const all = (sql, ...p) => db.prepare(sql).all(...p);
@@ -205,6 +208,22 @@ function validateBill(b, contract, opts = {}) {
     }
   }
 
+  /* ---- Commodity (unit rate) against the market or the supplier's own rate ----
+     Distinct from the Rate check above: that compares the bill to the CONTRACT, this asks
+     whether the energy rate itself was fair for that supplier, fuel and month. A no-op
+     until a pricebook is loaded, and wrapped so a bad data file cannot fail a validation. */
+  let commodityOvercharge = 0;
+  try {
+    const { ym, year } = pricebook.periodParts(b.period);
+    const commodity = pricebook.overcharge({
+      fuel: b.utility, billed_unit: bUnit || null, consumption_kwh: consumption,
+      ym, year, supplier: (b.supplier_name || "").trim() || null,
+    });
+    if (commodity) { findings.push(commodity); commodityOvercharge = commodity.amount; }
+  } catch (e) {
+    console.warn("[CommodityPricebook] skipped:", e.message);
+  }
+
   /* ---- Capacity trio (HH sites): ASC, excess capacity, reactive power ---- */
   const capFindings = capacityFindings(b, days);
   findings.push(...capFindings);
@@ -252,7 +271,7 @@ function validateBill(b, contract, opts = {}) {
   // arithmetic check tests each line against its OWN printed rate, not the contract rate.
   const totalClaim = Math.round((
     Math.max(0, variance) + meterReadOvercharge + vatOvercharge + tnuosOvercharge + duosOvercharge + cclRebate + eiiRelief + nccCompensation
-    + capacityOvercharge + arithOvercharge
+    + capacityOvercharge + arithOvercharge + commodityOvercharge
   ) * 100) / 100;
   const status = findings.length ? "Discrepancy" : "Pass";
 
@@ -270,6 +289,7 @@ function validateBill(b, contract, opts = {}) {
     volume: { eac, tolerancePct, annualised, status: volumeStatus },
     duplicate_flag: duplicateFlag, meter_data_flag: meterDataFlag,
     capacity: { overcharge: Math.round(capacityOvercharge * 100) / 100, findings: capFindings.length },
+    commodity: { overcharge: Math.round(commodityOvercharge * 100) / 100, pricebook: pricebook.available() },
     arithmetic: { overcharge: Math.round(arithOvercharge * 100) / 100, checked: !!parsed },
     total_claim: totalClaim,
   };
@@ -616,6 +636,51 @@ r.get("/claim-stages", (_req, res) => {
 });
 
 /* GET one */
+
+
+/* ---- Commodity pricebook (admin) ---- */
+r.get("/commodity/status", (_req, res) => res.json({ data: pricebook.status() }));
+
+/** Look up the fair rate for a fuel/month without running a whole validation. */
+r.get("/commodity/lookup", (req, res) => {
+  const { fuel, supplier, period, dno, profile, consumption } = req.query;
+  const { ym, year } = pricebook.periodParts(period);
+  res.json({
+    data: {
+      ym, year,
+      supplier_rate: pricebook.supplierRate(fuel, supplier, ym),
+      benchmark: pricebook.benchmark(fuel, year),
+      structured: pricebook.lookup({ fuel, dno, profile, consumption, ym }),
+    },
+  });
+});
+
+/** Upload the pricebook export. Validated before it replaces the live file. */
+r.post("/commodity/upload", (req, res) => {
+  const b64 = req.body?.file_base64;
+  if (!b64) return res.status(400).json({ error: "file_base64 is required" });
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+  } catch (e) {
+    return res.status(400).json({ error: "That file is not valid JSON" });
+  }
+  // Check the shape before overwriting: a wrong file here would silently disable the
+  // commodity check on every future bill.
+  const okShape = parsed && typeof parsed === "object"
+    && (parsed.benchmark || parsed.supplier_rates || Array.isArray(parsed.rates));
+  if (!okShape) {
+    return res.status(422).json({ error: "This does not look like a commodity pricebook — expected benchmark, supplier_rates or rates." });
+  }
+  try {
+    fs.mkdirSync(path.dirname(pricebook.PRICEBOOK_PATH), { recursive: true });
+    fs.writeFileSync(pricebook.PRICEBOOK_PATH, JSON.stringify(parsed));
+    pricebook.reload();
+  } catch (e) {
+    return res.status(500).json({ error: `Could not save the pricebook: ${e.message}` });
+  }
+  res.json({ data: pricebook.status() });
+});
 
 /* ---- Non-commodity reconciliation ----
    Separate from validateBill above: that compares a bill to the customer's CONTRACT,

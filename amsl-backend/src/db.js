@@ -1232,6 +1232,9 @@ export function migrate() {
 
   // Bill validation phase 2: the parsed bill lines (for arithmetic reconciliation) and the
   // half-hourly capacity trio (ASC, excess capacity, reactive power).
+  // A group quotation is usually put out to several suppliers at once, so the single
+  // supplier_id is kept for the primary partner and the full list stored alongside it.
+  addCol("ALTER TABLE group_quotes ADD COLUMN quote_suppliers TEXT");
   addCol("ALTER TABLE bill_validations ADD COLUMN rows_json        TEXT");
   addCol("ALTER TABLE bill_validations ADD COLUMN asc_kva          REAL");
   addCol("ALTER TABLE bill_validations ADD COLUMN capacity_rate    REAL");   // p/kVA/day

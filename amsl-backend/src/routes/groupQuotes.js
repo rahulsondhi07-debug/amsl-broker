@@ -3,6 +3,7 @@ import { fileURLToPath } from "url";
 import path from "path";
 import fs from "fs";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { db } from "../db.js";
 
 const r = Router();
@@ -80,6 +81,47 @@ function checkRow(row) {
   return issues;
 }
 
+
+/**
+ * Remove cell comments from a workbook.
+ *
+ * Templates often carry tooltip notes on the header cells, and the spreadsheet reader
+ * throws on them ("Cannot read properties of undefined (reading 'comments')"), failing
+ * the whole upload. The comments are of no interest to us, so they are stripped and the
+ * file re-read rather than asking people to clean the file by hand.
+ *
+ * An .xlsx is a zip: drop the comment and legacy-drawing parts, then remove the
+ * references to them, or the reader will complain about files that no longer exist.
+ */
+async function stripComments(buf) {
+  const zip = await JSZip.loadAsync(buf);
+  // Writers place these differently — xl/comments1.xml or xl/comments/comment1.xml — so
+  // match on the file name rather than an exact path.
+  const isComment = (f) => /comments?\d*\.xml$/i.test(f) || /\.vml$/i.test(f) || /vmlDrawing/i.test(f);
+  const dead = Object.keys(zip.files).filter(isComment);
+  if (!dead.length) return buf;
+  dead.forEach((f) => zip.remove(f));
+
+  for (const name of Object.keys(zip.files)) {
+    if (/_rels\/.*\.rels$/i.test(name)) {
+      let xml = await zip.file(name).async("string");
+      // Drop any relationship pointing at a comment or VML part, whatever the path style.
+      xml = xml.replace(/<Relationship\b[^>]*\/>/gi, (tag) => (/comment|vml/i.test(tag) ? "" : tag));
+      zip.file(name, xml);
+    } else if (/^xl\/worksheets\/sheet\d+\.xml$/i.test(name)) {
+      let xml = await zip.file(name).async("string");
+      xml = xml.replace(/<legacyDrawing[^>]*\/>/gi, "");
+      zip.file(name, xml);
+    } else if (/^\[Content_Types\]\.xml$/i.test(name)) {
+      let xml = await zip.file(name).async("string");
+      xml = xml.replace(/<Override\b[^>]*\/>/gi, (tag) => (/comment/i.test(tag) ? "" : tag))
+               .replace(/<Default\b[^>]*Extension="vml"[^>]*\/>/gi, "");
+      zip.file(name, xml);
+    }
+  }
+  return zip.generateAsync({ type: "nodebuffer" });
+}
+
 /** Read a group/basket file (xlsx or csv) into checked rows. */
 async function parseFile(buf, filename = "") {
   let header = [], body = [];
@@ -91,7 +133,13 @@ async function parseFile(buf, filename = "") {
     body = lines.slice(1).map(split);
   } else {
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(buf);
+    try {
+      await wb.xlsx.load(buf);
+    } catch (e) {
+      // Comments are the usual cause; strip them and try once more before giving up.
+      const cleaned = await stripComments(buf);
+      await wb.xlsx.load(cleaned);
+    }
     const ws = wb.worksheets.find((w) => w.actualRowCount > 1) || wb.worksheets[0];
     if (!ws) return { rows: [], columns: [] };
     const rowsRaw = [];
@@ -181,7 +229,7 @@ r.post("/parse", async (req, res) => {
 });
 
 /* ---- Quotes ---- */
-const COLS = ["quote_kind", "supplier_id", "business_id", "company_name", "basket_name", "group_name",
+const COLS = ["quote_kind", "supplier_id", "quote_suppliers", "business_id", "company_name", "basket_name", "group_name",
   "company_reg_no", "required_by", "terms", "product", "monthly_variable", "third_party_mop",
   "third_party_dadc", "nominate_dadc", "property_managing_agent", "green_electricity",
   "carbon_offset_gas", "carbon_offset_elec", "source_filename", "notes", "status"];
@@ -233,6 +281,13 @@ r.post("/", (req, res) => {
     if (BOOLS.has(c)) return b[c] ? 1 : 0;
     if (c === "status") return b.status || "Draft";
     if (c === "supplier_id" || c === "business_id") return b[c] ? Number(b[c]) : null;
+    // Suppliers arrive as an array from the multi-select; stored as a clean, de-duplicated
+    // comma-joined string so it reads straight out onto the quotation.
+    if (c === "quote_suppliers") {
+      const list = Array.isArray(b.quote_suppliers) ? b.quote_suppliers : String(b.quote_suppliers || "").split(",");
+      const clean = [...new Set(list.map((x) => String(x).trim()).filter(Boolean))];
+      return clean.length ? clean.join(", ") : null;
+    }
     return b[c] ?? null;
   });
   const tx = db.transaction(() => {

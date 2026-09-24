@@ -23,7 +23,7 @@ const CHECKS = [
 ];
 
 const empty = {
-  quote_kind: "Group", supplier_id: "", company_name: "", basket_name: "", group_name: "",
+  quote_kind: "Group", supplier_id: "", quote_suppliers: [], company_name: "", basket_name: "", group_name: "",
   company_reg_no: "", required_by: "", terms: [], product: "", notes: "",
   ...Object.fromEntries(CHECKS.map(([k]) => [k, false])),
 };
@@ -62,7 +62,7 @@ export default function GroupQuotes() {
         {!rows ? <Spinner /> : (
           <div className="table-wrap">
             <table className="tbl">
-              <thead><tr><th>Ref</th><th>Name</th><th>Type</th><th>Supplier</th><th>Sites</th><th>Total EAC</th><th>Total AQ</th><th>Required by</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>Ref</th><th>Name</th><th>Type</th><th>Suppliers</th><th>Sites</th><th>Total EAC</th><th>Total AQ</th><th>Required by</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 {rows.length === 0 && <tr><td colSpan={10} className="sub" style={{ padding: 16, textAlign: "center" }}>No group quotations yet.</td></tr>}
                 {rows.map((q) => (
@@ -70,7 +70,12 @@ export default function GroupQuotes() {
                     <td className="mono">{q.ref}</td>
                     <td className="name">{q.group_name || q.basket_name || "—"}{q.company_name && <div className="sub" style={{ fontSize: 11 }}>{q.company_name}</div>}</td>
                     <td><Badge tone={q.quote_kind === "Basket" ? "indigo" : "slate"}>{q.quote_kind}</Badge></td>
-                    <td style={{ fontSize: 12 }}>{q.supplier_name || "—"}</td>
+                    <td style={{ fontSize: 12 }}>
+                      {q.quote_suppliers || q.supplier_name || "—"}
+                      {q.quote_suppliers?.includes(",") && (
+                        <div className="sub" style={{ fontSize: 10.5 }}>{q.quote_suppliers.split(",").length} suppliers</div>
+                      )}
+                    </td>
                     <td className="mono">{q.sites}</td>
                     <td className="mono">{num(q.total_eac)}</td>
                     <td className="mono">{num(q.total_aq)}</td>
@@ -180,11 +185,17 @@ function GroupForm({ onClose, onSaved }) {
   const save = async () => {
     if (f.quote_kind === "Group" && !f.group_name.trim()) return setErr("Group Name is required for a group quotation");
     if (f.quote_kind === "Basket" && !f.basket_name.trim()) return setErr("Basket Name is required for a basket quotation");
+    if (!f.quote_suppliers.length) return setErr("Choose at least one supplier to quote");
     if (!file.parsed?.rows?.length) return setErr("Upload the completed group or basket file first");
     if (!f.terms.length) return setErr("Choose at least one contract term to quote");
     setSaving(true); setErr(null);
     try {
-      await api.groupQuoteCreate({ ...f, supplier_id: f.supplier_id || null, sites: file.parsed.rows, source_filename: file.filename });
+      await api.groupQuoteCreate({
+        ...f,
+        // The first choice stays the primary partner so existing screens still show one.
+        supplier_id: suppliers.find((s2) => s2.name === f.quote_suppliers[0])?.id ?? null,
+        sites: file.parsed.rows, source_filename: file.filename,
+      });
       onSaved();
     } catch (e) { setErr(e.message); setSaving(false); }
   };
@@ -201,17 +212,23 @@ function GroupForm({ onClose, onSaved }) {
             <option value="Basket">Basket — individual contracts</option>
           </select>
         </Field>
-        <Field label="Supplier / partner *">
-          <select value={f.supplier_id} onChange={set("supplier_id")}>
-            <option value="">Select…</option>
-            {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+        <Field label={<>Suppliers to quote * <span className="sub" style={{ fontWeight: 400, fontSize: 11 }}>(choose one or more)</span></>}>
+          <select multiple size={6} value={f.quote_suppliers} style={{ minHeight: 120 }}
+            onChange={(e) => setF({ ...f, quote_suppliers: [...e.target.selectedOptions].map((o) => o.value) })}>
+            {suppliers.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
           </select>
+          <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>
+            Hold Ctrl (⌘ on Mac) to pick several. {f.quote_suppliers.length > 0 && `${f.quote_suppliers.length} selected.`}
+          </div>
         </Field>
-        <Field label="Company name">
-          <select value={f.company_name} onChange={set("company_name")}>
-            <option value="">Select…</option>
-            {businesses.map((b) => <option key={b.id} value={b.business_name}>{b.business_name}</option>)}
-          </select>
+        <Field label={<>Company name <span className="sub" style={{ fontWeight: 400, fontSize: 11 }}>(pick one or type a new one)</span></>}>
+          {/* An editable combobox rather than a select: a new client will not be on the
+              list yet, and a plain dropdown left no way to enter them. */}
+          <input list="gq-companies" value={f.company_name} onChange={set("company_name")}
+            placeholder="Select… or type a new company" autoComplete="off" />
+          <datalist id="gq-companies">
+            {businesses.map((b) => <option key={b.id} value={b.business_name} />)}
+          </datalist>
         </Field>
 
         {f.quote_kind === "Basket"
@@ -294,7 +311,7 @@ function GroupView({ id, onClose }) {
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
         <Badge tone={q.quote_kind === "Basket" ? "indigo" : "slate"}>{q.quote_kind}</Badge>
         <span className="sub" style={{ fontSize: 12.5 }}>
-          {q.supplier_name || "No supplier"} · {q.sites.length} sites · terms {q.terms.join(", ") || "—"}
+          {q.quote_suppliers || q.supplier_name || "No supplier"} · {q.sites.length} sites · terms {q.terms.join(", ") || "—"}
           {q.product ? ` · ${q.product}` : ""}
         </span>
         <select value={q.status} onChange={(e) => setStatus(e.target.value)} style={{ marginLeft: "auto", padding: "5px 8px", borderRadius: 7, border: "1px solid var(--line,#E7EBF0)", fontSize: 12 }}>
