@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Plus, Download, Upload, Users, Trash2, AlertTriangle } from "lucide-react";
+import DocumentsPanel from "../components/DocumentsPanel.jsx";
 import { api, API_BASE } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
 
@@ -98,7 +99,7 @@ export default function GroupQuotes() {
 }
 
 /** Shared uploader: reads a group/basket file and shows what was found before anything is saved. */
-export function useSiteFile() {
+export function useSiteFile(defaultName = "") {
   const [parsed, setParsed] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -117,7 +118,7 @@ export function useSiteFile() {
         r.onerror = () => reject(new Error("Could not read the file"));
         r.readAsDataURL(file);
       });
-      const { data } = await api.groupQuoteParse(b64, file.name);
+      const { data } = await api.groupQuoteParse(b64, file.name, defaultName);
       setParsed(data);
     } catch (e2) { setError(e2.message); }
     setBusy(false);
@@ -135,6 +136,7 @@ export function SiteFileSummary({ parsed }) {
         {parsed.with_issues > 0 && <Badge tone="amber">{parsed.with_issues} with problems</Badge>}
         <span className="sub" style={{ fontSize: 12 }}>{parsed.businesses.length} business name(s) in the file</span>
       </div>
+      {parsed.summary && <PortfolioSummary s={parsed.summary} />}
       {bad.length > 0 && (
         <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 12px", fontSize: 12, marginBottom: 8, maxHeight: 150, overflow: "auto" }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}><AlertTriangle size={12} style={{ verticalAlign: "-2px" }} /> Rows a supplier could not price:</div>
@@ -146,22 +148,48 @@ export function SiteFileSummary({ parsed }) {
       )}
       <div className="table-wrap" style={{ maxHeight: 220, overflow: "auto" }}>
         <table className="tbl">
-          <thead><tr><th>Row</th><th>Business</th><th>Postcode</th><th>MPAN Core</th><th>EAC</th><th>MPRN</th><th>AQ</th><th>Start</th></tr></thead>
+          <thead><tr><th>Row</th><th>Business</th><th>MPAN Core</th><th>Type</th><th>EAC</th><th>kVA</th><th>MPRN</th><th>AQ</th><th>Supplier</th><th>Contract end</th></tr></thead>
           <tbody>
             {parsed.rows.map((r) => (
               <tr key={r.row_no} style={r.issues.length ? { background: "#fff7ed" } : undefined}>
                 <td className="mono">{r.row_no}</td>
                 <td style={{ fontSize: 12 }}>{r.business_name || "—"}</td>
-                <td style={{ fontSize: 12 }}>{r.postcode || "—"}</td>
                 <td className="mono" style={{ fontSize: 11.5 }}>{r.mpan_core || "—"}</td>
+                <td style={{ fontSize: 11.5 }}>{r.meter_type || "—"}</td>
                 <td className="mono">{num((r.eac_day || 0) + (r.eac_night || 0) + (r.eac_ewe || 0)) }</td>
+                <td className="mono">{r.kva ?? "—"}</td>
                 <td className="mono" style={{ fontSize: 11.5 }}>{r.mprn || "—"}</td>
                 <td className="mono">{num(r.aq)}</td>
-                <td style={{ fontSize: 11.5 }}>{r.start_date || "—"}</td>
+                <td style={{ fontSize: 11.5 }}>{r.current_supplier || "—"}</td>
+                <td style={{ fontSize: 11.5 }}>{r.out_of_contract ? <Badge tone="amber">Out of contract</Badge> : (r.contract_end ? new Date(r.contract_end).toLocaleDateString("en-GB") : "—")}</td>
               </tr>
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+/** Portfolio totals for an uploaded site list, and whether it clears the flex consortium entry level. */
+export function PortfolioSummary({ s }) {
+  const tile = (label, value, sub) => (
+    <div style={{ border: "1px solid var(--line,#E7EBF0)", borderRadius: 9, padding: "8px 10px", minWidth: 120 }}>
+      <div className="sub" style={{ fontSize: 10, letterSpacing: ".04em", textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontWeight: 800, fontSize: 15 }}>{value}</div>
+      {sub && <div className="sub" style={{ fontSize: 10.5 }}>{sub}</div>}
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+      {tile("Electricity sites", s.elec_sites, s.gas_sites ? `${s.gas_sites} gas` : null)}
+      {tile("Annual kWh", num(s.total_kwh), s.by_meter_type.map((m) => `${m.key} ${m.sites}`).join(" · "))}
+      {tile("Current supplier", s.by_supplier[0]?.key || "—", s.by_supplier.length > 1 ? `+${s.by_supplier.length - 1} other` : null)}
+      {tile("Out of contract", s.out_of_contract, s.contract_end_dates.length ? `Others end ${s.contract_end_dates.map((d) => new Date(d).toLocaleDateString("en-GB")).join(", ")}` : null)}
+      <div style={{ border: `1px solid ${s.flex_eligible ? "#a7f3d0" : "#fed7aa"}`, background: s.flex_eligible ? "#ecfdf5" : "#fff7ed", borderRadius: 9, padding: "8px 10px", minWidth: 160 }}>
+        <div className="sub" style={{ fontSize: 10, letterSpacing: ".04em", textTransform: "uppercase" }}>Flex consortium</div>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>{s.flex_eligible ? "Eligible" : "Below threshold"}</div>
+        <div className="sub" style={{ fontSize: 10.5 }}>Entry level {num(s.flex_threshold_kwh)} kWh electricity</div>
       </div>
     </div>
   );
@@ -173,7 +201,7 @@ function GroupForm({ onClose, onSaved }) {
   const [businesses, setBusinesses] = useState([]);
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
-  const file = useSiteFile();
+  const file = useSiteFile(f.quote_kind === "Basket" ? f.basket_name : (f.group_name || f.company_name));
   useEffect(() => {
     api.list("suppliers", { limit: 300 }).then((r) => setSuppliers(r.data)).catch(() => {});
     api.list("customers", { limit: 300 }).then((r) => setBusinesses(r.data)).catch(() => {});
@@ -359,6 +387,7 @@ function GroupView({ id, onClose }) {
           {result.rows_skipped > 0 && ` ${result.rows_skipped} row(s) skipped because of the problems above.`}
         </div>
       )}
+      <DocumentsPanel source="group_quote" sourceId={id} businessId={q.business_id} title="Portfolio documents" compact />
     </Modal>
   );
 }

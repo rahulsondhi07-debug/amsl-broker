@@ -33,6 +33,10 @@ import Carbon from "./pages/Carbon.jsx";
 import NetworkCharges from "./pages/NetworkCharges.jsx";
 import FlexPosition from "./pages/FlexPosition.jsx";
 import FixedVsFlex from "./pages/FixedVsFlex.jsx";
+import MarketReports from "./pages/MarketReports.jsx";
+import Documents from "./pages/Documents.jsx";
+import Knowledge from "./pages/Knowledge.jsx";
+import ClientHub from "./pages/ClientHub.jsx";
 import Quotes from "./pages/Quotes.jsx";
 import NewQuote from "./pages/NewQuote.jsx";
 import Contracts from "./pages/Contracts.jsx";
@@ -57,6 +61,8 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          {/* The client hub is public: the token in the link is the only key. */}
+          <Route path="/hub/:token" element={<ClientHub />} />
           <Route element={<RequireAuth />}>
             <Route element={<Layout />}>
               <Route index element={<Dashboard />} />
@@ -96,6 +102,9 @@ export default function App() {
               <Route path="network-charges" element={<NetworkCharges />} />
               <Route path="flex-position" element={<FlexPosition />} />
               <Route path="fixed-vs-flex" element={<FixedVsFlex />} />
+              <Route path="market-reports" element={<MarketReports />} />
+              <Route path="documents" element={<Documents />} />
+              <Route path="knowledge" element={<Knowledge />} />
               <Route path="contracts" element={<Contracts />} />
               <Route path="contracts/:id" element={<ContractDetail />} />
               <Route path="contracts/generate" element={<GenerateContract />} />

@@ -1,0 +1,1572 @@
+{
+ "gasMonthly": [
+  {
+   "period": "Apr-25",
+   "vol_req": 64,
+   "traded": 64,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 98.125,
+   "mtm": 118.86
+  },
+  {
+   "period": "May-25",
+   "vol_req": 43,
+   "traded": 43,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 77.755,
+   "mtm": 125.7
+  },
+  {
+   "period": "Jun-25",
+   "vol_req": 22,
+   "traded": 22,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 80.48,
+   "mtm": 111.22
+  },
+  {
+   "period": "Jul-25",
+   "vol_req": 19,
+   "traded": 19,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 76.1,
+   "mtm": 113.55035895
+  },
+  {
+   "period": "Aug-25",
+   "vol_req": 19,
+   "traded": 19,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 78.66,
+   "mtm": 115.05674389
+  },
+  {
+   "period": "Sep-25",
+   "vol_req": 93,
+   "traded": 93,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 77.925,
+   "mtm": 84.62
+  },
+  {
+   "period": "Oct-25",
+   "vol_req": 275,
+   "traded": 275,
+   "open": 0,
+   "hedged_pct": 1.0,
+   "market": 81.09,
+   "mtm": 112.27
+  },
+  {
+   "period": "Nov-25",
+   "vol_req": 403,
+   "traded": 403,
+   "open": 0,
+   "hedged_pct": 1.0,
+   "market": 77.81,
+   "mtm": 111.22
+  },
+  {
+   "period": "Dec-25",
+   "vol_req": 467,
+   "traded": 467,
+   "open": 0,
+   "hedged_pct": 1.0,
+   "market": 74.48,
+   "mtm": 116.87378409
+  },
+  {
+   "period": "Jan-26",
+   "vol_req": 508,
+   "traded": 508,
+   "open": 0,
+   "hedged_pct": 1.0,
+   "market": 74.815,
+   "mtm": 110.73980806
+  },
+  {
+   "period": "Feb-26",
+   "vol_req": 491,
+   "traded": 491,
+   "open": 0,
+   "hedged_pct": 1.0,
+   "market": 103.8,
+   "mtm": 112.19637093
+  },
+  {
+   "period": "Mar-26",
+   "vol_req": 429,
+   "traded": 429,
+   "open": 0,
+   "hedged_pct": 1.0,
+   "market": 77.795,
+   "mtm": 103.903194882971
+  },
+  {
+   "period": "Apr-26",
+   "vol_req": 387,
+   "traded": 387,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.18,
+   "mtm": 81.92
+  },
+  {
+   "period": "May-26",
+   "vol_req": 279,
+   "traded": 279,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 111.92,
+   "mtm": 85.92548649
+  },
+  {
+   "period": "Jun-26",
+   "vol_req": 158,
+   "traded": 158,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 110.51,
+   "mtm": 104.54721783
+  },
+  {
+   "period": "Jul-26",
+   "vol_req": 142,
+   "traded": 142,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 97.5,
+   "mtm": 118.04020667
+  },
+  {
+   "period": "Aug-26",
+   "vol_req": 140,
+   "traded": 140,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 141.81,
+   "mtm": 119.241071428571
+  },
+  {
+   "period": "Sep-26",
+   "vol_req": 212,
+   "traded": 212,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 162.6,
+   "mtm": 129.78
+  },
+  {
+   "period": "Oct-26",
+   "vol_req": 392,
+   "traded": 392,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 201.23,
+   "mtm": 108.79
+  },
+  {
+   "period": "Nov-26",
+   "vol_req": 535,
+   "traded": 535,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 201.23,
+   "mtm": 111.37
+  },
+  {
+   "period": "Dec-26",
+   "vol_req": 609,
+   "traded": 609,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 201.23,
+   "mtm": 114.11
+  },
+  {
+   "period": "Jan-27",
+   "vol_req": 658,
+   "traded": 658,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 201.23,
+   "mtm": 109.43
+  },
+  {
+   "period": "Feb-27",
+   "vol_req": 640,
+   "traded": 640,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 201.23,
+   "mtm": 108.18
+  },
+  {
+   "period": "Mar-27",
+   "vol_req": 566,
+   "traded": 566,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 201.23,
+   "mtm": 102.19
+  },
+  {
+   "period": "Apr-27",
+   "vol_req": 407,
+   "traded": 407,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.24,
+   "mtm": 96.97
+  },
+  {
+   "period": "May-27",
+   "vol_req": 303,
+   "traded": 303,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.24,
+   "mtm": 93.56
+  },
+  {
+   "period": "Jun-27",
+   "vol_req": 185,
+   "traded": 185,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.24,
+   "mtm": 85.06
+  },
+  {
+   "period": "Jul-27",
+   "vol_req": 170,
+   "traded": 170,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.24,
+   "mtm": 83.13
+  },
+  {
+   "period": "Aug-27",
+   "vol_req": 168,
+   "traded": 168,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.24,
+   "mtm": 82.85
+  },
+  {
+   "period": "Sep-27",
+   "vol_req": 195,
+   "traded": 195,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 136.24,
+   "mtm": 86.18
+  },
+  {
+   "period": "Oct-27",
+   "vol_req": 359,
+   "traded": 359,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 129.92,
+   "mtm": 77.84
+  },
+  {
+   "period": "Nov-27",
+   "vol_req": 488,
+   "traded": 488,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 129.92,
+   "mtm": 84.6
+  },
+  {
+   "period": "Dec-27",
+   "vol_req": 555,
+   "traded": 555,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 129.92,
+   "mtm": 86.87
+  },
+  {
+   "period": "Jan-28",
+   "vol_req": 599,
+   "traded": 599,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 129.92,
+   "mtm": 88.08
+  },
+  {
+   "period": "Feb-28",
+   "vol_req": 582,
+   "traded": 582,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 129.92,
+   "mtm": 87.63
+  },
+  {
+   "period": "Mar-28",
+   "vol_req": 516,
+   "traded": 516,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 129.92,
+   "mtm": 85.62
+  },
+  {
+   "period": "Apr-28",
+   "vol_req": 407,
+   "traded": 407,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 82.17,
+   "mtm": 73.64
+  },
+  {
+   "period": "May-28",
+   "vol_req": 303,
+   "traded": 303,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 82.17,
+   "mtm": 73.98
+  },
+  {
+   "period": "Jun-28",
+   "vol_req": 185,
+   "traded": 185,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 82.17,
+   "mtm": 74.82
+  },
+  {
+   "period": "Jul-28",
+   "vol_req": 170,
+   "traded": 170,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 82.17,
+   "mtm": 74.97
+  },
+  {
+   "period": "Aug-28",
+   "vol_req": 168,
+   "traded": 168,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 82.17,
+   "mtm": 74.98
+  },
+  {
+   "period": "Sep-28",
+   "vol_req": 195,
+   "traded": 195,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 82.17,
+   "mtm": 74.68
+  },
+  {
+   "period": "Oct-28",
+   "vol_req": 359,
+   "traded": 233,
+   "open": 126,
+   "hedged_pct": 0.649025069637883,
+   "market": 91.3,
+   "mtm": 81.1816991643454
+  },
+  {
+   "period": "Nov-28",
+   "vol_req": 488,
+   "traded": 315,
+   "open": 173,
+   "hedged_pct": 0.645491803278689,
+   "market": 91.3,
+   "mtm": 83.244262295082
+  },
+  {
+   "period": "Dec-28",
+   "vol_req": 555,
+   "traded": 355,
+   "open": 200,
+   "hedged_pct": 0.63963963963964,
+   "market": 91.3,
+   "mtm": 84.5518018018018
+  },
+  {
+   "period": "Jan-29",
+   "vol_req": 599,
+   "traded": 385,
+   "open": 214,
+   "hedged_pct": 0.642737896494157,
+   "market": 91.3,
+   "mtm": 85.6631886477462
+  },
+  {
+   "period": "Feb-29",
+   "vol_req": 589,
+   "traded": 379,
+   "open": 210,
+   "hedged_pct": 0.643463497453311,
+   "market": 91.3,
+   "mtm": 85.1549235993209
+  },
+  {
+   "period": "Mar-29",
+   "vol_req": 516,
+   "traded": 332,
+   "open": 184,
+   "hedged_pct": 0.643410852713178,
+   "market": 91.3,
+   "mtm": 82.9613953488372
+  },
+  {
+   "period": "Apr-29",
+   "vol_req": 277,
+   "traded": 122,
+   "open": 155,
+   "hedged_pct": 0.44043321299639,
+   "market": 71.55,
+   "mtm": 0
+  },
+  {
+   "period": "May-29",
+   "vol_req": 208,
+   "traded": 122,
+   "open": 86,
+   "hedged_pct": 0.586538461538462,
+   "market": 71.55,
+   "mtm": 0
+  },
+  {
+   "period": "Jun-29",
+   "vol_req": 134,
+   "traded": 122,
+   "open": 12,
+   "hedged_pct": 0.91044776119403,
+   "market": 71.55,
+   "mtm": 0
+  },
+  {
+   "period": "Jul-29",
+   "vol_req": 123,
+   "traded": 122,
+   "open": 1,
+   "hedged_pct": 0.991869918699187,
+   "market": 71.55,
+   "mtm": 0
+  },
+  {
+   "period": "Aug-29",
+   "vol_req": 122,
+   "traded": 122,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 71.55,
+   "mtm": 0
+  },
+  {
+   "period": "Sep-29",
+   "vol_req": 141,
+   "traded": 122,
+   "open": 19,
+   "hedged_pct": 0.865248226950355,
+   "market": 71.55,
+   "mtm": 0
+  },
+  {
+   "period": "Oct-29",
+   "vol_req": 248,
+   "traded": 122,
+   "open": 126,
+   "hedged_pct": 0.491935483870968,
+   "market": 79.6,
+   "mtm": 83.8865322580645
+  },
+  {
+   "period": "Nov-29",
+   "vol_req": 333,
+   "traded": 160,
+   "open": 173,
+   "hedged_pct": 0.480480480480481,
+   "market": 79.6,
+   "mtm": 84.0591591591592
+  },
+  {
+   "period": "Dec-29",
+   "vol_req": 378,
+   "traded": 178,
+   "open": 200,
+   "hedged_pct": 0.470899470899471,
+   "market": 79.6,
+   "mtm": 84.203544973545
+  },
+  {
+   "period": "Jan-30",
+   "vol_req": 407,
+   "traded": 193,
+   "open": 214,
+   "hedged_pct": 0.474201474201474,
+   "market": 79.6,
+   "mtm": 84.1537837837838
+  },
+  {
+   "period": "Feb-30",
+   "vol_req": 401,
+   "traded": 191,
+   "open": 210,
+   "hedged_pct": 0.476309226932668,
+   "market": 79.6,
+   "mtm": 84.1220199501247
+  },
+  {
+   "period": "Mar-30",
+   "vol_req": 352,
+   "traded": 168,
+   "open": 184,
+   "hedged_pct": 0.477272727272727,
+   "market": 79.6,
+   "mtm": 84.1075
+  },
+  {
+   "period": "Apr-30",
+   "vol_req": 277,
+   "traded": 0,
+   "open": 277,
+   "hedged_pct": 0,
+   "market": 69.34,
+   "mtm": 71.55
+  },
+  {
+   "period": "May-30",
+   "vol_req": 208,
+   "traded": 0,
+   "open": 208,
+   "hedged_pct": 0,
+   "market": 69.34,
+   "mtm": 71.55
+  },
+  {
+   "period": "Jun-30",
+   "vol_req": 134,
+   "traded": 0,
+   "open": 134,
+   "hedged_pct": 0,
+   "market": 69.34,
+   "mtm": 71.55
+  },
+  {
+   "period": "Jul-30",
+   "vol_req": 123,
+   "traded": 0,
+   "open": 123,
+   "hedged_pct": 0,
+   "market": 69.34,
+   "mtm": 71.55
+  },
+  {
+   "period": "Aug-30",
+   "vol_req": 122,
+   "traded": 0,
+   "open": 122,
+   "hedged_pct": 0,
+   "market": 69.34,
+   "mtm": 71.55
+  },
+  {
+   "period": "Sep-30",
+   "vol_req": 141,
+   "traded": 0,
+   "open": 141,
+   "hedged_pct": 0,
+   "market": 69.34,
+   "mtm": 71.55
+  },
+  {
+   "period": "Oct-30",
+   "vol_req": 248,
+   "traded": 0,
+   "open": 248,
+   "hedged_pct": 0,
+   "market": 78.06,
+   "mtm": 91.3
+  },
+  {
+   "period": "Nov-30",
+   "vol_req": 333,
+   "traded": 0,
+   "open": 333,
+   "hedged_pct": 0,
+   "market": 78.06,
+   "mtm": 91.3
+  },
+  {
+   "period": "Dec-30",
+   "vol_req": 364,
+   "traded": 0,
+   "open": 364,
+   "hedged_pct": 0,
+   "market": 78.06,
+   "mtm": 91.3
+  },
+  {
+   "period": "Jan-31",
+   "vol_req": 391,
+   "traded": 0,
+   "open": 391,
+   "hedged_pct": 0,
+   "market": 78.06,
+   "mtm": 91.3
+  },
+  {
+   "period": "Feb-31",
+   "vol_req": 386,
+   "traded": 0,
+   "open": 386,
+   "hedged_pct": 0,
+   "market": 78.06,
+   "mtm": 91.3
+  },
+  {
+   "period": "Mar-31",
+   "vol_req": 339,
+   "traded": 0,
+   "open": 339,
+   "hedged_pct": 0,
+   "market": 78.06,
+   "mtm": 91.3
+  }
+ ],
+ "gasSeasonal": [
+  {
+   "label": "Summer 2025",
+   "market": 81.50750000000001,
+   "mtm": 106.43144213061538,
+   "vol_req": 260,
+   "traded": 260,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Winter 2025",
+   "market": 81.63166666666667,
+   "mtm": 111.22995662492599,
+   "vol_req": 2573,
+   "traded": 2573,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Summer 2026",
+   "market": 126.75333333333334,
+   "mtm": 101.03454514035656,
+   "vol_req": 1318,
+   "traded": 1318,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Winter 2026",
+   "market": 201.23,
+   "mtm": 109.05920588235294,
+   "vol_req": 3400,
+   "traded": 3400,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Summer 2027",
+   "market": 136.24,
+   "mtm": 89.92126750700281,
+   "vol_req": 1428,
+   "traded": 1428,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Winter 2027",
+   "market": 129.92,
+   "mtm": 85.63494998386577,
+   "vol_req": 3099,
+   "traded": 3099,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Summer 2028",
+   "market": 82.17,
+   "mtm": 74.32301120448179,
+   "vol_req": 1428,
+   "traded": 1428,
+   "open": 0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Winter 2028",
+   "market": 91.3,
+   "mtm": 84.01720615168675,
+   "vol_req": 3106,
+   "traded": 1999,
+   "open": 1107,
+   "hedged_pct": 0.6435930457179653
+  },
+  {
+   "label": "Summer 2029",
+   "market": 71.55,
+   "mtm": 0.0,
+   "vol_req": 1005,
+   "traded": 732,
+   "open": 273,
+   "hedged_pct": 0.7283582089552239
+  },
+  {
+   "label": "Winter 2029",
+   "market": 79.60000000000001,
+   "mtm": 84.10167933496486,
+   "vol_req": 2119,
+   "traded": 1012,
+   "open": 1107,
+   "hedged_pct": 0.4775837659273242
+  },
+  {
+   "label": "Summer 2030",
+   "market": 69.34000000000002,
+   "mtm": null,
+   "vol_req": 1005,
+   "traded": 0,
+   "open": 1005,
+   "hedged_pct": 0.0
+  },
+  {
+   "label": "Winter 2030",
+   "market": 78.06,
+   "mtm": null,
+   "vol_req": 2061,
+   "traded": 0,
+   "open": 2061,
+   "hedged_pct": 0.0
+  }
+ ],
+ "powerMonthly": [
+  {
+   "period": "Oct-24",
+   "vol_req": 0.11,
+   "traded": 0.11,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 76.8,
+   "mtm": 83
+  },
+  {
+   "period": "Nov-24",
+   "vol_req": 0.34,
+   "traded": 0.34,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 96.7,
+   "mtm": 86.35
+  },
+  {
+   "period": "Dec-24",
+   "vol_req": 0.89,
+   "traded": 0.89,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 92.1,
+   "mtm": 84.23
+  },
+  {
+   "period": "Jan-25",
+   "vol_req": 1.12,
+   "traded": 1.12,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 89.1,
+   "mtm": 95.2
+  },
+  {
+   "period": "Feb-25",
+   "vol_req": 1.12,
+   "traded": 1.12,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 123.5,
+   "mtm": 94.74
+  },
+  {
+   "period": "Mar-25",
+   "vol_req": 1.03,
+   "traded": 1.03,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 91.75,
+   "mtm": 89.11
+  },
+  {
+   "period": "Apr-25",
+   "vol_req": 0.91,
+   "traded": 0.91,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 85.5,
+   "mtm": 72.78999999999999
+  },
+  {
+   "period": "May-25",
+   "vol_req": 0.94,
+   "traded": 0.94,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 72.35,
+   "mtm": 72.41
+  },
+  {
+   "period": "Jun-25",
+   "vol_req": 0.89,
+   "traded": 0.89,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 69.25,
+   "mtm": 72.54
+  },
+  {
+   "period": "Jul-25",
+   "vol_req": 0.96,
+   "traded": 0.96,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 71.75,
+   "mtm": 74.38
+  },
+  {
+   "period": "Aug-25",
+   "vol_req": 0.85,
+   "traded": 0.85,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 73,
+   "mtm": 71.67
+  },
+  {
+   "period": "Sep-25",
+   "vol_req": 0.98,
+   "traded": 0.98,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 75.5,
+   "mtm": 74.97000000000001
+  },
+  {
+   "period": "Oct-25",
+   "vol_req": 1.18,
+   "traded": 1.18,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 75.15,
+   "mtm": 85.31
+  },
+  {
+   "period": "Nov-25",
+   "vol_req": 1.28,
+   "traded": 1.28,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 79.75,
+   "mtm": 88.14
+  },
+  {
+   "period": "Dec-25",
+   "vol_req": 1.1,
+   "traded": 1.1,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 80.3,
+   "mtm": 84.93
+  },
+  {
+   "period": "Jan-26",
+   "vol_req": 1.34,
+   "traded": 1.34,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 85.6,
+   "mtm": 87.76
+  },
+  {
+   "period": "Feb-26",
+   "vol_req": 1.33,
+   "traded": 1.33,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 108,
+   "mtm": 87.62
+  },
+  {
+   "period": "Mar-26",
+   "vol_req": 1.24,
+   "traded": 1.24,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 74.65,
+   "mtm": 86.08
+  },
+  {
+   "period": "Apr-26",
+   "vol_req": 1.13,
+   "traded": 1.13,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 99.85,
+   "mtm": 69.74
+  },
+  {
+   "period": "May-26",
+   "vol_req": 1.09,
+   "traded": 1.09,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 90.25,
+   "mtm": 69.9
+  },
+  {
+   "period": "Jun-26",
+   "vol_req": 1.05,
+   "traded": 1.05,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 100.25,
+   "mtm": 68.33
+  },
+  {
+   "period": "Jul-26",
+   "vol_req": 1.11,
+   "traded": 1.11,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 91,
+   "mtm": 67.16
+  },
+  {
+   "period": "Aug-26",
+   "vol_req": 1.23,
+   "traded": 1.21,
+   "open": 0.020000000000000018,
+   "hedged_pct": 0.983739837398374,
+   "market": 120,
+   "mtm": 78.59439024390244
+  },
+  {
+   "period": "Sep-26",
+   "vol_req": 1.42,
+   "traded": 1.42,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 130.75,
+   "mtm": 77.91
+  },
+  {
+   "period": "Oct-26",
+   "vol_req": 1.52,
+   "traded": 1.49,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9802631578947368,
+   "market": 161.2,
+   "mtm": 89.75842105263159
+  },
+  {
+   "period": "Nov-26",
+   "vol_req": 1.76,
+   "traded": 1.73,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9829545454545454,
+   "market": 161.2,
+   "mtm": 90.87943181818181
+  },
+  {
+   "period": "Dec-26",
+   "vol_req": 1.55,
+   "traded": 1.52,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9806451612903225,
+   "market": 161.2,
+   "mtm": 92.09393548387098
+  },
+  {
+   "period": "Jan-27",
+   "vol_req": 1.82,
+   "traded": 1.79,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9835164835164835,
+   "market": 161.2,
+   "mtm": 90.09175824175824
+  },
+  {
+   "period": "Feb-27",
+   "vol_req": 1.8,
+   "traded": 1.77,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9833333333333333,
+   "market": 161.2,
+   "mtm": 89.47566666666667
+  },
+  {
+   "period": "Mar-27",
+   "vol_req": 1.68,
+   "traded": 1.65,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9821428571428571,
+   "market": 161.2,
+   "mtm": 86.63571428571429
+  },
+  {
+   "period": "Apr-27",
+   "vol_req": 1.35,
+   "traded": 1.33,
+   "open": 0.020000000000000018,
+   "hedged_pct": 0.9851851851851852,
+   "market": 109,
+   "mtm": 71.50385185185185
+  },
+  {
+   "period": "May-27",
+   "vol_req": 1.32,
+   "traded": 1.3,
+   "open": 0.020000000000000018,
+   "hedged_pct": 0.9848484848484849,
+   "market": 109,
+   "mtm": 71.00454545454546
+  },
+  {
+   "period": "Jun-27",
+   "vol_req": 1.34,
+   "traded": 1.32,
+   "open": 0.020000000000000018,
+   "hedged_pct": 0.9850746268656716,
+   "market": 109,
+   "mtm": 71.34059701492536
+  },
+  {
+   "period": "Jul-27",
+   "vol_req": 1.39,
+   "traded": 1.37,
+   "open": 0.019999999999999796,
+   "hedged_pct": 0.9856115107913671,
+   "market": 109,
+   "mtm": 72.14798561151079
+  },
+  {
+   "period": "Aug-27",
+   "vol_req": 1.25,
+   "traded": 1.23,
+   "open": 0.020000000000000018,
+   "hedged_pct": 0.984,
+   "market": 109,
+   "mtm": 69.72856
+  },
+  {
+   "period": "Sep-27",
+   "vol_req": 1.44,
+   "traded": 1.42,
+   "open": 0.020000000000000018,
+   "hedged_pct": 0.986111111111111,
+   "market": 109,
+   "mtm": 72.89847222222222
+  },
+  {
+   "period": "Oct-27",
+   "vol_req": 1.5,
+   "traded": 1.47,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.98,
+   "market": 108.25,
+   "mtm": 81.8782
+  },
+  {
+   "period": "Nov-27",
+   "vol_req": 1.68,
+   "traded": 1.65,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9821428571428571,
+   "market": 108.25,
+   "mtm": 83.28392857142858
+  },
+  {
+   "period": "Dec-27",
+   "vol_req": 1.32,
+   "traded": 1.29,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9772727272727273,
+   "market": 108.25,
+   "mtm": 80.08500000000001
+  },
+  {
+   "period": "Jan-28",
+   "vol_req": 1.58,
+   "traded": 1.55,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9810126582278481,
+   "market": 108.25,
+   "mtm": 82.53765822784813
+  },
+  {
+   "period": "Feb-28",
+   "vol_req": 1.56,
+   "traded": 1.53,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9807692307692307,
+   "market": 108.25,
+   "mtm": 82.37730769230771
+  },
+  {
+   "period": "Mar-28",
+   "vol_req": 1.45,
+   "traded": 1.42,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9793103448275862,
+   "market": 108.25,
+   "mtm": 81.41689655172414
+  },
+  {
+   "period": "Apr-28",
+   "vol_req": 1.05,
+   "traded": 0.97,
+   "open": 0.08000000000000007,
+   "hedged_pct": 0.9238095238095237,
+   "market": 71,
+   "mtm": 65.59821428571428
+  },
+  {
+   "period": "May-28",
+   "vol_req": 1.04,
+   "traded": 0.97,
+   "open": 0.07000000000000006,
+   "hedged_pct": 0.9326923076923076,
+   "market": 71,
+   "mtm": 65.625
+  },
+  {
+   "period": "Jun-28",
+   "vol_req": 1.09,
+   "traded": 0.97,
+   "open": 0.1200000000000001,
+   "hedged_pct": 0.8899082568807338,
+   "market": 71,
+   "mtm": 65.60443037974683
+  },
+  {
+   "period": "Jul-28",
+   "vol_req": 1.12,
+   "traded": 0.97,
+   "open": 0.15000000000000013,
+   "hedged_pct": 0.8660714285714285,
+   "market": 71,
+   "mtm": 65.60576923076923
+  },
+  {
+   "period": "Aug-28",
+   "vol_req": 0.97,
+   "traded": 0.97,
+   "open": 0,
+   "hedged_pct": 1,
+   "market": 71,
+   "mtm": 65.61379310344827
+  },
+  {
+   "period": "Sep-28",
+   "vol_req": 1.14,
+   "traded": 0.97,
+   "open": 0.16999999999999993,
+   "hedged_pct": 0.8508771929824562,
+   "market": 71,
+   "mtm": 65.91904761904762
+  },
+  {
+   "period": "Oct-28",
+   "vol_req": 1.11,
+   "traded": 0.42,
+   "open": 0.69,
+   "hedged_pct": 0.37837837837837834,
+   "market": 81,
+   "mtm": 75.7672072072072
+  },
+  {
+   "period": "Nov-28",
+   "vol_req": 1.3,
+   "traded": 0.42,
+   "open": 0.88,
+   "hedged_pct": 0.32307692307692304,
+   "market": 81,
+   "mtm": 76.532
+  },
+  {
+   "period": "Dec-28",
+   "vol_req": 1.09,
+   "traded": 0.42,
+   "open": 0.67,
+   "hedged_pct": 0.38532110091743116,
+   "market": 81,
+   "mtm": 75.67119266055046
+  },
+  {
+   "period": "Jan-29",
+   "vol_req": 1.32,
+   "traded": 0.42,
+   "open": 0.9,
+   "hedged_pct": 0.3181818181818182,
+   "market": 81,
+   "mtm": 76.59969696969696
+  },
+  {
+   "period": "Feb-29",
+   "vol_req": 1.3,
+   "traded": 0.42,
+   "open": 0.88,
+   "hedged_pct": 0.32307692307692304,
+   "market": 81,
+   "mtm": 76.532
+  },
+  {
+   "period": "Mar-29",
+   "vol_req": 1.21,
+   "traded": 0.42,
+   "open": 0.79,
+   "hedged_pct": 0.34710743801652894,
+   "market": 81,
+   "mtm": 76.1996694214876
+  },
+  {
+   "period": "Apr-29",
+   "vol_req": 1.02,
+   "traded": 0.46,
+   "open": 0.56,
+   "hedged_pct": 0.45098039215686275,
+   "market": 68.35,
+   "mtm": 66.04098039215687
+  },
+  {
+   "period": "May-29",
+   "vol_req": 0.99,
+   "traded": 0.46,
+   "open": 0.53,
+   "hedged_pct": 0.4646464646464647,
+   "market": 68.35,
+   "mtm": 65.9710101010101
+  },
+  {
+   "period": "Jun-29",
+   "vol_req": 0.97,
+   "traded": 0.46,
+   "open": 0.51,
+   "hedged_pct": 0.4742268041237114,
+   "market": 68.35,
+   "mtm": 65.9219587628866
+  },
+  {
+   "period": "Jul-29",
+   "vol_req": 0.99,
+   "traded": 0.46,
+   "open": 0.53,
+   "hedged_pct": 0.4646464646464647,
+   "market": 68.35,
+   "mtm": 65.9710101010101
+  },
+  {
+   "period": "Aug-29",
+   "vol_req": 0.87,
+   "traded": 0.46,
+   "open": 0.41,
+   "hedged_pct": 0.5287356321839081,
+   "market": 68.35,
+   "mtm": 65.64287356321837
+  },
+  {
+   "period": "Sep-29",
+   "vol_req": 1.03,
+   "traded": 0.46,
+   "open": 0.5700000000000001,
+   "hedged_pct": 0.44660194174757284,
+   "market": 68.35,
+   "mtm": 66.06339805825242
+  },
+  {
+   "period": "Oct-29",
+   "vol_req": 1.1,
+   "traded": 0.51,
+   "open": 0.5900000000000001,
+   "hedged_pct": 0.4636363636363636,
+   "market": 75.5,
+   "mtm": 73.65009090909092
+  },
+  {
+   "period": "Nov-29",
+   "vol_req": 1.29,
+   "traded": 0.51,
+   "open": 0.78,
+   "hedged_pct": 0.3953488372093023,
+   "market": 75.5,
+   "mtm": 73.92255813953489
+  },
+  {
+   "period": "Dec-29",
+   "vol_req": 1.08,
+   "traded": 0.51,
+   "open": 0.5700000000000001,
+   "hedged_pct": 0.4722222222222222,
+   "market": 75.5,
+   "mtm": 73.61583333333333
+  },
+  {
+   "period": "Jan-30",
+   "vol_req": 1.28,
+   "traded": 0.51,
+   "open": 0.77,
+   "hedged_pct": 0.3984375,
+   "market": 75.5,
+   "mtm": 73.91023437499999
+  },
+  {
+   "period": "Feb-30",
+   "vol_req": 1.26,
+   "traded": 0.51,
+   "open": 0.75,
+   "hedged_pct": 0.40476190476190477,
+   "market": 75.5,
+   "mtm": 73.885
+  },
+  {
+   "period": "Mar-30",
+   "vol_req": 1.17,
+   "traded": 0.51,
+   "open": 0.6599999999999999,
+   "hedged_pct": 0.43589743589743596,
+   "market": 75.5,
+   "mtm": 73.76076923076923
+  },
+  {
+   "period": "Apr-30",
+   "vol_req": 1.01,
+   "traded": 0.48,
+   "open": 0.53,
+   "hedged_pct": 0.4752475247524752,
+   "market": 68.35,
+   "mtm": 67.04534883720929
+  },
+  {
+   "period": "May-30",
+   "vol_req": 0.98,
+   "traded": 0.48,
+   "open": 0.5,
+   "hedged_pct": 0.4897959183673469,
+   "market": 68.35,
+   "mtm": 66.79166666666666
+  },
+  {
+   "period": "Jun-30",
+   "vol_req": 0.96,
+   "traded": 0.48,
+   "open": 0.48,
+   "hedged_pct": 0.5,
+   "market": 68.35,
+   "mtm": 67.03515625
+  },
+  {
+   "period": "Jul-30",
+   "vol_req": 0.97,
+   "traded": 0.48,
+   "open": 0.49,
+   "hedged_pct": 0.4948453608247423,
+   "market": 68.35,
+   "mtm": 67.0142857142857
+  },
+  {
+   "period": "Aug-30",
+   "vol_req": 0.85,
+   "traded": 0.48,
+   "open": 0.37,
+   "hedged_pct": 0.5647058823529412,
+   "market": 68.35,
+   "mtm": 66.91153846153846
+  },
+  {
+   "period": "Sep-30",
+   "vol_req": 1.02,
+   "traded": 0.48,
+   "open": 0.54,
+   "hedged_pct": 0.47058823529411764,
+   "market": 68.35,
+   "mtm": 66.4549504950495
+  },
+  {
+   "period": "Oct-30",
+   "vol_req": 1.1,
+   "traded": 0.3,
+   "open": 0.8,
+   "hedged_pct": 0.2727272727272727,
+   "market": 75.5,
+   "mtm": 75.04454545454546
+  },
+  {
+   "period": "Nov-30",
+   "vol_req": 1.26,
+   "traded": 0.3,
+   "open": 0.96,
+   "hedged_pct": 0.23809523809523808,
+   "market": 75.5,
+   "mtm": 75.10238095238095
+  },
+  {
+   "period": "Dec-30",
+   "vol_req": 0.85,
+   "traded": 0.3,
+   "open": 0.55,
+   "hedged_pct": 0.35294117647058826,
+   "market": 75.5,
+   "mtm": 74.91058823529411
+  },
+  {
+   "period": "Jan-31",
+   "vol_req": 1.08,
+   "traded": 0.3,
+   "open": 0.78,
+   "hedged_pct": 0.27777777777777773,
+   "market": 75.5,
+   "mtm": 75.03611111111111
+  },
+  {
+   "period": "Feb-31",
+   "vol_req": 1.06,
+   "traded": 0.3,
+   "open": 0.76,
+   "hedged_pct": 0.2830188679245283,
+   "market": 75.5,
+   "mtm": 75.02735849056603
+  },
+  {
+   "period": "Mar-31",
+   "vol_req": 0.97,
+   "traded": 0.3,
+   "open": 0.6699999999999999,
+   "hedged_pct": 0.30927835051546393,
+   "market": 75.5,
+   "mtm": 74.98350515463918
+  }
+ ],
+ "powerSeasonal": [
+  {
+   "label": "Winter 2024",
+   "market": 94.99166666666667,
+   "mtm": 90.66590021691974,
+   "traded": 0.7683333333333334,
+   "open": 0.0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Summer 2025",
+   "market": 74.55833333333334,
+   "mtm": 73.17537070524413,
+   "traded": 0.9216666666666665,
+   "open": 0.0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Winter 2025",
+   "market": 83.90833333333332,
+   "mtm": 86.71756358768407,
+   "traded": 1.245,
+   "open": 0.0,
+   "hedged_pct": 1.0
+  },
+  {
+   "label": "Summer 2026",
+   "market": 105.35000000000001,
+   "mtm": 72.32848961414008,
+   "traded": 1.1683333333333332,
+   "open": 0.003333333333333336,
+   "hedged_pct": 0.9971550497866287
+  },
+  {
+   "label": "Winter 2026",
+   "market": 161.20000000000002,
+   "mtm": 89.80194494206384,
+   "traded": 1.6583333333333334,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9822309970384995
+  },
+  {
+   "label": "Summer 2027",
+   "market": 109.0,
+   "mtm": 71.48059219032608,
+   "traded": 1.3283333333333334,
+   "open": 0.01999999999999998,
+   "hedged_pct": 0.9851668726823238
+  },
+  {
+   "label": "Winter 2027",
+   "market": 108.25,
+   "mtm": 82.0058058662964,
+   "traded": 1.485,
+   "open": 0.030000000000000027,
+   "hedged_pct": 0.9801980198019802
+  },
+  {
+   "label": "Summer 2028",
+   "market": 71.0,
+   "mtm": 65.66104243645438,
+   "traded": 0.9699999999999999,
+   "open": 0.09833333333333338,
+   "hedged_pct": 0.9079563182527299
+  },
+  {
+   "label": "Winter 2028",
+   "market": 81.0,
+   "mtm": 76.21696104315703,
+   "traded": 0.42,
+   "open": 0.8016666666666666,
+   "hedged_pct": 0.3437926330150068
+  },
+  {
+   "label": "Summer 2029",
+   "market": 68.35000000000001,
+   "mtm": 65.93520516308907,
+   "traded": 0.46,
+   "open": 0.5183333333333334,
+   "hedged_pct": 0.4701873935264054
+  },
+  {
+   "label": "Winter 2029",
+   "market": 75.5,
+   "mtm": 73.7907476646214,
+   "traded": 0.5099999999999999,
+   "open": 0.6866666666666666,
+   "hedged_pct": 0.426183844011142
+  },
+  {
+   "label": "Summer 2030",
+   "market": 68.35000000000001,
+   "mtm": 66.87549107079158,
+   "traded": 0.48,
+   "open": 0.48500000000000004,
+   "hedged_pct": 0.4974093264248705
+  },
+  {
+   "label": "Winter 2030",
+   "market": 75.5,
+   "mtm": 75.01741489975613,
+   "traded": 0.3,
+   "open": 0.7533333333333333,
+   "hedged_pct": 0.2848101265822785
+  }
+ ]
+}

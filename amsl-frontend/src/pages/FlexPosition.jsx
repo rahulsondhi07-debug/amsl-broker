@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
-import { Plus, Trash2, Printer, Upload, Flame, Zap } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Plus, Trash2, Printer, Upload, Flame, Zap, ArrowLeftRight, Target, AlertTriangle, RefreshCw } from "lucide-react";
+import DocumentsPanel from "../components/DocumentsPanel.jsx";
 import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
@@ -78,6 +79,7 @@ function BasketForm({ basket, onClose, onSaved }) {
     budget_power: basket?.budget_power ?? "", budget_gas: basket?.budget_gas ?? "",
     report_date: basket?.report_date || "", market_commentary: basket?.market_commentary || "",
     member_message: basket?.member_message || "",
+    common_end_date: basket?.common_end_date || "", manager_name: basket?.manager_name || "",
   });
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -111,6 +113,8 @@ function BasketForm({ basket, onClose, onSaved }) {
         <Field label="Management Fee"><input type="number" step="0.001" value={f.management_fee} onChange={set("management_fee")} /></Field>
         <Field label="Contract Start"><input type="date" value={f.contract_start} onChange={set("contract_start")} /></Field>
         <Field label="Contract End"><input type="date" value={f.contract_end} onChange={set("contract_end")} /></Field>
+        <Field label="Common End Date (extension target)"><input type="date" value={f.common_end_date} onChange={set("common_end_date")} /></Field>
+        <Field label="Consortium Manager"><input value={f.manager_name} onChange={set("manager_name")} placeholder="Your company" /></Field>
         <Field label="Budget — Gas (p/therm)"><input type="number" step="0.01" value={f.budget_gas} onChange={set("budget_gas")} /></Field>
         <Field label="Budget — Power (£/MWh)"><input type="number" step="0.01" value={f.budget_power} onChange={set("budget_power")} /></Field>
       </div>
@@ -129,6 +133,13 @@ function Snapshot({ basketId, onBack }) {
   const [showImport, setShowImport] = useState(null);
   const [showEdit, setShowEdit] = useState(false);
   const [showMember, setShowMember] = useState(false);
+  const [showTrades, setShowTrades] = useState(false);
+  const [showThr, setShowThr] = useState(false);
+  const [showReport, setShowReport] = useState(false);
+  const [askLetter, setAskLetter] = useState(null);
+  const resolver = useRef(null);
+  // The extension letter is addressed to one member, so ask which before generating it.
+  const optionsFor = (key) => key !== "extension_letter" ? Promise.resolve({}) : new Promise((res) => { resolver.current = res; setAskLetter({}); });
 
   const load = useCallback(() => {
     api.flexSnapshot(basketId).then((r) => { setData(r.data); setErr(null); }).catch((e) => setErr(e.message));
@@ -147,8 +158,11 @@ function Snapshot({ basketId, onBack }) {
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={() => setShowEdit(true)}>Edit</button>
           <button className="btn" onClick={() => setShowMember(true)}><Plus size={14} /> Member</button>
-          <button className="btn" onClick={() => setShowImport("Gas")}><Upload size={14} /> Import Gas</button>
-          <button className="btn" onClick={() => setShowImport("Power")}><Upload size={14} /> Import Power</button>
+          <button className="btn" onClick={() => setShowTrades(true)}><ArrowLeftRight size={14} /> Log trades</button>
+          <button className="btn" onClick={() => setShowThr(true)}><Target size={14} /> Thresholds</button>
+          <button className="btn" onClick={() => setShowReport(true)}><Upload size={14} /> Import report</button>
+          <button className="btn" onClick={() => setShowImport("Gas")}><Upload size={14} /> Paste Gas</button>
+          <button className="btn" onClick={() => setShowImport("Power")}><Upload size={14} /> Paste Power</button>
           <button className="btn primary" onClick={() => window.print()}><Printer size={14} /> Print / PDF</button>
         </div>
       </div>
@@ -171,8 +185,14 @@ function Snapshot({ basketId, onBack }) {
           </div>
         )}
 
-        {positions.length === 0 && <div className="sub">No position data yet — use Import to load a position report.</div>}
-        {positions.map((p) => <CommoditySection key={p.utility} p={p} onChanged={load} />)}
+        {data.validation?.length > 0 && (
+          <div className="no-print" style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 14px", fontSize: 12.5, marginBottom: 16 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}><AlertTriangle size={13} style={{ verticalAlign: "-2px" }} /> Check before sending to clients</div>
+            {data.validation.map((v, i) => <div key={i}>{v.utility ? `${v.utility} ` : ""}{v.label ? <b>{v.label}: </b> : null}{v.message}</div>)}
+          </div>
+        )}
+        {positions.length === 0 && <div className="sub">No position data yet — use Import report to load a position report.</div>}
+        {positions.map((p) => <CommoditySection key={p.utility} p={p} basketId={basketId} onChanged={load} />)}
 
         {basket.member_message && (
           <div style={{ background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8, padding: "14px 16px", marginTop: 8, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>
@@ -191,6 +211,12 @@ function Snapshot({ basketId, onBack }) {
         </div>
       </Card>
 
+      <DocumentsPanel source="basket" sourceId={basketId} title="Position documents" optionsFor={optionsFor} />
+      {askLetter && <LetterForm basketId={basketId} onCancel={() => { setAskLetter(null); resolver.current?.(false); }}
+        onOk={(o) => { setAskLetter(null); resolver.current?.(o); }} />}
+      {showTrades && <TradesForm basketId={basketId} positions={positions} onClose={() => setShowTrades(false)} onSaved={() => { setShowTrades(false); load(); }} />}
+      {showThr && <ThresholdsForm basketId={basketId} positions={positions} onClose={() => { setShowThr(false); load(); }} />}
+      {showReport && <ReportImport basketId={basketId} onClose={() => setShowReport(false)} onSaved={() => { setShowReport(false); load(); }} />}
       {showImport && <ImportForm basketId={basketId} utility={showImport} onClose={() => setShowImport(null)} onSaved={() => { setShowImport(null); load(); }} />}
       {showEdit && <BasketForm basket={basket} onClose={() => setShowEdit(false)} onSaved={() => { setShowEdit(false); load(); }} />}
       {showMember && <MemberForm basketId={basketId} onClose={() => setShowMember(false)} onSaved={() => { setShowMember(false); load(); }} />}
@@ -198,12 +224,15 @@ function Snapshot({ basketId, onBack }) {
   );
 }
 
-function CommoditySection({ p, onChanged }) {
+function CommoditySection({ p, basketId, onChanged }) {
   const [showTable, setShowTable] = useState(false);
   const u = p.units;
   const Icon = p.utility === "Gas" ? Flame : Zap;
   const seasonData = p.seasonal.map((s) => ({ ...s, hedged: Math.round(s.hedged_pct * 100), open_pct: 100 - Math.round(s.hedged_pct * 100) }));
-  const trend = p.monthly.map((m) => ({ period: m.label, market: m.market, locked: m.locked }));
+  // Untraded months have no locked price; show them at market, as the source reports do.
+  const trend = p.monthly.map((m) => ({ period: m.label, market: m.market, locked: m.traded > 0 && m.locked != null ? m.locked : m.market }));
+  const prev = p.previous;
+  const tr = p.latest_trades_summary;
 
   return (
     <div style={{ marginBottom: 30 }}>
@@ -219,7 +248,8 @@ function CommoditySection({ p, onChanged }) {
       <div className="grid cols-4" style={{ marginBottom: 16 }}>
         <Card><div className="sub" style={{ fontSize: 10.5 }}>OVERALL HEDGED</div>
           <div style={{ fontWeight: 800, fontSize: 20 }}>{pct(p.hedged_pct)}</div>
-          <div className="sub" style={{ fontSize: 10.5 }}>{fmtVol(p.traded_total, u)} of {fmtVol(p.required_total, u)} {u.volume}</div></Card>
+          <div className="sub" style={{ fontSize: 10.5 }}>{fmtVol(p.traded_total, u)} of {fmtVol(p.required_total, u)} {u.volume}</div>
+          {prev && <div className="sub" style={{ fontSize: 10.5 }}>was {pct(prev.hedged_pct)} on {new Date(prev.as_at).toLocaleDateString("en-GB")}</div>}</Card>
         <Card><div className="sub" style={{ fontSize: 10.5 }}>LOCKED-IN AVG</div>
           <div style={{ fontWeight: 800, fontSize: 20, color: COLOR_LOCKED }}>{fmtPrice(p.locked_avg, u)}</div>
           <div className="sub" style={{ fontSize: 10.5 }}>weighted by traded volume</div></Card>
@@ -230,8 +260,32 @@ function CommoditySection({ p, onChanged }) {
           <div style={{ fontWeight: 800, fontSize: 20, color: p.saving_vs_market > 0 ? "var(--brand,#0E7C7B)" : "#B91C1C" }}>
             {p.saving_vs_market == null ? "—" : fmtPrice(Math.abs(p.saving_vs_market), u)}
           </div>
-          <div className="sub" style={{ fontSize: 10.5 }}>{p.saving_pct != null ? `${p.saving_pct > 0 ? "" : "+"}${(-p.saving_pct).toFixed(1)}% vs market` : "—"}</div></Card>
+          <div className="sub" style={{ fontSize: 10.5 }}>{p.saving_pct != null ? `${Math.abs(p.saving_pct).toFixed(1)}% ${p.saving_pct >= 0 ? "below" : "above"} market` : "—"}</div></Card>
       </div>
+
+      {p.latest_trades?.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <h4 style={{ fontSize: 13, marginBottom: 6 }}>Trades executed {new Date(p.latest_trade_date).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}</h4>
+          <div className="table-wrap"><table className="tbl">
+            <thead><tr><th>Season</th><th>Clip</th><th>Price</th><th>Live market</th><th>vs market</th><th>Hedged before → after</th><th className="no-print"></th></tr></thead>
+            <tbody>{p.latest_trades.map((t) => {
+              const vs = t.live_market != null ? t.price - t.live_market : null;
+              return (
+                <tr key={t.id}>
+                  <td className="name">{t.season_label}</td>
+                  <td className="mono">{fmtVol(t.clip, u)} {u.volume}</td>
+                  <td className="mono">{fmtPrice(t.price, u)}</td>
+                  <td className="mono">{fmtPrice(t.live_market, u)}</td>
+                  <td className="mono" style={{ color: vs == null ? undefined : vs <= 0 ? "var(--brand,#0E7C7B)" : "#B91C1C" }}>{vs == null ? "—" : `${vs <= 0 ? "-" : "+"}${fmtPrice(Math.abs(vs), u)}`}</td>
+                  <td className="mono">{t.hedged_before != null ? `${pct(t.hedged_before)} → ${pct(t.hedged_after)}` : "—"}</td>
+                  <td className="no-print" style={{ textAlign: "right" }}><button className="btn ghost sm" title="Remove from the log (does not reverse the curve)" onClick={async () => { if (confirm("Remove this trade from the log? The curve is not changed.")) { await api.flexTradeDelete(t.id); onChanged(); } }}><Trash2 size={12} /></button></td>
+                </tr>
+              );
+            })}</tbody>
+          </table></div>
+          {tr && <div className="sub" style={{ fontSize: 11, marginTop: 4 }}>{fmtVol(tr.clip_total, u)} {u.volume} bought at a blended {fmtPrice(tr.blended_price, u)}{tr.blended_market != null ? ` vs a blended live market of ${fmtPrice(tr.blended_market, u)}` : ""}{tr.all_below_market ? " — every clip at or below market." : "."}</div>}
+        </div>
+      )}
 
       {/* Price by season */}
       <div style={{ marginBottom: 16 }}>
@@ -290,6 +344,9 @@ function CommoditySection({ p, onChanged }) {
         </div>
       )}
 
+      <button className="btn ghost sm no-print" onClick={async () => { if (confirm(`Rebuild ${p.utility} seasons from the monthly rows? Seasonal rows are overwritten.`)) { await api.flexRebuildSeasons(basketId, p.utility); onChanged(); } }} disabled={!p.monthly.length} title="Aggregate monthly rows into seasons">
+        <RefreshCw size={12} /> Rebuild seasons from months
+      </button>{" "}
       <button className="btn ghost sm no-print" onClick={() => setShowTable(!showTable)}>
         {showTable ? "Hide" : "View"} full seasonal detail table
       </button>
@@ -298,7 +355,7 @@ function CommoditySection({ p, onChanged }) {
           <table className="tbl">
             <thead><tr>
               <th>Season</th><th>Market ({u.price})</th><th>Locked-in ({u.price})</th><th>Saving</th>
-              <th>Volume required</th><th>Traded</th><th>Open</th><th>Hedged %</th><th className="no-print"></th>
+              <th>Volume required</th><th>Traded</th><th>Open</th><th>Hedged %</th><th>Target / ceiling</th><th>Signal</th><th className="no-print"></th>
             </tr></thead>
             <tbody>
               {p.seasonal.map((s) => (
@@ -313,6 +370,8 @@ function CommoditySection({ p, onChanged }) {
                   <td className="mono">{fmtVol(s.traded, u)}</td>
                   <td className="mono">{fmtVol(s.open, u)}</td>
                   <td className="mono">{pct(s.hedged_pct)}</td>
+                  <td className="mono" style={{ fontSize: 11 }}>{s.target != null || s.ceiling != null ? `${fmtPrice(s.target, u)} / ${fmtPrice(s.ceiling, u)}` : "—"}</td>
+                  <td style={{ fontSize: 11 }}>{s.signal ? <Badge tone={/buy/i.test(s.signal) ? "green" : /protect|below/i.test(s.signal) ? "amber" : "slate"}>{s.signal}</Badge> : "—"}</td>
                   <td className="no-print" style={{ textAlign: "right" }}>
                     <button className="btn ghost sm" onClick={async () => { if (confirm(`Delete ${s.label}?`)) { await api.flexCurveDelete(s.id); onChanged(); } }}><Trash2 size={12} /></button>
                   </td>
@@ -416,6 +475,162 @@ function MemberForm({ basketId, onClose, onSaved }) {
           <option>Power</option><option>Gas</option></select></Field>
         <Field label="Annual Volume (kWh) *"><input type="number" value={f.annual_volume_kwh} onChange={(e) => setF({ ...f, annual_volume_kwh: e.target.value })} /></Field>
         <Field label="Joined"><input type="date" value={f.joined_on} onChange={(e) => setF({ ...f, joined_on: e.target.value })} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- Trades ---------------- */
+const today = () => new Date().toISOString().slice(0, 10);
+function TradesForm({ basketId, positions, onClose, onSaved }) {
+  const blank = () => ({ utility: positions[0]?.utility || "Power", season_label: "", clip: "", price: "", live_market: "", rationale: "" });
+  const [date, setDate] = useState(today());
+  const [rows, setRows] = useState([blank()]);
+  const [apply, setApply] = useState(true);
+  const [err, setErr] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const seasonsFor = (u) => positions.find((p) => p.utility === u)?.seasonal || [];
+  const set = (i, k, v) => setRows(rows.map((r, j) => {
+    if (j !== i) return r;
+    const n = { ...r, [k]: v };
+    // Pre-fill the live market from the curve so only the trade price needs typing.
+    if (k === "season_label" && !r.live_market) n.live_market = seasonsFor(r.utility).find((s) => s.label === v)?.market ?? "";
+    return n;
+  }));
+  const valid = rows.filter((r) => r.season_label && Number(r.clip) > 0 && r.price !== "");
+  const clipTotal = valid.reduce((a, r) => a + Number(r.clip), 0);
+  const blended = clipTotal ? valid.reduce((a, r) => a + Number(r.clip) * Number(r.price), 0) / clipTotal : null;
+
+  const save = async () => {
+    if (!valid.length) return setErr("Enter at least one trade: season, clip and price");
+    setSaving(true); setErr(null);
+    try { await api.flexTradesAdd(basketId, valid.map((r) => ({ ...r, trade_date: date })), apply); onSaved(); }
+    catch (e) { setErr(e.message); setSaving(false); }
+  };
+  return (
+    <Modal title="Log trades" onClose={onClose} wide
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : `Save ${valid.length} trade(s)`}</button></>}>
+      {err && <ErrorBanner error={err} />}
+      <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <Field label="Trade date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5 }}>
+          <input type="checkbox" checked={apply} onChange={(e) => setApply(e.target.checked)} /> Apply to the curve (updates traded, open and locked-in price)
+        </label>
+      </div>
+      <div className="table-wrap"><table className="tbl">
+        <thead><tr><th>Fuel</th><th>Season</th><th>Clip</th><th>Price</th><th>Live market</th><th>Rationale</th><th></th></tr></thead>
+        <tbody>{rows.map((r, i) => (
+          <tr key={i}>
+            <td><select value={r.utility} onChange={(e) => set(i, "utility", e.target.value)} style={sel}><option>Power</option><option>Gas</option></select></td>
+            <td><select value={r.season_label} onChange={(e) => set(i, "season_label", e.target.value)} style={sel}>
+              <option value="">Select…</option>{seasonsFor(r.utility).map((s) => <option key={s.label} value={s.label}>{s.label} ({pct(s.hedged_pct)})</option>)}</select></td>
+            <td><input type="number" step="0.01" value={r.clip} onChange={(e) => set(i, "clip", e.target.value)} placeholder={r.utility === "Gas" ? "th/day" : "MW"} style={{ ...sel, width: 80 }} /></td>
+            <td><input type="number" step="0.01" value={r.price} onChange={(e) => set(i, "price", e.target.value)} placeholder={r.utility === "Gas" ? "p/th" : "£/MWh"} style={{ ...sel, width: 90 }} /></td>
+            <td><input type="number" step="0.01" value={r.live_market} onChange={(e) => set(i, "live_market", e.target.value)} style={{ ...sel, width: 90 }} /></td>
+            <td><input value={r.rationale} onChange={(e) => set(i, "rationale", e.target.value)} placeholder="Why this clip, now" style={{ ...sel, width: 200 }} /></td>
+            <td><button className="btn ghost sm" onClick={() => setRows(rows.filter((_, j) => j !== i))} disabled={rows.length === 1}><Trash2 size={12} /></button></td>
+          </tr>
+        ))}</tbody>
+      </table></div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, alignItems: "center" }}>
+        <button className="btn sm" onClick={() => setRows([...rows, { ...blank(), utility: rows[rows.length - 1].utility }])}><Plus size={12} /> Add clip</button>
+        {blended != null && <span className="sub" style={{ fontSize: 12 }}>{clipTotal.toFixed(2)} in total at a blended {blended.toFixed(2)}</span>}
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- Thresholds ---------------- */
+function ThresholdsForm({ basketId, positions, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [utility, setUtility] = useState(positions[0]?.utility || "Power");
+  const [draft, setDraft] = useState({});
+  const [err, setErr] = useState(null);
+  const load = useCallback(() => api.flexThresholds(basketId).then((r) => setRows(r.data)).catch((e) => setErr(e.message)), [basketId]);
+  useEffect(() => { load(); }, [load]);
+  const seasons = positions.find((p) => p.utility === utility)?.seasonal || [];
+  const cur = (label) => ({ ...(rows || []).find((t) => t.utility === utility && t.season_label === label), ...(draft[label] || {}) });
+  const set = (label, k, v) => setDraft({ ...draft, [label]: { ...(draft[label] || {}), [k]: v } });
+  const save = async () => {
+    setErr(null);
+    try {
+      for (const [label, d] of Object.entries(draft)) await api.flexThresholdSet(basketId, { ...cur(label), ...d, utility, season_label: label });
+      setDraft({}); load();
+    } catch (e) { setErr(e.message); }
+  };
+  const inp = (label, k, w = 80) => <input type="number" step="0.01" value={cur(label)[k] ?? ""} onChange={(e) => set(label, k, e.target.value)} style={{ ...sel, width: w, padding: "5px 8px" }} />;
+  return (
+    <Modal title="Trading thresholds — floor, target, ceiling" onClose={onClose} wide
+      footer={<><button className="btn" onClick={onClose}>Close</button><button className="btn primary" disabled={!Object.keys(draft).length} onClick={save}>Save changes</button></>}>
+      {err && <ErrorBanner error={err} />}
+      <p className="sub" style={{ fontSize: 12 }}>Buy triggers (target), stop-loss (ceiling) and time-based minimums per season. The season table then shows a signal against today's market.</p>
+      <select value={utility} onChange={(e) => { setUtility(e.target.value); setDraft({}); }} style={{ ...sel, marginBottom: 10 }}>
+        {positions.map((p) => <option key={p.utility}>{p.utility}</option>)}</select>
+      {!rows ? <Spinner /> : (
+        <div className="table-wrap"><table className="tbl">
+          <thead><tr><th>Season</th><th>Market</th><th>Hedged</th><th>Floor</th><th>Target</th><th>Ceiling</th><th>Min hedge %</th><th>By</th></tr></thead>
+          <tbody>{seasons.map((s) => (
+            <tr key={s.label}><td className="name">{s.label}</td><td className="mono">{s.market ?? "—"}</td><td className="mono">{pct(s.hedged_pct)}</td>
+              <td>{inp(s.label, "floor")}</td><td>{inp(s.label, "target")}</td><td>{inp(s.label, "ceiling")}</td><td>{inp(s.label, "min_hedge_pct", 64)}</td>
+              <td><input type="date" value={cur(s.label).min_hedge_by || ""} onChange={(e) => set(s.label, "min_hedge_by", e.target.value)} style={{ ...sel, padding: "5px 8px" }} /></td></tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Whole-report import ---------------- */
+function ReportImport({ basketId, onClose, onSaved }) {
+  const [text, setText] = useState("");
+  const [date, setDate] = useState(today());
+  const [err, setErr] = useState(null);
+  const [saving, setSaving] = useState(false);
+  let parsed = null, counts = null;
+  try {
+    if (text.trim()) {
+      // Accept the JSON on its own, or a whole saved HTML snapshot with the payload embedded.
+      const m = text.match(/<script[^>]*id="data-payload"[^>]*>([\s\S]*?)<\/script>/i);
+      parsed = JSON.parse(m ? m[1] : text);
+      counts = ["gasMonthly", "gasSeasonal", "powerMonthly", "powerSeasonal"].map((k) => `${k}: ${(parsed[k] || []).length}`).join(" · ");
+    }
+  } catch { parsed = null; }
+  const onFile = async (e) => { const f = e.target.files?.[0]; if (f) setText(await f.text()); };
+  const save = async () => {
+    if (!parsed) return setErr("Paste or choose a position report first");
+    setSaving(true); setErr(null);
+    try { await api.flexImportReport(basketId, parsed, date); onSaved(); } catch (e2) { setErr(e2.message); setSaving(false); }
+  };
+  return (
+    <Modal title="Import a position report" onClose={onClose} wide
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!parsed || saving} onClick={save}>{saving ? "Importing…" : "Import"}</button></>}>
+      {err && <ErrorBanner error={err} />}
+      <p className="sub" style={{ fontSize: 12 }}>Choose a saved position snapshot (.html) or its data (.json) with gasMonthly, gasSeasonal, powerMonthly and powerSeasonal. Existing periods are updated in place, and the book totals are recorded so the next report shows the movement.</p>
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-end", marginBottom: 10 }}>
+        <Field label="Position data as at"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <label className="btn"><Upload size={14} /> Choose file<input type="file" accept=".html,.htm,.json" onChange={onFile} style={{ display: "none" }} /></label>
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={8} placeholder='{"gasMonthly": [...], "gasSeasonal": [...], "powerMonthly": [...], "powerSeasonal": [...]}'
+        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid var(--line,#E7EBF0)", fontFamily: "monospace", fontSize: 11.5 }} />
+      {text.trim() && <div className="sub" style={{ fontSize: 12, marginTop: 6, color: parsed ? undefined : "#B91C1C" }}>{parsed ? `Found ${counts}` : "Couldn't read that as a position report."}</div>}
+    </Modal>
+  );
+}
+
+/* ---------------- Who the extension letter is for ---------------- */
+function LetterForm({ basketId, onCancel, onOk }) {
+  const [members, setMembers] = useState([]);
+  const [f, setF] = useState({ business_id: "", contact_name: "", current_end: "" });
+  useEffect(() => { api.flexMembers(basketId).then((r) => setMembers(r.data)).catch(() => {}); }, [basketId]);
+  const opts = [...new Map(members.filter((m) => m.business_id).map((m) => [m.business_id, m])).values()];
+  return (
+    <Modal title="Framework extension letter" onClose={onCancel}
+      footer={<><button className="btn" onClick={onCancel}>Cancel</button><button className="btn primary" onClick={() => onOk({ ...f, business_id: f.business_id ? Number(f.business_id) : null })}>Generate</button></>}>
+      <div className="grid cols-2">
+        <Field label="Member"><select value={f.business_id} onChange={(e) => setF({ ...f, business_id: e.target.value })}>
+          <option value="">All members (generic letter)</option>{opts.map((m) => <option key={m.business_id} value={m.business_id}>{m.linked_name || m.business_name}</option>)}</select></Field>
+        <Field label="Addressed to"><input value={f.contact_name} onChange={(e) => setF({ ...f, contact_name: e.target.value })} placeholder="Contact name" /></Field>
+        <Field label="Their current end date"><input type="date" value={f.current_end} onChange={(e) => setF({ ...f, current_end: e.target.value })} /></Field>
       </div>
     </Modal>
   );

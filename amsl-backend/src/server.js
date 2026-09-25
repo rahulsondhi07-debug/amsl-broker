@@ -30,6 +30,9 @@ import groupQuotes from "./routes/groupQuotes.js";
 import eiiCertificates from "./routes/eiiCertificates.js";
 import { seedCommissionConfig, generateAllCommissions } from "./commissionEngine.js";
 import { seedPipeline } from "./seedPipeline.js";
+import { initFlexSuite } from "./flexSuite.js";
+import knowledge, { hubPublic } from "./routes/knowledge.js";
+import documents from "./routes/documents.js";
 
 initSchema();
 migrate();
@@ -57,6 +60,7 @@ seedPermissions();
 seedPlatform();
 seedCommissionConfig();
 generateAllCommissions();
+initFlexSuite();
 
 const app = express();
 app.use(cors());
@@ -101,6 +105,9 @@ api.use("/network-charges", networkCharges);
 api.use("/flex-basket", flexBasket);
 api.use("/fixed-vs-flex", fixedVsFlex);
 api.use("/flex", flex);
+api.use("/knowledge", knowledge);
+api.use("/documents", documents);
+api.use("/hub", hubPublic);
 api.use("/energy-assets", energyAssets);
 api.use("/agency-payouts", agencyPayouts);
 api.use("/disclaimer", disclaimer);

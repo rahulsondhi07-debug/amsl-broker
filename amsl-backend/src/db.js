@@ -1545,6 +1545,9 @@ export const MENU_CATALOG = [
   { key: "/network-charges", label: "Network Charges" },
   { key: "/flex-position", label: "Flex Position" },
   { key: "/fixed-vs-flex", label: "Fixed vs Flex" },
+  { key: "/market-reports", label: "Market Reports" },
+  { key: "/documents", label: "Client Documents" },
+  { key: "/knowledge", label: "Knowledge Hub" },
   { key: "/tutorials", label: "Platform Guide" },
   { key: "/settings", label: "System Settings" }, { key: "/branding", label: "Branding" },
 ];
@@ -1568,7 +1571,7 @@ export const PERMISSION_GROUPS = [
     keys: ["/bill-validation", "/water-validation", "/eii-certificates", "/rego-certificates", "/local-energy",
            "/vpp", "/carbon", "/network-charges"],
   },
-  { name: "Flexible Purchasing", keys: ["feature:flex-purchasing", "/flex-position", "/fixed-vs-flex"] },
+  { name: "Flexible Purchasing", keys: ["feature:flex-purchasing", "/flex-position", "/fixed-vs-flex", "/market-reports", "/documents", "/knowledge"] },
 ];
 
 /* Seed default role -> menu permissions. Idempotent. */
@@ -1585,7 +1588,7 @@ export function seedPermissions() {
   // from every existing user.
   const all = [...MENU_CATALOG.map((m) => m.key), ...FEATURE_CATALOG.map((f) => f.key)];
   const agentMenus = ["/", "/leads", "/pipeline", "/renewals", "/quotes/new", "/quotes", "/customers", "/contracts", "/tickets", "/group-quotes",
-                      "feature:flex-purchasing", "/flex-position", "/fixed-vs-flex"];
+                      "feature:flex-purchasing", "/flex-position", "/fixed-vs-flex", "/market-reports", "/documents", "/knowledge"];
   const grants = { "Admin": all, "Super User": all, "Manager": all.filter((k) => k !== "/permissions"), "Agent": agentMenus };
   const before = db.prepare("SELECT COUNT(*) c FROM role_permissions").get().c;
   const ins = db.prepare("INSERT OR IGNORE INTO role_permissions (role,menu_key) VALUES (?,?)");

@@ -16,18 +16,25 @@ const TEMPLATES = {
 /** Columns as they appear in the supplier's templates. Basket adds CRN — a basket is a set
  *  of INDIVIDUAL contracts, so each business needs its own company registration number. */
 const FIELDS = [
-  ["business_name", /business\s*name/i, true],
+  ["business_name", /business\s*name|company\s*name|site\s*name|customer\s*name/i, true],
   ["postcode", /post\s*code/i, false],
   ["crn", /^crn$|company\s*reg/i, false],
-  ["mpan_top", /mpan\s*top/i, false],
-  ["mpan_core", /mpan\s*core/i, false],
-  ["eac_day", /eac[_ ]?day/i, false],
-  ["eac_night", /eac[_ ]?night/i, false],
-  ["eac_ewe", /eac[_ ]?ewe/i, false],
+  ["mpan_top", /mpan\s*top|top\s*line/i, false],
+  // Supplier and broker files say "MPAN", "Mpan", "MPAN Core", "Meter Point" or "Supply
+  // Number" for the same thing, so all of them map to the core.
+  ["mpan_core", /mpan\s*core|^mpan$|^mpan\b(?!.*top)|meter\s*point|supply\s*number/i, false],
+  ["eac_day", /eac[_ ]?day|^day\b.*(consumption|kwh|units|eac)|^day\s*(kwh)?$/i, false],
+  ["eac_night", /eac[_ ]?night|^night\b.*(consumption|kwh|units|eac)|^night\s*(kwh)?$/i, false],
+  ["eac_ewe", /eac[_ ]?ewe|evening|weekend/i, false],
+  ["eac_total", /total.*(consumption|eac|kwh)|annual\s*consumption|^eac$|^eac\s*\(?kwh/i, false],
   ["mprn", /mprn/i, false],
-  ["aq", /^aq$/i, false],
+  ["aq", /^aq$|annual\s*quantity/i, false],
   ["start_date", /prefer+ed\s*start/i, false],
   ["end_date", /prefer+ed\s*end/i, false],
+  ["contract_end", /contract\s*end|\(?ced\)?$|^ced\b|current\s*end/i, false],
+  ["meter_type", /meter\s*type|^hh\s*\/\s*nhh|profile\s*class/i, false],
+  ["current_supplier", /current\s*supplier|^supplier$|incumbent/i, false],
+  ["kva", /^k?va$|capacity|^asc\b|agreed\s*supply/i, false],
 ];
 
 const cellText = (v) => {
@@ -47,6 +54,12 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 const digits = (v) => cellText(v).replace(/\D/g, "");
+/** MPANs often arrive as numbers; a 13-digit number survives as text but guard against
+ *  a float rendering ("2100041178555.0") all the same. */
+const mpanDigits = (v) => (typeof v === "number" ? String(Math.round(v)) : digits(v));
+/** "Prospect Place Summary.xlsx" -> "Prospect Place". */
+const nameFromFile = (f = "") => String(f).replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ")
+  .replace(/\b(summary|site\s*list|sites|template|group|basket|file|final|v\d+)\b/gi, "").replace(/\s+/g, " ").trim();
 
 /** dd/mm/yyyy (as in the templates) or an Excel date, to ISO. */
 function toIso(v) {
@@ -75,6 +88,11 @@ function checkRow(row) {
     issues.push("Electricity site has no EAC — supplier cannot price it");
   }
   if (hasGas && row.aq == null) issues.push("Gas site has no AQ — supplier cannot price it");
+  if (row.meter_type === "HH" && row.kva == null) issues.push("Half-hourly meter has no kVA — capacity charges cannot be priced");
+  if (row.eac_total != null && (row.eac_day != null || row.eac_night != null)) {
+    const sum = (row.eac_day || 0) + (row.eac_night || 0) + (row.eac_ewe || 0);
+    if (Math.abs(sum - row.eac_total) > 1) issues.push(`Day/night add up to ${sum.toLocaleString("en-GB")} kWh but the total says ${row.eac_total.toLocaleString("en-GB")}`);
+  }
   if (row.start_date && row.end_date && row.end_date < row.start_date) {
     issues.push("Preferred end date is before the start date");
   }
@@ -122,8 +140,29 @@ async function stripComments(buf) {
   return zip.generateAsync({ type: "nodebuffer" });
 }
 
+/**
+ * Portfolio view of a site list: total volume, HH/NHH split, who supplies it now, what is
+ * out of contract, and whether the portfolio clears the flex consortium entry threshold.
+ */
+export function siteSummary(rows) {
+  const kwh = (x) => (x.eac_day || 0) + (x.eac_night || 0) + (x.eac_ewe || 0);
+  const elec = rows.filter((x) => x.mpan_core);
+  const total = elec.reduce((a, x) => a + kwh(x), 0);
+  const by = (f) => Object.entries(elec.reduce((m, x) => { const k = x[f] || "Unknown"; m[k] = m[k] || { sites: 0, kwh: 0 }; m[k].sites++; m[k].kwh += kwh(x); return m; }, {}))
+    .map(([k, v]) => ({ key: k, ...v })).sort((a, b) => b.kwh - a.kwh);
+  const threshold = Number(db.prepare("SELECT value FROM app_settings WHERE key='flex_min_elec_kwh'").get()?.value) || 175000;
+  return {
+    elec_sites: elec.length, gas_sites: rows.filter((x) => x.mprn).length,
+    total_kwh: Math.round(total),
+    by_meter_type: by("meter_type"), by_supplier: by("current_supplier"),
+    out_of_contract: rows.filter((x) => x.out_of_contract).length,
+    contract_end_dates: [...new Set(rows.map((x) => x.contract_end).filter(Boolean))].sort(),
+    flex_threshold_kwh: threshold, flex_eligible: total >= threshold,
+  };
+}
+
 /** Read a group/basket file (xlsx or csv) into checked rows. */
-async function parseFile(buf, filename = "") {
+async function parseFile(buf, filename = "", defaultName = "") {
   let header = [], body = [];
   if (/\.csv$/i.test(filename) || buf.subarray(0, 2).toString() !== "PK") {
     const lines = buf.toString("utf8").split(/\r?\n/).filter((l) => l.trim());
@@ -154,31 +193,54 @@ async function parseFile(buf, filename = "") {
   }
 
   // Map each template column to a field by matching the header text.
+  // Headers are normalised first: real files carry line breaks inside header cells
+  // ("MeterType\n(NHH/HH)") and missing spaces ("Consumption(kWh)").
+  const norm = header.map((h) => String(h || "").replace(/\s+/g, " ").replace(/\(/g, " (").replace(/\s+/g, " ").trim());
   const idx = {};
+  const used = new Set();
   FIELDS.forEach(([key, re]) => {
-    const i = header.findIndex((h) => re.test(String(h || "")));
-    if (i >= 0) idx[key] = i;
+    const i = norm.findIndex((h, j) => !used.has(j) && re.test(h));
+    if (i >= 0) { idx[key] = i; used.add(i); }
   });
 
+  // A site list with no business-name column (a portfolio summary for one customer) is
+  // still valid: every row belongs to the group being quoted, so the group name stands in.
+  const fallbackName = (defaultName || "").trim() || nameFromFile(filename);
   const rows = body.map((cells, n) => {
     const get = (k) => (idx[k] == null ? null : cells[idx[k]]);
+    const ced = get("contract_end");
+    const cedText = cellText(ced);
+    const outOfContract = /out\s*of\s*con/i.test(cedText);
+    let eacDay = numOrNull(get("eac_day"));
+    const eacNight = numOrNull(get("eac_night"));
+    const eacEwe = numOrNull(get("eac_ewe"));
+    const total = numOrNull(get("eac_total"));
+    // Only a total supplied: treat it as a single-rate meter so the site can still be priced.
+    if (eacDay == null && eacNight == null && eacEwe == null && total != null) eacDay = total;
+    const mt = cellText(get("meter_type")).toUpperCase();
     const row = {
       row_no: n + 2,           // +2: sheet row number, allowing for the header
-      business_name: cellText(get("business_name")),
+      business_name: cellText(get("business_name")) || (idx.business_name == null ? fallbackName : ""),
       postcode: cellText(get("postcode")),
       crn: cellText(get("crn")),
       mpan_top: digits(get("mpan_top")),
-      mpan_core: digits(get("mpan_core")),
-      eac_day: numOrNull(get("eac_day")),
-      eac_night: numOrNull(get("eac_night")),
-      eac_ewe: numOrNull(get("eac_ewe")),
+      mpan_core: mpanDigits(get("mpan_core")),
+      eac_day: eacDay,
+      eac_night: eacNight,
+      eac_ewe: eacEwe,
+      eac_total: total,
       mprn: digits(get("mprn")),
       aq: numOrNull(get("aq")),
       start_date: toIso(get("start_date")),
       end_date: toIso(get("end_date")),
+      contract_end: outOfContract ? null : toIso(ced),
+      out_of_contract: outOfContract ? 1 : 0,
+      meter_type: /NHH|NON/.test(mt) ? "NHH" : /HH/.test(mt) ? "HH" : (mt || null),
+      current_supplier: cellText(get("current_supplier")) || null,
+      kva: numOrNull(get("kva")),
     };
     return { ...row, issues: checkRow(row) };
-  }).filter((x) => x.business_name || x.mpan_core || x.mprn);   // drop blank trailing rows
+  }).filter((x) => (x.business_name && idx.business_name != null) || x.mpan_core || x.mprn);   // drop blank trailing rows
 
   return { rows, columns: header.filter(Boolean), matched: Object.keys(idx) };
 }
@@ -206,14 +268,14 @@ r.get("/templates/leads/csv", (_req, res) => {
 
 /* ---- Parse an uploaded file without saving anything ---- */
 r.post("/parse", async (req, res) => {
-  const { file_base64, filename } = req.body || {};
+  const { file_base64, filename, default_name } = req.body || {};
   if (!file_base64) return res.status(400).json({ error: "file_base64 is required" });
   let buf;
   try { buf = Buffer.from(file_base64, "base64"); } catch { return res.status(400).json({ error: "The file could not be decoded" }); }
   try {
-    const { rows, columns, matched } = await parseFile(buf, filename || "");
+    const { rows, columns, matched } = await parseFile(buf, filename || "", default_name || "");
     if (!rows.length) {
-      return res.status(422).json({ error: "No site rows found. Use the group or basket template, with a header row and one row per site." });
+      return res.status(422).json({ error: `No site rows found. The first row must be the headers, with an MPAN or MPRN column${columns?.length ? ` — this file's headers are: ${columns.slice(0, 10).join(", ")}` : ""}.` });
     }
     res.json({
       data: {
@@ -221,6 +283,7 @@ r.post("/parse", async (req, res) => {
         total: rows.length,
         with_issues: rows.filter((x) => x.issues.length).length,
         businesses: [...new Set(rows.map((x) => x.business_name).filter(Boolean))],
+        summary: siteSummary(rows),
       },
     });
   } catch (e) {
@@ -295,12 +358,14 @@ r.post("/", (req, res) => {
       .run(...vals, ref);
     const id = info.lastInsertRowid;
     const ins = db.prepare(`INSERT INTO group_quote_sites
-      (quote_id,row_no,business_name,postcode,crn,mpan_top,mpan_core,eac_day,eac_night,eac_ewe,mprn,aq,start_date,end_date,issues)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      (quote_id,row_no,business_name,postcode,crn,mpan_top,mpan_core,eac_day,eac_night,eac_ewe,mprn,aq,start_date,end_date,issues,
+       meter_type,current_supplier,contract_end,out_of_contract,kva)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     sites.forEach((s, i) => ins.run(id, s.row_no ?? i + 2, s.business_name || null, s.postcode || null,
       s.crn || null, s.mpan_top || null, s.mpan_core || null,
       s.eac_day ?? null, s.eac_night ?? null, s.eac_ewe ?? null, s.mprn || null, s.aq ?? null,
-      s.start_date || null, s.end_date || null, JSON.stringify(s.issues || [])));
+      s.start_date || null, s.end_date || null, JSON.stringify(s.issues || []),
+      s.meter_type || null, s.current_supplier || null, s.contract_end || null, s.out_of_contract ? 1 : 0, s.kva ?? null));
     return id;
   });
   const id = tx();

@@ -1,5 +1,7 @@
 import { Router } from "express";
 import { db } from "../db.js";
+import { computeSnapshot, rebuildSeasons, recordHistory, applyTradeToCurve } from "../lib/flexCalc.js";
+import { importReportPayload } from "../flexSuite.js";
 
 const r = Router();
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -9,7 +11,8 @@ const UTILITIES = ["Power", "Gas"];
 /* ---- Baskets ---- */
 const BASKET_COLS = ["name", "code", "basket_type", "supplier_id", "purchasing_strategy",
   "index_reference", "management_fee", "contract_start", "contract_end",
-  "budget_power", "budget_gas", "report_date", "market_commentary", "member_message", "status", "notes"];
+  "budget_power", "budget_gas", "report_date", "market_commentary", "member_message", "status", "notes",
+  "common_end_date", "manager_name"];
 
 // Gas trades in pence per therm against a therms/day requirement; power in pounds per
 // MWh against MW. Keeping the units beside the data stops the two being blended.
@@ -111,21 +114,24 @@ r.get("/baskets/:id/curve", (req, res) => {
   res.json({ data: db.prepare(`SELECT * FROM flex_curve WHERE ${where.join(" AND ")} ORDER BY utility, period_type, sort_order, id`).all(...params) });
 });
 
-const CURVE_COLS = ["utility", "period_type", "label", "sort_order", "vol_req", "traded", "market", "locked", "notes"];
+const CURVE_COLS = ["utility", "period_type", "label", "sort_order", "vol_req", "traded", "open", "market", "locked", "notes"];
 
 /** Upsert a single period, so re-importing a later report updates rather than duplicates. */
 function upsertCurve(basketId, row, order) {
   const traded = row.traded ?? null;
   // A locked price without traded volume is meaningless and would distort the weighted
   // average, so it is dropped rather than stored. The source reports show "-" for these.
-  const locked = traded && traded > 0 ? (row.locked ?? null) : null;
-  db.prepare(`INSERT INTO flex_curve (basket_id, utility, period_type, label, sort_order, vol_req, traded, market, locked, notes)
-              VALUES (?,?,?,?,?,?,?,?,?,?)
+  const locked = traded && traded > 0 ? (row.locked || null) : null;
+  // Power reports give traded + open rather than a requirement; derive it so hedged % works.
+  const open = row.open ?? null;
+  const volReq = row.vol_req ?? (open != null && traded != null ? Math.round((traded + open) * 1000) / 1000 : null);
+  db.prepare(`INSERT INTO flex_curve (basket_id, utility, period_type, label, sort_order, vol_req, traded, open, market, locked, notes)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?)
               ON CONFLICT(basket_id, utility, period_type, label) DO UPDATE SET
-                sort_order=excluded.sort_order, vol_req=excluded.vol_req, traded=excluded.traded,
+                sort_order=excluded.sort_order, vol_req=excluded.vol_req, traded=excluded.traded, open=excluded.open,
                 market=excluded.market, locked=excluded.locked, notes=excluded.notes`)
     .run(basketId, row.utility, row.period_type || "season", row.label,
-      row.sort_order ?? order ?? 0, row.vol_req ?? null, traded, row.market ?? null, locked, row.notes ?? null);
+      row.sort_order ?? order ?? 0, volReq, traded, open, row.market ?? null, locked, row.notes ?? null);
 }
 
 r.post("/baskets/:id/curve", (req, res) => {
@@ -168,83 +174,101 @@ r.delete("/curve/:id", (req, res) => {
 
 /**
  * GET /api/flex-basket/baskets/:id/snapshot
- * The consortium position, per fuel, across the delivery curve.
- *
- * The headline "locked-in average" is weighted by TRADED volume, not by requirement and
- * not a simple mean: a season with 2,000 th/day traded must count far more than one with
- * 60. Periods with nothing traded carry no price at all and are excluded from the average
- * rather than counted as zero, which would drag it down artificially.
- *
- * "Saving" is market minus locked for that period — positive means the consortium is
- * already paying less than today's market for that delivery season.
+ * The consortium position, per fuel, across the delivery curve (see lib/flexCalc.js).
+ * The headline "locked-in average" is weighted by TRADED volume: a season with 2,000
+ * th/day traded must count far more than one with 60. "Saving" is market minus locked.
  */
 r.get("/baskets/:id/snapshot", (req, res) => {
-  const basket = db.prepare(`SELECT b.*, s.name AS supplier_name FROM flex_baskets b
-                             LEFT JOIN suppliers s ON s.id = b.supplier_id WHERE b.id=?`).get(req.params.id);
-  if (!basket) return res.status(404).json({ error: "basket not found" });
+  const snap = computeSnapshot(req.params.id);
+  if (!snap) return res.status(404).json({ error: "basket not found" });
+  res.json({ data: snap });
+});
 
-  const members = db.prepare("SELECT * FROM flex_basket_members WHERE basket_id=? AND status='Active'").all(req.params.id);
-  const curve = db.prepare("SELECT * FROM flex_curve WHERE basket_id=? ORDER BY sort_order, id").all(req.params.id);
+/** Import a whole position report in the JSON format the HTML snapshot embeds. */
+r.post("/baskets/:id/curve/import-report", (req, res) => {
+  const p = req.body?.payload || req.body || {};
+  if (!p.gasMonthly && !p.gasSeasonal && !p.powerMonthly && !p.powerSeasonal) {
+    return res.status(400).json({ error: "Expected gasMonthly / gasSeasonal / powerMonthly / powerSeasonal arrays" });
+  }
+  const n = importReportPayload(req.params.id, p);
+  if (req.body?.report_date) db.prepare("UPDATE flex_baskets SET report_date=? WHERE id=?").run(req.body.report_date, req.params.id);
+  if (req.body?.record_history !== false) recordHistory(req.params.id, req.body?.report_date || new Date().toISOString().slice(0, 10), "Report imported");
+  res.json({ data: { imported: n } });
+});
 
-  const shape = (rows) => rows.map((r0) => {
-    const req_ = r0.vol_req ?? null;
-    const traded = r0.traded ?? 0;
-    // Derive rather than store, so open can never contradict the volumes above it.
-    const open = req_ != null ? round3(Math.max(0, req_ - traded)) : null;
-    const hedged = req_ ? traded / req_ : (traded > 0 ? 1 : 0);
-    return {
-      id: r0.id, label: r0.label, market: r0.market, locked: r0.locked,
-      vol_req: req_, traded: round3(traded), open,
-      hedged_pct: round3(Math.min(1, hedged)),
-      saving: r0.market != null && r0.locked != null ? round3(r0.market - r0.locked) : null,
-    };
-  });
+/** Rebuild seasonal rows from the monthly rows already loaded for a fuel. */
+r.post("/baskets/:id/curve/rebuild-seasons", (req, res) => {
+  const utility = req.body?.utility;
+  if (!["Gas", "Power"].includes(utility)) return res.status(400).json({ error: "utility must be Gas or Power" });
+  res.json({ data: { seasons: rebuildSeasons(req.params.id, utility) } });
+});
 
-  const weightedAvg = (rows) => {
-    let num = 0, den = 0;
-    for (const x of rows) if (x.traded && x.locked != null) { num += x.traded * x.locked; den += x.traded; }
-    return den ? round3(num / den) : null;
-  };
-  const weightedMarket = (rows) => {
-    let num = 0, den = 0;
-    for (const x of rows) if (x.traded && x.market != null) { num += x.traded * x.market; den += x.traded; }
-    return den ? round3(num / den) : null;
-  };
+/* ---- Trades ---- */
+r.get("/baskets/:id/trades", (req, res) => {
+  res.json({ data: db.prepare("SELECT * FROM flex_trades WHERE basket_id=? ORDER BY trade_date DESC, id").all(req.params.id) });
+});
 
-  const positions = ["Gas", "Power"].map((utility) => {
-    const seasonalRaw = curve.filter((c) => c.utility === utility && c.period_type === "season");
-    const monthlyRaw = curve.filter((c) => c.utility === utility && c.period_type === "month");
-    const seasonal = shape(seasonalRaw);
-    const monthly = shape(monthlyRaw);
-    const tradedTotal = seasonal.reduce((a, x) => a + (x.traded || 0), 0);
-    const reqTotal = seasonal.reduce((a, x) => a + (x.vol_req || 0), 0);
-    const locked = weightedAvg(seasonal);
-    const mkt = weightedMarket(seasonal);
-    const budget = utility === "Gas" ? basket.budget_gas : basket.budget_power;
-    const mem = members.filter((m) => m.utility === utility);
-    return {
-      utility, units: UNITS[utility],
-      members: mem.length,
-      seasonal, monthly,
-      traded_total: round3(tradedTotal),
-      required_total: round3(reqTotal),
-      open_total: round3(Math.max(0, reqTotal - tradedTotal)),
-      hedged_pct: reqTotal ? round3(tradedTotal / reqTotal) : null,
-      locked_avg: locked,
-      market_avg: mkt,
-      // Positive = the traded book sits below today's market on a like-for-like basis.
-      saving_vs_market: locked != null && mkt != null ? round3(mkt - locked) : null,
-      saving_pct: locked != null && mkt != null && mkt !== 0 ? round3(((mkt - locked) / mkt) * 100) : null,
-      budget, vs_budget: locked != null && budget != null ? round3(budget - locked) : null,
-    };
-  }).filter((p) => p.seasonal.length || p.monthly.length || p.members);
+/**
+ * Log one or more trades. By default each is applied to its season on the curve, and the
+ * hedge before and after is captured from the curve, so the trade log and the position
+ * can never disagree. Book totals are recorded to history once per batch.
+ */
+r.post("/baskets/:id/trades", (req, res) => {
+  const list = Array.isArray(req.body?.trades) ? req.body.trades : [req.body || {}];
+  const apply = req.body?.apply_to_curve !== false;
+  const bad = list.findIndex((t) => !t.utility || !t.season_label || !(Number(t.clip) > 0) || t.price == null || !t.trade_date);
+  if (bad >= 0) return res.status(400).json({ error: `Trade ${bad + 1}: utility, trade_date, season_label, clip and price are required` });
+  const ins = db.prepare(`INSERT INTO flex_trades (basket_id, utility, trade_date, season_label, side, clip, price, live_market, hedged_before, hedged_after, rationale, confirmed_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const out = db.transaction(() => list.map((t) => {
+    const tt = { ...t, clip: Number(t.clip), price: Number(t.price), live_market: t.live_market === "" || t.live_market == null ? null : Number(t.live_market), side: t.side || "Buy" };
+    const hb = apply ? applyTradeToCurve(req.params.id, tt) : { before: t.hedged_before ?? null, after: t.hedged_after ?? null };
+    const info = ins.run(req.params.id, tt.utility, tt.trade_date, tt.season_label, tt.side, tt.clip, tt.price, tt.live_market,
+      hb.before, hb.after, t.rationale || null, t.confirmed_by || null);
+    return { id: info.lastInsertRowid, ...hb };
+  }))();
+  if (apply) {
+    const date = list[0].trade_date;
+    db.prepare("UPDATE flex_baskets SET report_date=? WHERE id=? AND (report_date IS NULL OR report_date < ?)").run(date, req.params.id, date);
+    recordHistory(req.params.id, date, `After ${list.length} trade(s) on ${date}`);
+  }
+  res.status(201).json({ data: out });
+});
 
-  res.json({
-    data: {
-      basket, generated_at: new Date().toISOString(), positions,
-      totals: { members: new Set(members.map((m) => m.business_id ?? m.business_name)).size },
-    },
-  });
+r.delete("/trades/:id", (req, res) => {
+  const info = db.prepare("DELETE FROM flex_trades WHERE id=?").run(req.params.id);
+  if (!info.changes) return res.status(404).json({ error: "not found" });
+  res.json({ data: { id: Number(req.params.id), deleted: true } });
+});
+
+/* ---- Thresholds (floor / target / ceiling) ---- */
+r.get("/baskets/:id/thresholds", (req, res) => {
+  res.json({ data: db.prepare("SELECT * FROM flex_thresholds WHERE basket_id=? ORDER BY utility, id").all(req.params.id) });
+});
+r.post("/baskets/:id/thresholds", (req, res) => {
+  const b = req.body || {};
+  if (!b.utility || !b.season_label) return res.status(400).json({ error: "utility and season_label are required" });
+  const n = (v) => (v === "" || v == null ? null : Number(v));
+  db.prepare(`INSERT INTO flex_thresholds (basket_id, utility, season_label, floor, target, ceiling, min_hedge_pct, min_hedge_by, notes)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(basket_id, utility, season_label) DO UPDATE SET floor=excluded.floor, target=excluded.target,
+      ceiling=excluded.ceiling, min_hedge_pct=excluded.min_hedge_pct, min_hedge_by=excluded.min_hedge_by, notes=excluded.notes`)
+    .run(req.params.id, b.utility, b.season_label, n(b.floor), n(b.target), n(b.ceiling), n(b.min_hedge_pct), b.min_hedge_by || null, b.notes || null);
+  res.status(201).json({ data: db.prepare("SELECT * FROM flex_thresholds WHERE basket_id=? AND utility=? AND season_label=?").get(req.params.id, b.utility, b.season_label) });
+});
+r.delete("/thresholds/:id", (req, res) => {
+  const info = db.prepare("DELETE FROM flex_thresholds WHERE id=?").run(req.params.id);
+  if (!info.changes) return res.status(404).json({ error: "not found" });
+  res.json({ data: { id: Number(req.params.id), deleted: true } });
+});
+
+/* ---- History ---- */
+r.get("/baskets/:id/history", (req, res) => {
+  res.json({ data: db.prepare("SELECT * FROM flex_position_history WHERE basket_id=? ORDER BY as_at DESC, id DESC").all(req.params.id) });
+});
+r.post("/baskets/:id/history", (req, res) => {
+  const asAt = req.body?.as_at || new Date().toISOString().slice(0, 10);
+  res.status(201).json({ data: { recorded: recordHistory(req.params.id, asAt, req.body?.note) } });
 });
 
 export default r;

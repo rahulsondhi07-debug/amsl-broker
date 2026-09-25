@@ -2,56 +2,15 @@ import { Router } from "express";
 import { db } from "../db.js";
 
 const r = Router();
-const round2 = (n) => Math.round(n * 100) / 100;
-const round4 = (n) => Math.round(n * 10000) / 10000;
-
-/**
- * A cost line's amount, derived from its basis so a rate and its total can never disagree.
- * All rates are in pence, so every result is divided by 100 to reach pounds.
- *   p_kwh      pence per kWh              qty kWh x rate
- *   p_day      pence per day              days x rate
- *   p_kva_day  pence per kVA per day      qty kVA x rate x days
- *   p_kvarh    pence per kVArh            qty kVArh x rate
- */
-function lineAmount(line, cmp) {
-  const rate = Number(line.rate) || 0;
-  const qty = Number(line.qty) || 0;
-  const days = Number(cmp.days) || 365;
-  switch (line.basis) {
-    case "p_day": return round2((days * rate) / 100);
-    case "p_kva_day": return round2((qty * rate * days) / 100);
-    case "p_kwh":
-    case "p_kvarh":
-    default: return round2((qty * rate) / 100);
-  }
-}
-
-/**
- * Build one scenario-year: its layers, then the statutory additions on top.
- * CCL and VAT sit outside the subtotal because that is how a bill is actually presented,
- * and because comparing net of VAT and CCL is the only like-for-like view — both are
- * identical across Fixed and Flex, so including them flatters neither side but does
- * shrink the apparent percentage saving.
- */
-function buildScenario(cmp, lines) {
-  const priced = lines.map((l) => ({ ...l, amount: lineAmount(l, cmp) }));
-  const subtotal = round2(priced.reduce((a, l) => a + l.amount, 0));
-  const ccl = round2(((Number(cmp.annual_kwh) || 0) * (Number(cmp.ccl_p_kwh) || 0)) / 100);
-  const netVat = round2(subtotal + ccl);
-  const vat = round2(netVat * ((Number(cmp.vat_pct) || 0) / 100));
-  return {
-    lines: priced,
-    subtotal_ex_ccl_vat: subtotal,
-    ccl, total_ex_vat: netVat, vat, total_inc_vat: round2(netVat + vat),
-    // Effective p/kWh makes two different stacks directly comparable.
-    effective_p_kwh: cmp.annual_kwh ? round4((subtotal / cmp.annual_kwh) * 100) : null,
-  };
-}
+import { computeComparison, applyRateCard, readRateCard, round2 } from "../lib/fvfCalc.js";
 
 /* ---- Comparisons ---- */
 const CMP_COLS = ["business_id", "client_name", "account_ref", "mpan", "site", "annual_kwh",
   "day_kwh", "night_kwh", "duos_red_kwh", "duos_amber_kwh", "duos_green_kwh",
-  "capacity_kva", "days", "ccl_p_kwh", "vat_pct", "flex_start", "notes", "status"];
+  "capacity_kva", "days", "ccl_p_kwh", "vat_pct", "flex_start", "notes", "status",
+  "version_label", "parent_id", "fixed_supplier", "fixed_quote_ref", "fixed_quote_date", "flex_supplier", "basket_id",
+  "current_contract_end", "early_termination_pct", "onboarding_fee", "flex_term_months", "flex_end", "agreement_ref",
+  "prepared_by", "consumption_period", "market_note", "assumptions", "metering"];
 
 r.get("/", (req, res) => {
   const where = [];
@@ -76,6 +35,14 @@ function seedStack(id, c, years) {
   const ins = db.prepare(`INSERT INTO fvf_lines
     (comparison_id, scenario, year_no, year_label, label, basis, qty, rate, sort_order)
     VALUES (?,?,?,?,?,?,?,?,?)`);
+  // The client's current contract, so every option can be shown against "do nothing".
+  // Same structure as a fixed quote; leave the rates blank if it isn't known.
+  [["Day Units", "p_kwh", c.day_kwh ?? c.annual_kwh], ["Night Units", "p_kwh", c.night_kwh ?? 0],
+   ["Standing Charge", "p_day", null], ["Transmission Fixed Charge", "p_day", null],
+   ["Distribution Fixed Charge", "p_day", null], ["Capacity Charge", "p_kva_day", c.capacity_kva ?? 0],
+   ["Nuclear RAB Levy", "p_kwh", c.annual_kwh], ["Network Charging Compensation", "p_kwh", c.annual_kwh],
+   ["Feed-in Tariff (FiT)", "p_kwh", c.annual_kwh],
+  ].forEach(([label, basis, qty], o) => ins.run(id, "Current", 1, "Current contract", label, basis, qty, null, o));
   for (let y = 1; y <= years; y++) {
     const yl = `Year ${y}`;
     let o = 0;
@@ -99,7 +66,7 @@ function seedStack(id, c, years) {
     [["Commodity Cost", "p_kwh", c.annual_kwh],
      ["Non-Commodity Cost", "p_kwh", c.annual_kwh],
      ["Consortium Management Fee", "p_kwh", c.annual_kwh],
-     ["Platform Management Fee", "p_kwh", c.annual_kwh],
+     ["Supplier Management Fee", "p_kwh", c.annual_kwh],
      ["Standing Charge", "p_day", null],
      ["Transmission Fixed Charge", "p_day", null],
      ["Distribution Fixed Charge", "p_day", null],
@@ -115,6 +82,7 @@ function seedStack(id, c, years) {
 r.post("/", (req, res) => {
   const b = req.body || {};
   if (!b.client_name || !b.annual_kwh) return res.status(400).json({ error: "client_name and annual_kwh are required" });
+  if (Array.isArray(b.assumptions)) b.assumptions = JSON.stringify(b.assumptions);
   const cols = CMP_COLS.filter((c) => b[c] !== undefined && b[c] !== null && b[c] !== "");
   const info = db.prepare(`INSERT INTO fvf_comparisons (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`)
     .run(...cols.map((c) => b[c]));
@@ -125,7 +93,8 @@ r.post("/", (req, res) => {
 });
 
 const updCmp = (req, res) => {
-  const b = req.body || {};
+  const b = { ...(req.body || {}) };
+  if (Array.isArray(b.assumptions)) b.assumptions = JSON.stringify(b.assumptions);
   const cols = CMP_COLS.filter((c) => b[c] !== undefined);
   if (!cols.length) return res.status(400).json({ error: "No valid fields" });
   const info = db.prepare(`UPDATE fvf_comparisons SET ${cols.map((c) => `${c}=?`).join(",")} WHERE id=?`)
@@ -181,47 +150,74 @@ r.delete("/lines/:id", (req, res) => {
 
 /**
  * GET /api/fixed-vs-flex/:id/result
- * The full comparison: each year's Fixed and Flex stacks, and the saving between them.
- * Savings are reported net of VAT and CCL as the headline, because those two are identical
- * on both sides — including them inflates the absolute figure and understates the percentage.
+ * The full comparison (see lib/fvfCalc.js): each year's Fixed and Flex stacks, the saving
+ * between them, the current-contract baseline, every option on one table, the term view
+ * and plain-English findings. Savings are headlined net of VAT and CCL.
  */
 r.get("/:id/result", (req, res) => {
-  const cmp = db.prepare(`SELECT c.*, b.business_name FROM fvf_comparisons c
-                          LEFT JOIN businesses b ON b.id = c.business_id WHERE c.id=?`).get(req.params.id);
-  if (!cmp) return res.status(404).json({ error: "comparison not found" });
-  const all = db.prepare("SELECT * FROM fvf_lines WHERE comparison_id=? ORDER BY year_no, sort_order, id").all(req.params.id);
-  const years = [...new Set(all.map((l) => l.year_no))].sort((a, b) => a - b);
+  const out = computeComparison(req.params.id);
+  if (!out) return res.status(404).json({ error: "comparison not found" });
+  res.json({ data: out });
+});
 
-  const rows = years.map((y) => {
-    const yl = all.find((l) => l.year_no === y)?.year_label || `Year ${y}`;
-    const fixed = buildScenario(cmp, all.filter((l) => l.year_no === y && l.scenario === "Fixed"));
-    const flex = buildScenario(cmp, all.filter((l) => l.year_no === y && l.scenario === "Flex"));
-    // A year with no rates entered on one side cannot be compared; report it as such
-    // rather than showing a saving equal to the whole of the other side.
-    const fixedPriced = fixed.lines.some((l) => l.rate != null);
-    const flexPriced = flex.lines.some((l) => l.rate != null);
-    const comparable = fixedPriced && flexPriced;
-    return {
-      year_no: y, year_label: yl, fixed, flex, comparable,
-      saving_ex_ccl_vat: comparable ? round2(fixed.subtotal_ex_ccl_vat - flex.subtotal_ex_ccl_vat) : null,
-      saving_pct: comparable && fixed.subtotal_ex_ccl_vat
-        ? round4(((fixed.subtotal_ex_ccl_vat - flex.subtotal_ex_ccl_vat) / fixed.subtotal_ex_ccl_vat) * 100) : null,
-      saving_inc_vat: comparable ? round2(fixed.total_inc_vat - flex.total_inc_vat) : null,
-    };
-  });
+/* ---- Rate card: fill every line from one form ---- */
+r.get("/:id/rate-card", (req, res) => res.json({ data: readRateCard(req.params.id) }));
+r.put("/:id/rate-card", (req, res) => {
+  const card = req.body || {};
+  if (!card.fixed && !card.flex && !card.current) return res.status(400).json({ error: "Provide fixed, flex and/or current rates" });
+  res.json({ data: { updated: applyRateCard(req.params.id, card) } });
+});
 
-  const comparableRows = rows.filter((x) => x.comparable);
-  res.json({
-    data: {
-      comparison: cmp, years: rows,
-      totals: {
-        term_saving_ex_ccl_vat: round2(comparableRows.reduce((a, x) => a + (x.saving_ex_ccl_vat || 0), 0)),
-        term_saving_inc_vat: round2(comparableRows.reduce((a, x) => a + (x.saving_inc_vat || 0), 0)),
-        years_compared: comparableRows.length,
-        years_incomplete: rows.length - comparableRows.length,
-      },
-    },
-  });
+/* ---- Monthly consumption ---- */
+r.get("/:id/monthly", (req, res) => {
+  res.json({ data: db.prepare("SELECT * FROM fvf_monthly WHERE comparison_id=? ORDER BY sort_order, id").all(req.params.id) });
+});
+r.put("/:id/monthly", (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+  if (!rows) return res.status(400).json({ error: "rows array is required" });
+  const ins = db.prepare("INSERT INTO fvf_monthly (comparison_id, month_label, sort_order, day_kwh, night_kwh) VALUES (?,?,?,?,?)");
+  const n = (v) => (v === "" || v == null ? null : Number(String(v).replace(/,/g, "")));
+  db.transaction(() => {
+    db.prepare("DELETE FROM fvf_monthly WHERE comparison_id=?").run(req.params.id);
+    rows.filter((x) => x.month_label).forEach((x, i) => ins.run(req.params.id, x.month_label, i, n(x.day_kwh), n(x.night_kwh)));
+  })();
+  const saved = db.prepare("SELECT * FROM fvf_monthly WHERE comparison_id=? ORDER BY sort_order").all(req.params.id);
+  const sum = saved.reduce((a, x) => a + (x.day_kwh || 0) + (x.night_kwh || 0), 0);
+  const cmp = db.prepare("SELECT annual_kwh FROM fvf_comparisons WHERE id=?").get(req.params.id);
+  res.json({ data: { rows: saved, total_kwh: round2(sum), annual_kwh: cmp?.annual_kwh, difference: cmp ? round2(sum - cmp.annual_kwh) : null } });
+});
+
+/**
+ * Save a new version. The source keeps its history (v7 as issued stays as issued) and the
+ * copy is edited, so a client who saw an earlier set of numbers can always be shown it.
+ */
+r.post("/:id/duplicate", (req, res) => {
+  const src = db.prepare("SELECT * FROM fvf_comparisons WHERE id=?").get(req.params.id);
+  if (!src) return res.status(404).json({ error: "comparison not found" });
+  const { id: _i, created_at: _c, ...rest } = src;
+  const copy = { ...rest, status: "Draft", parent_id: src.id, version_label: req.body?.version_label || `Copy of ${src.version_label || `#${src.id}`}` };
+  const cols = Object.keys(copy);
+  const newId = db.transaction(() => {
+    const id = db.prepare(`INSERT INTO fvf_comparisons (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).run(...cols.map((k) => copy[k])).lastInsertRowid;
+    db.prepare(`INSERT INTO fvf_lines (comparison_id, scenario, year_no, year_label, label, basis, qty, rate, sort_order, notes)
+      SELECT ?, scenario, year_no, year_label, label, basis, qty, rate, sort_order, notes FROM fvf_lines WHERE comparison_id=?`).run(id, src.id);
+    db.prepare(`INSERT INTO fvf_monthly (comparison_id, month_label, sort_order, day_kwh, night_kwh)
+      SELECT ?, month_label, sort_order, day_kwh, night_kwh FROM fvf_monthly WHERE comparison_id=?`).run(id, src.id);
+    return id;
+  })();
+  res.status(201).json({ data: { id: newId } });
+});
+
+/** Add a year to both scenarios (e.g. a fourth flex year with no fixed equivalent). */
+r.post("/:id/years", (req, res) => {
+  const scen = req.body?.scenario || "Flex";
+  const last = db.prepare("SELECT MAX(year_no) y FROM fvf_lines WHERE comparison_id=? AND scenario=?").get(req.params.id, scen)?.y || 0;
+  const y = last + 1;
+  const tpl = db.prepare("SELECT * FROM fvf_lines WHERE comparison_id=? AND scenario=? AND year_no=? ORDER BY sort_order").all(req.params.id, scen, last);
+  if (!tpl.length) return res.status(400).json({ error: `No ${scen} year to copy from` });
+  const ins = db.prepare(`INSERT INTO fvf_lines (comparison_id, scenario, year_no, year_label, label, basis, qty, rate, sort_order) VALUES (?,?,?,?,?,?,?,?,?)`);
+  db.transaction(() => tpl.forEach((l) => ins.run(req.params.id, scen, y, req.body?.year_label || `Year ${y}`, l.label, l.basis, l.qty, l.rate, l.sort_order)))();
+  res.status(201).json({ data: { year_no: y } });
 });
 
 /* ---- Guidance ---- */
