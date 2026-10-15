@@ -638,6 +638,185 @@ r.get("/claim-stages", (_req, res) => {
 /* GET one */
 
 
+
+/* ---- Multiple bills: one validation per month ---- */
+
+/**
+ * Turn one bill PDF's text into the same field set the single-bill prefill produces.
+ * Kept server-side so a batch of twelve monthly bills is mapped exactly as one bill is:
+ * standing charge and DUoS stay separate rows (otherwise the distribution fixed charge
+ * is counted twice), and the meter field takes the full 13-digit MPAN rather than the
+ * 2-digit prefix, which would fail the format check and raise a false Meter Data finding.
+ * Contracted rates are never taken from the bill — they are the comparison basis and
+ * come from the contract or LOA.
+ */
+function billFromPdfText(text) {
+  const fields = extractBillFields(text);
+  const rows = fields.rows || [];
+  const row = (k) => rows.find((x) => x.key === k) || {};
+  const dno = resolveDno(fields.mpan_prefix || "");
+  const year = fields.tariff_year || null;
+  const reference = dno && year ? compareToReference({ ...fields, rows }, dno.id, year) : [];
+  // Only a firm, non-estimated published rate can serve as a comparison basis.
+  const firm = (k) => {
+    const c = reference.find((x) => x.key === k);
+    return c && c.reference && !c.isEstimate ? c.reference : null;
+  };
+  const v = (n) => (n == null || !Number.isFinite(Number(n)) ? null : Math.round(Number(n) * 1000) / 1000);
+  const period = fields.period_from
+    ? new Date(fields.period_from).toLocaleDateString("en-GB", { month: "short", year: "numeric" })
+    : null;
+
+  const patch = {
+    utility: fields.fuel === "gas" ? "GAS" : "ELECTRICITY",
+    meter_mpan_mpr: fields.mpan || fields.mprn || null,
+    period, period_from: fields.period_from || null, period_to: fields.period_to || null,
+    days: v(fields.billDays), billed_consumption: v(fields.consumption_kwh), vat_rate: v(fields.vat_rate),
+    billed_unit_rate: v(row("day_unit").rate),
+    billed_standing_charge: v(row("standing").rate),
+    duos_charged: v(row("dist_fixed").subtotal), duos_rate: v(firm("dist_fixed")),
+    tnuos_charged: v(row("tnuos_fixed").subtotal), tnuos_rate: v(firm("tnuos_fixed")),
+    bsuos_charged: v(row("bsuos").subtotal),
+    ccl_charged: v(row("ccl").subtotal),
+    asc_kva: v(row("capacity").quantity ?? fields.asc_kva), capacity_rate: v(row("capacity").rate), capacity_charged: v(row("capacity").subtotal),
+    excess_kva: v(row("excess_capacity").quantity), excess_rate: v(row("excess_capacity").rate), excess_charged: v(row("excess_capacity").subtotal),
+    reactive_kvarh: v(row("reactive_capacity").quantity), reactive_rate: v(row("reactive_capacity").rate), reactive_charged: v(row("reactive_capacity").subtotal),
+    rows_json: JSON.stringify({ rows, subtotal: fields.subtotal, vat_total: fields.vat_total, total: fields.total, billDays: fields.billDays }),
+  };
+
+  const noPublished = [];
+  if (row("dist_fixed").rate != null && !firm("dist_fixed")) noPublished.push("DUoS");
+  if (row("tnuos_fixed").rate != null && !firm("tnuos_fixed")) noPublished.push("TNUoS");
+  const warnings = [
+    ...(rows.length === 0 ? ["No charge lines were recognised — the bill layout may not be supported yet."] : []),
+    ...(fields.missing?.length ? [`Not found on the bill: ${fields.missing.join(", ")}.`] : []),
+    ...(fields.fuel === "gas" ? ["Gas bill — line-by-line parsing is electricity only."] : []),
+    ...(noPublished.length ? [`No firm published rate for ${noPublished.join(" and ")} — that pass-through check is skipped.`] : []),
+  ];
+  return { patch, rows, warnings, period_key: fields.period_from || period || null };
+}
+
+/**
+ * Read a set of bill PDFs and validate each one, without saving anything.
+ *
+ * `shared` carries what is the same for every month — the contract, business, supplier
+ * and the contracted rates — while each bill supplies its own period and billed figures.
+ * Nothing is written here: the person reviews the table first, because an extraction
+ * that silently misread a bill would otherwise become a claim.
+ */
+r.post("/batch/preview", async (req, res) => {
+  const files = Array.isArray(req.body?.files) ? req.body.files : null;
+  if (!files?.length) return res.status(400).json({ error: "files is required" });
+  if (files.length > 40) return res.status(400).json({ error: "Up to 40 bills at a time — split the rest into a second upload." });
+  const shared = req.body?.shared || {};
+  const contract = shared.contract_id ? one("SELECT * FROM contracts WHERE id=?", shared.contract_id) : null;
+
+  // A missing contracted rate is the dangerous case: the rate check would compare each
+  // bill against zero and report the entire bill as recoverable. Better to say the rate
+  // is missing than to hand back a claim built on nothing.
+  const effUnit = shared.contracted_unit_rate ?? contract?.day_rate ?? null;
+  const effStanding = shared.contracted_standing_charge ?? contract?.standing_charge ?? null;
+  const noUnitRate = effUnit == null || Number(effUnit) === 0;
+
+  const results = [];
+  const seen = new Map();          // period+meter already seen IN THIS BATCH
+  for (const f of files) {
+    const name = f?.filename || "bill.pdf";
+    const out = { filename: name };
+    let buf;
+    try { buf = Buffer.from(f?.file_base64 || "", "base64"); } catch { buf = null; }
+    if (!buf?.length) { out.error = "The file could not be decoded"; results.push(out); continue; }
+    if (buf.subarray(0, 5).toString() !== "%PDF-") { out.error = "Not a PDF"; results.push(out); continue; }
+
+    let text = "";
+    try {
+      ({ text } = await extractPdfText(buf));
+    } catch (e) {
+      const locked = /password/i.test(e?.name || "") || /password/i.test(e?.message || "");
+      out.error = locked ? "Password-protected PDF" : "The PDF could not be read";
+      results.push(out); continue;
+    }
+    if (text.replace(/\s/g, "").length < 40) {
+      out.error = "No readable text — this looks like a scanned bill, so it has to be keyed in manually";
+      out.scanned = true; results.push(out); continue;
+    }
+
+    const { patch, warnings } = billFromPdfText(text);
+    // Shared values fill the gaps; anything the bill itself states wins, except the
+    // contracted rates, which only ever come from the contract or LOA.
+    const bill = {
+      ...shared,
+      ...Object.fromEntries(Object.entries(patch).filter(([, val]) => val != null && val !== "")),
+      contracted_unit_rate: effUnit,
+      contracted_standing_charge: effStanding,
+    };
+    if (!bill.period) bill.period = name.replace(/\.pdf$/i, "");   // so the row is still identifiable
+
+    // Two bills for the same meter and period in one upload is a mistake worth catching
+    // before saving, separate from the duplicate check against bills already on file.
+    const key = `${bill.meter_mpan_mpr || ""}|${bill.period || ""}`;
+    if (seen.has(key)) out.duplicate_in_batch = seen.get(key);
+    else seen.set(key, name);
+
+    let v;
+    try { v = validateBill(bill, contract); }
+    catch (e) { out.error = `Could not validate: ${e.message}`; results.push(out); continue; }
+
+    out.bill = bill;
+    out.period = bill.period;
+    out.period_from = patch.period_from || null;
+    out.consumption = bill.billed_consumption ?? null;
+    out.unit_rate = bill.billed_unit_rate ?? null;
+    out.days = v.days;
+    out.claim = v.total_claim;
+    out.status = v.status;
+    out.findings = v.findings.map((x) => ({ check: x.check, amount: x.amount, detail: x.detail }));
+    out.duplicate_flag = !!v.duplicate_flag;
+    out.needs_rates = noUnitRate;
+    out.warnings = [
+      ...(noUnitRate ? ["No contracted unit rate — enter it from the contract or LOA, or the rate check compares against zero and overstates the claim."] : []),
+      ...warnings,
+    ];
+    results.push(out);
+  }
+
+  const ok = results.filter((x) => !x.error);
+  // Order by the real period date where it was found, so twelve months read in order
+  // rather than in whatever order the files were picked.
+  ok.sort((a, b2) => String(a.period_from || "").localeCompare(String(b2.period_from || "")));
+  res.json({
+    data: {
+      bills: [...ok, ...results.filter((x) => x.error)],
+      total: results.length,
+      readable: ok.length,
+      failed: results.length - ok.length,
+      total_claim: Math.round(ok.reduce((a, x) => a + (x.claim || 0), 0) * 100) / 100,
+      needs_rates: noUnitRate,
+      contract: contract ? { id: contract.id, business_name: contract.business_name, utility: contract.utility } : null,
+    },
+  });
+});
+
+/** Save the reviewed bills — one validation per bill, all or nothing. */
+r.post("/batch/save", (req, res) => {
+  const bills = Array.isArray(req.body?.bills) ? req.body.bills : null;
+  if (!bills?.length) return res.status(400).json({ error: "bills is required" });
+  if (bills.length > 40) return res.status(400).json({ error: "Up to 40 bills at a time" });
+  try {
+    const saved = db.transaction(() => bills.map((b) => insertValidation(b)))();
+    res.status(201).json({
+      data: {
+        saved: saved.length,
+        refs: saved.map((x) => x.ref),
+        total_claim: Math.round(saved.reduce((a, x) => a + (x.total_claim || 0), 0) * 100) / 100,
+        rows: saved.map((x) => ({ id: x.id, ref: x.ref, period: x.period, total_claim: x.total_claim, status: x.status })),
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: `Nothing was saved: ${e.message}` });
+  }
+});
+
 /* ---- Commodity pricebook (admin) ---- */
 r.get("/commodity/status", (_req, res) => res.json({ data: pricebook.status() }));
 
@@ -851,8 +1030,12 @@ r.post("/preview", (req, res) => {
 });
 
 /* CREATE — validate + save */
-r.post("/", (req, res) => {
-  const b = req.body || {};
+/**
+ * Save one validated bill. Split out of the create route so a batch upload saves bills
+ * through exactly the same path as a single one — one month per validation, with the
+ * same findings, claim total and duplicate detection.
+ */
+function insertValidation(b) {
   const contract = b.contract_id ? one("SELECT * FROM contracts WHERE id=?", b.contract_id) : null;
   const v = validateBill(b, contract);
   const ref = nextRef();
@@ -910,7 +1093,11 @@ r.post("/", (req, res) => {
       reactiveKvarh: numOrNull(b.reactive_kvarh), reactiveRate: numOrNull(b.reactive_rate), reactiveCharged: numOrNull(b.reactive_charged),
     });
 
-  res.status(201).json({ data: withParsed(one("SELECT * FROM bill_validations WHERE id=?", info.lastInsertRowid)) });
+  return withParsed(one("SELECT * FROM bill_validations WHERE id=?", info.lastInsertRowid));
+}
+
+r.post("/", (req, res) => {
+  res.status(201).json({ data: insertValidation(req.body || {}) });
 });
 
 /* RAISE CLAIM — books total_claim (rate overcharge + CCL rebate + EII relief) */

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Plus, ShieldCheck, AlertTriangle, CheckCircle2, FileWarning, FileText, Send, Trash2, Calculator } from "lucide-react";
+import { Plus, ShieldCheck, AlertTriangle, CheckCircle2, FileWarning, FileText, Send, Trash2, Calculator, Upload } from "lucide-react";
 import { api } from "../api.js";
 import { Card, Badge, Spinner, ErrorBanner, Modal, Field } from "../components/ui.jsx";
 
@@ -32,6 +32,7 @@ export default function BillValidation() {
   const [rows, setRows] = useState(null);
   const [totals, setTotals] = useState(null);
   const [contracts, setContracts] = useState([]);
+  const [showBulk, setShowBulk] = useState(false);
   const [refGuide, setRefGuide] = useState(null);
   const [err, setErr] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
@@ -300,6 +301,7 @@ export default function BillValidation() {
   return (
     <>
       {showReconcile && <ReconcileModal onClose={() => setShowReconcile(false)} />}
+      {showBulk && <BulkBillsModal contracts={contracts} onClose={() => setShowBulk(false)} onSaved={() => { setShowBulk(false); load(); }} />}
       <div className="page-head">
         <div>
           <h2>Bill Validation &amp; Energy Claims</h2>
@@ -308,6 +310,9 @@ export default function BillValidation() {
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn" onClick={() => setBatchModal({ shared: { business_name: "", responsible_person: "", phone: "", supplier_name: "", relief_pct: "", utility: "ELECTRICITY" }, sites: [emptySite()], results: null })}>
             <FileText size={16} /> Batch PP11 (multi-site)
+          </button>
+          <button className="btn" onClick={() => setShowBulk(true)}>
+            <Upload size={16} /> Upload Bills (monthly)
           </button>
           <button className="btn" onClick={() => setShowReconcile(true)}>
             <Calculator size={16} /> Reconcile Bill
@@ -1051,6 +1056,231 @@ function ReconcileModal({ onClose }) {
             </>
           )}
         </div>
+      )}
+    </Modal>
+  );
+}
+
+
+/**
+ * Upload a run of monthly bills and validate each one.
+ *
+ * Twelve months of bills for one supply is the normal unit of work in a claim, and doing
+ * that one bill at a time means re-keying the contract and contracted rates twelve times.
+ * Here those are entered once, each PDF supplies its own period and billed figures, and
+ * every bill becomes its own validation.
+ *
+ * Nothing is saved until the person has seen the table: an extraction that misread a bill
+ * would otherwise turn into a claim nobody checked. Rows can be unticked, and bills that
+ * repeat a period — in this upload or against one already on file — are flagged.
+ */
+function BulkBillsModal({ contracts, onClose, onSaved }) {
+  const [shared, setShared] = useState({
+    contract_id: "", business_name: "", supplier_name: "", utility: "ELECTRICITY",
+    contracted_unit_rate: "", contracted_standing_charge: "", vat_rate: 20,
+  });
+  const [files, setFiles] = useState([]);          // { name, b64 }
+  const [result, setResult] = useState(null);
+  const [skip, setSkip] = useState({});            // filename -> true when unticked
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  const [saved, setSaved] = useState(null);
+
+  const set = (k) => (e) => setShared({ ...shared, [k]: e.target.value });
+
+  const pickContract = (e) => {
+    const id = e.target.value;
+    const c = contracts.find((x) => String(x.id) === String(id));
+    setShared({
+      ...shared, contract_id: id,
+      // The contracted rates are the comparison basis, so they come from the contract —
+      // never from the bills being checked.
+      business_name: c?.business_name || shared.business_name,
+      supplier_name: c?.supplier_name || shared.supplier_name,
+      utility: c?.utility || shared.utility,
+      business_id: c?.business_id ?? shared.business_id,
+      contracted_unit_rate: c?.day_rate ?? shared.contracted_unit_rate,
+      contracted_standing_charge: c?.standing_charge ?? shared.contracted_standing_charge,
+      eac: c?.consumption ?? shared.eac,
+    });
+  };
+
+  const onFiles = async (e) => {
+    const picked = [...(e.target.files || [])];
+    e.target.value = "";
+    if (!picked.length) return;
+    const tooBig = picked.find((f) => f.size > 10 * 1024 * 1024);
+    if (tooBig) return setErr(`${tooBig.name} is over 10MB.`);
+    if (picked.length > 40) return setErr("Up to 40 bills at a time.");
+    setErr(null); setResult(null); setSaved(null);
+    setBusy("reading");
+    try {
+      const read = await Promise.all(picked.map((f) => new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve({ name: f.name, b64: String(r.result).split(",")[1] || "" });
+        r.onerror = () => reject(new Error(`Could not read ${f.name}`));
+        r.readAsDataURL(f);
+      })));
+      setFiles(read);
+    } catch (e2) { setErr(e2.message); }
+    setBusy(null);
+  };
+
+  const check = async () => {
+    if (!files.length) return setErr("Choose the bill PDFs first");
+    setBusy("checking"); setErr(null); setSaved(null);
+    try {
+      const { data } = await api.bvBatchPreview(
+        files.map((f) => ({ filename: f.name, file_base64: f.b64 })),
+        {
+          ...shared,
+          contract_id: shared.contract_id || null,
+          contracted_unit_rate: shared.contracted_unit_rate === "" ? null : Number(shared.contracted_unit_rate),
+          contracted_standing_charge: shared.contracted_standing_charge === "" ? null : Number(shared.contracted_standing_charge),
+          vat_rate: shared.vat_rate === "" ? null : Number(shared.vat_rate),
+        });
+      setResult(data);
+      // Repeats are unticked by default — saving the same month twice is almost never meant.
+      // Repeats and bills with no contracted rate to compare against start unticked.
+      setSkip(Object.fromEntries(data.bills
+        .filter((b) => b.duplicate_in_batch || b.duplicate_flag || b.needs_rates)
+        .map((b) => [b.filename, true])));
+    } catch (e) { setErr(e.message); }
+    setBusy(null);
+  };
+
+  const chosen = (result?.bills || []).filter((b) => !b.error && !skip[b.filename]);
+  const chosenClaim = Math.round(chosen.reduce((a, b) => a + (b.claim || 0), 0) * 100) / 100;
+
+  const save = async () => {
+    if (!chosen.length) return setErr("No bills ticked to save");
+    setBusy("saving"); setErr(null);
+    try {
+      const { data } = await api.bvBatchSave(chosen.map((b) => b.bill));
+      setSaved(data);
+      onSaved?.();
+    } catch (e) { setErr(e.message); setBusy(null); }
+    setBusy(null);
+  };
+
+  if (saved) {
+    return (
+      <Modal title="Bills validated" onClose={onClose} footer={<button className="btn primary" onClick={onClose}>Done</button>}>
+        <div style={{ background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8, padding: "12px 14px", fontSize: 13 }}>
+          Saved <b>{saved.saved}</b> validation(s) — one per bill — with a combined claim of <b>{money(saved.total_claim)}</b>.
+        </div>
+        <table className="tbl" style={{ marginTop: 10 }}>
+          <thead><tr><th>Ref</th><th>Period</th><th style={{ textAlign: "right" }}>Claim</th><th>Status</th></tr></thead>
+          <tbody>
+            {saved.rows.map((r) => (
+              <tr key={r.id}><td className="mono">{r.ref}</td><td>{r.period}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{money(r.total_claim)}</td>
+                <td><Badge tone={stTone(r.status)}>{r.status}</Badge></td></tr>
+            ))}
+          </tbody>
+        </table>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Upload bills — one validation per month" onClose={onClose} wide
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={!!busy || !files.length} onClick={check}>
+          {busy === "checking" ? "Checking…" : "Check bills"}
+        </button>
+        <button className="btn primary" disabled={!!busy || !chosen.length} onClick={save}>
+          {busy === "saving" ? "Saving…" : `Save ${chosen.length || ""} validation${chosen.length === 1 ? "" : "s"}`}
+        </button>
+      </>}>
+      {err && <ErrorBanner error={err} />}
+
+      <div className="form-section-title">Shared across every bill</div>
+      <div className="grid cols-3">
+        <Field label="Contract (fills the contracted rates)">
+          <select value={shared.contract_id} onChange={pickContract}>
+            <option value="">— Enter rates manually —</option>
+            {contracts.map((c) => <option key={c.id} value={c.id}>{c.contract_no} — {c.business_name}</option>)}
+          </select>
+        </Field>
+        <Field label="Business name"><input value={shared.business_name} onChange={set("business_name")} /></Field>
+        <Field label="Supplier"><input value={shared.supplier_name} onChange={set("supplier_name")} placeholder="As named on the bills" /></Field>
+        <Field label="Utility">
+          <select value={shared.utility} onChange={set("utility")}><option value="ELECTRICITY">Electricity</option><option value="GAS">Gas</option></select>
+        </Field>
+        <Field label="Contracted unit rate (p/kWh)"><input type="number" step="0.0001" value={shared.contracted_unit_rate} onChange={set("contracted_unit_rate")} /></Field>
+        <Field label="Contracted standing charge (p/day)"><input type="number" step="0.0001" value={shared.contracted_standing_charge} onChange={set("contracted_standing_charge")} /></Field>
+      </div>
+      <div className="sub" style={{ fontSize: 11.5, marginBottom: 10 }}>
+        The contracted rates come from the contract or LOA — they are what each bill is checked against, so they are never read from the bills themselves.
+      </div>
+
+      <div className="form-section-title">The bills</div>
+      <label style={{ display: "block", padding: "14px 16px", border: "2px dashed var(--line,#CBD5E1)", borderRadius: 10,
+        cursor: busy ? "wait" : "pointer", background: "#F8FAFC", marginBottom: 8 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <Upload size={18} />
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>
+              {busy === "reading" ? "Reading files…" : files.length ? `${files.length} bill(s) chosen — click to replace` : "Choose the monthly bill PDFs"}
+            </div>
+            <div className="sub" style={{ fontSize: 11.5 }}>
+              Select a whole folder of months at once. Each PDF becomes its own validation, with its period and figures read from the bill.
+            </div>
+          </div>
+        </div>
+        <input type="file" accept="application/pdf,.pdf" multiple onChange={onFiles} disabled={!!busy} style={{ display: "none" }} />
+      </label>
+
+      {result && (
+        <>
+          {result.needs_rates && (
+            <div style={{ background: "#fff7ed", border: "1px solid #fed7aa", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, marginTop: 10 }}>
+              No contracted unit rate was found on that contract, so these bills have nothing to be checked against — the claim shown counts the whole energy charge.
+              Enter the contracted rates above and check again before saving.
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", margin: "10px 0 8px", fontSize: 12.5 }}>
+            <Badge tone="green">{result.readable} read</Badge>
+            {result.failed > 0 && <Badge tone="rose">{result.failed} could not be read</Badge>}
+            <span className="sub">Ticked: <b>{chosen.length}</b> · claim {money(chosenClaim)}</span>
+          </div>
+          <div className="table-wrap" style={{ maxHeight: 300, overflow: "auto" }}>
+            <table className="tbl">
+              <thead><tr><th></th><th>File</th><th>Period</th><th>Days</th><th style={{ textAlign: "right" }}>kWh</th><th style={{ textAlign: "right" }}>Unit</th><th style={{ textAlign: "right" }}>Claim</th><th>Status</th><th>Notes</th></tr></thead>
+              <tbody>
+                {result.bills.map((b) => (
+                  <tr key={b.filename} style={b.error ? { background: "#fff1f2" } : (b.duplicate_in_batch || b.duplicate_flag) ? { background: "#fff7ed" } : undefined}>
+                    <td>{!b.error && (
+                      <input type="checkbox" checked={!skip[b.filename]}
+                        onChange={() => setSkip({ ...skip, [b.filename]: !skip[b.filename] })}
+                        style={{ accentColor: "var(--brand,#4F46E5)" }} />
+                    )}</td>
+                    <td style={{ fontSize: 11.5 }}>{b.filename}</td>
+                    <td style={{ fontSize: 12 }}>{b.error ? "—" : b.period}</td>
+                    <td className="mono">{b.days ?? "—"}</td>
+                    <td className="mono" style={{ textAlign: "right" }}>{b.consumption == null ? "—" : Number(b.consumption).toLocaleString("en-GB")}</td>
+                    <td className="mono" style={{ textAlign: "right" }}>{b.unit_rate == null ? "—" : `${b.unit_rate}p`}</td>
+                    <td className="mono" style={{ textAlign: "right" }}>{b.error ? "—" : money(b.claim)}</td>
+                    <td>{b.error ? <Badge tone="rose">Failed</Badge> : <Badge tone={stTone(b.status)}>{b.status}</Badge>}</td>
+                    <td style={{ fontSize: 11 }}>
+                      {b.error || [
+                        b.duplicate_in_batch ? `Same period as ${b.duplicate_in_batch}` : null,
+                        b.duplicate_flag ? "Already validated on file" : null,
+                        b.needs_rates ? "No contracted rate to compare against" : null,
+                        ...(b.warnings || []),
+                      ].filter(Boolean).join(" · ") || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="sub" style={{ fontSize: 11, marginTop: 6 }}>
+            Repeated periods are unticked for you. Check the figures read from each bill before saving — anything a claim rests on should be seen by a person first.
+          </div>
+        </>
       )}
     </Modal>
   );
