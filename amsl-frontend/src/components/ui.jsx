@@ -55,8 +55,11 @@ export function ErrorBanner({ error, onRetry }) {
 
 export function Modal({ title, onClose, children, footer, wide }) {
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()} style={wide ? { maxWidth: 720, width: "92vw" } : undefined}>
+    // Clicking the backdrop does NOT close the modal: a stray click beside a long form
+    // used to throw away everything typed into it, with no way back. Closing is deliberate
+    // — the X in the corner, or the modal's own Cancel/Close button.
+    <div className="overlay">
+      <div className="modal" style={wide ? { maxWidth: 720, width: "92vw" } : undefined}>
         <div className="m-head">
           <h3 style={{ fontSize: 16 }}>{title}</h3>
           <button className="btn ghost" onClick={onClose}><X size={18} /></button>
